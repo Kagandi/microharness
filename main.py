@@ -5,10 +5,10 @@ Demonstrates:
 2. Workspace isolation & sandboxing.
 3. Real bash and file tool execution.
 4. Large log truncation + spill to disk (.logs/).
-5. Context memory compaction.
+5. Context memory compaction across turns.
 6. Structured tracing (trace.json and trace.md).
 7. Automated post-run evaluation.
-8. True pluggability: custom user instructions or predefined demo tasks.
+8. Interactive multi-turn chat sessions + batch benchmark mode.
 """
 
 from __future__ import annotations
@@ -120,20 +120,25 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="mini-harness: Run an AI agent on any task or built-in demo.",
-        usage="%(prog)s [instruction] [--demo {calculator,greeting}] [options]",
+        description="mini-harness: Interactive AI coding agent harness.",
+        usage="%(prog)s [instruction] [--batch] [--demo {calculator,greeting}] [options]",
     )
     parser.add_argument(
         "instruction",
         nargs="?",
         default=None,
-        help="Custom instruction for the agent to execute (e.g. 'Write a python script that prints primes')",
+        help="Initial instruction for the agent (e.g. 'Create a python script that prints primes')",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Run single one-shot task and exit immediately without entering interactive chat",
     )
     parser.add_argument(
         "--demo",
         choices=["calculator", "greeting"],
         default=None,
-        help="Run a built-in educational demo task instead of a custom instruction",
+        help="Run a built-in educational benchmark demo (runs in batch mode with evaluation)",
     )
     parser.add_argument(
         "--endpoint",
@@ -150,48 +155,9 @@ def main():
         default=os.getenv("MODEL_API_KEY", os.getenv("OPENROUTER_API_KEY")),
         help="API key (env: MODEL_API_KEY or OPENROUTER_API_KEY)",
     )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=10,
-        help="Maximum number of steps before halting (default: 10)",
-    )
     args = parser.parse_args()
 
-    # 1. Resolve instruction: Positional arg > --demo > Interactive prompt
-    task_instruction = args.instruction
-    evaluator: Evaluator | None = None
-    task: Task
-
-    if task_instruction:
-        task = Task(
-            id="user_task",
-            instruction=task_instruction.strip(),
-            max_steps=args.max_steps,
-            timeout_seconds=90.0,
-        )
-    elif args.demo == "calculator":
-        task, evaluator = create_calculator_demo()
-    elif args.demo == "greeting":
-        task, evaluator = create_greeting_demo()
-    else:
-        # If interactive terminal, prompt user for what they want to do
-        if sys.stdin.isatty():
-            print("mini-harness: No instruction provided.")
-            user_input = input("Enter your task instruction (or press Enter for demo): ").strip()
-            if user_input:
-                task = Task(
-                    id="user_task",
-                    instruction=user_input,
-                    max_steps=args.max_steps,
-                    timeout_seconds=90.0,
-                )
-            else:
-                task, evaluator = create_calculator_demo()
-        else:
-            task, evaluator = create_calculator_demo()
-
-    # 2. Select Model: Live endpoint if configured, else offline MockModel
+    # 1. Select Model
     if args.endpoint:
         model_name = args.model or "cohere/north-mini-code:free"
         print(f"🔌 Connected to: {args.endpoint} (model: {model_name})")
@@ -205,25 +171,34 @@ def main():
         print("Tip: Add MODEL_ENDPOINT to .env or pass --endpoint to use a live model.\n")
         model = build_mock_agent_script()
 
-    # 3. Initialize Harness and Run
-    harness = Harness(
-        model=model,
-        evaluator=evaluator,
-        max_tool_chars=2000,
-        max_context_chars=8000,
-        verbose=True,
-    )
+    # 2. If --demo is passed or --batch without instruction, run Batch Mode
+    if args.demo:
+        task, evaluator = create_calculator_demo() if args.demo == "calculator" else create_greeting_demo()
+        harness = Harness(model=model, evaluator=evaluator, verbose=True)
+        result = harness.run(task)
+        print("=" * 60)
+        print(f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})")
+        print(f"Total Steps: {result.total_steps}")
+        print(f"Workspace: {result.workspace_path}")
+        print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+        print("=" * 60)
+        return
 
-    result = harness.run(task)
+    if args.batch and args.instruction:
+        task = Task(id="user_task", instruction=args.instruction.strip())
+        harness = Harness(model=model, verbose=True)
+        result = harness.run(task)
+        print("=" * 60)
+        print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
+        print(f"Total Steps: {result.total_steps}")
+        print(f"Workspace: {result.workspace_path}")
+        print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+        print("=" * 60)
+        return
 
-    print("=" * 60)
-    print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
-    if result.eval_result:
-        print(f"Evaluation Score: {result.score}")
-    print(f"Total Steps: {result.total_steps}")
-    print(f"Workspace: {result.workspace_path}")
-    print(f"Markdown Trace: {Path(result.trace_path).parent / 'trace.md'}")
-    print("=" * 60)
+    # 3. Default: Interactive Session Mode
+    harness = Harness(model=model, verbose=True)
+    harness.run_interactive(initial_instruction=args.instruction)
 
 
 if __name__ == "__main__":

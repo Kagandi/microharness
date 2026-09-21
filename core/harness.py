@@ -13,7 +13,7 @@ from core.model import Model
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import BashTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
-from core.types import EvalResult, RunResult, Task
+from core.types import EvalResult, Message, RunResult, Task
 
 
 class Harness:
@@ -25,8 +25,8 @@ class Harness:
         tools: Optional[list[Tool]] = None,
         evaluator: Optional[Evaluator] = None,
         runs_dir: Optional[Path | str] = None,
-        max_tool_chars: int = 3000,
-        max_context_chars: int = 15000,
+        max_tool_chars: int = 2000,
+        max_context_chars: int = 8000,
         verbose: bool = True,
     ):
         self.model = model
@@ -37,54 +37,58 @@ class Harness:
         self.max_context_chars = max_context_chars
         self.verbose = verbose
 
-    def run(self, task: Task) -> RunResult:
-        run_start = time.time()
+    def _setup_run(self, task_id: str, system_prompt: str, initial_instruction: str, initial_files: dict[str, str]) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = self.runs_dir / f"{task.id}_{timestamp}"
+        run_dir = self.runs_dir / f"{task_id}_{timestamp}"
         workspace_dir = run_dir / "workspace"
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.verbose:
-            print(f"\n🚀 Starting Harness for Task: {task.id}")
-            print(f"📁 Workspace: {workspace_dir}")
-            print(f"📝 Instruction: {task.instruction.strip()}\n")
-
-        # 1. Setup Isolated Environment & Sandbox
         env = Environment(workspace_dir=workspace_dir, cleanup_on_teardown=False)
-        if task.initial_files:
-            env.populate_files(task.initial_files)
+        if initial_files:
+            env.populate_files(initial_files)
 
-        # 2. Setup Tool Registry
         tool_registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
         if self.custom_tools:
             for t in self.custom_tools:
                 tool_registry.register(t)
         else:
-            # Register standard SWE tools
             tool_registry.register(BashTool(env))
             tool_registry.register(ReadFileTool(env))
             tool_registry.register(WriteFileTool(env))
 
-        # 3. Setup Memory & Context Management
-        system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
         memory = Memory(
             system_prompt=system_prompt,
-            user_prompt=task.instruction,
+            user_prompt=initial_instruction,
             max_context_chars=self.max_context_chars,
         )
 
-        # 4. Setup Telemetry & Tracer
+        task = Task(id=task_id, instruction=initial_instruction, initial_files=initial_files)
         tracer = Tracer(task=task, output_dir=run_dir, verbose=self.verbose)
-
-        # 5. Initialize Pure Agent Loop
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
+
+        return env, tool_registry, memory, tracer, loop, run_dir
+
+    def run(self, task: Task) -> RunResult:
+        """One-shot batch execution mode (e.g. for benchmarks or tests)."""
+        run_start = time.time()
+        system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
+
+        env, _, _, tracer, loop, run_dir = self._setup_run(
+            task_id=task.id,
+            system_prompt=system_prompt,
+            initial_instruction=task.instruction,
+            initial_files=task.initial_files,
+        )
+
+        if self.verbose:
+            print(f"\n🚀 Starting Harness for Task: {task.id}")
+            print(f"📁 Workspace: {env.workspace_dir}")
+            print(f"📝 Instruction: {task.instruction.strip()}\n")
 
         finish_reason = "max_steps_exceeded"
         step_idx = 1
 
-        # 6. Execute Loop under Guardrails & Budgets
         while step_idx <= task.max_steps:
-            # Check timeout budget
             elapsed = time.time() - run_start
             if elapsed > task.timeout_seconds:
                 finish_reason = "timeout"
@@ -108,7 +112,6 @@ class Harness:
         total_duration = time.time() - run_start
         total_steps = len(tracer.steps)
 
-        # 7. Post-Run Evaluation
         eval_result: Optional[EvalResult] = None
         if self.evaluator:
             if self.verbose:
@@ -119,17 +122,12 @@ class Harness:
                 print(f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})")
                 print(f"Feedback: {eval_result.feedback.strip()}")
 
-        # 8. Finalize Telemetry and Traces
         json_trace_path, md_trace_path = tracer.finalize(
             finish_reason=finish_reason, eval_result=eval_result
         )
 
         passed = eval_result.passed if eval_result else (finish_reason == "completed")
         score = eval_result.score if eval_result else (1.0 if passed else 0.0)
-
-        if self.verbose:
-            print(f"\n🏁 Finished run in {total_duration:.2f}s across {total_steps} steps.")
-            print(f"📄 Trace saved to: {md_trace_path}\n")
 
         return RunResult(
             task_id=task.id,
@@ -139,6 +137,62 @@ class Harness:
             duration_s=total_duration,
             finish_reason=finish_reason,
             trace_path=str(json_trace_path),
-            workspace_path=str(workspace_dir),
+            workspace_path=str(env.workspace_dir),
             eval_result=eval_result,
         )
+
+    def run_interactive(self, initial_instruction: Optional[str] = None, task_id: str = "interactive_session") -> None:
+        """Interactive multi-turn session mode allowing continuous conversation."""
+        first_instruction = initial_instruction or input("👤 You: ").strip()
+        if not first_instruction:
+            print("No instruction provided. Exiting.")
+            return
+
+        env, _, memory, tracer, loop, run_dir = self._setup_run(
+            task_id=task_id,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            initial_instruction=first_instruction,
+            initial_files={},
+        )
+
+        print(f"\n🚀 Interactive Session Started")
+        print(f"📁 Workspace: {env.workspace_dir}")
+        print("💡 Type 'exit' or 'quit' anytime to end the session.\n")
+
+        step_idx = 1
+        current_instruction: Optional[str] = first_instruction
+
+        while current_instruction:
+            # Run the agent loop until the agent answers (no more tool calls)
+            while True:
+                try:
+                    is_finished, step_trace = loop.step(step_index=step_idx)
+                    tracer.record_step(step_trace)
+                    step_idx += 1
+
+                    if is_finished:
+                        agent_reply = step_trace.model_response.get("content", "")
+                        print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
+                        break
+                except Exception as exc:
+                    print(f"\n❌ Error during turn: {exc}")
+                    break
+
+            # Prompt user for follow-up instruction
+            try:
+                user_followup = input("👤 You: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nSession interrupted.")
+                break
+
+            if not user_followup or user_followup.lower() in ("exit", "quit", "/exit", "/quit"):
+                print("\nEnding session.")
+                break
+
+            # Feed follow-up into persistent memory
+            memory.messages.append(Message(role="user", content=user_followup))
+            current_instruction = user_followup
+
+        # Finalize and export session trace
+        json_path, md_path = tracer.finalize(finish_reason="session_ended")
+        print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")

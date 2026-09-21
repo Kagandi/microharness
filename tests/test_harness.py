@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from core.evaluator import FileContentEvaluator
 from core.harness import Harness
@@ -116,6 +117,39 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.finish_reason, "error")
         self.assertFalse(result.passed)
         self.assertTrue(Path(result.trace_path).exists())
+
+    def test_interactive_multi_turn_session(self):
+        # Scripted model that handles 2 interactive turns:
+        # Turn 1: writes step1.txt, then yields text
+        # Turn 2: writes step2.txt, then yields text
+        script = [
+            ("Writing step 1", [ToolCall(id="t1", name="write_file", arguments={"path": "step1.txt", "content": "hello 1"})]),
+            ("Finished turn 1.", []),
+            ("Writing step 2", [ToolCall(id="t2", name="write_file", arguments={"path": "step2.txt", "content": "hello 2"})]),
+            ("Finished turn 2.", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
+
+        # Mock user typing follow-up and then 'exit'
+        user_inputs = iter(["Now do step 2", "exit"])
+        with patch("builtins.input", lambda *args: next(user_inputs)):
+            harness.run_interactive(initial_instruction="Start step 1")
+
+        # Invariant: Files from both turns exist in the same workspace!
+        latest_run = max(Path(self.runs_dir).glob("interactive_session_*"))
+        workspace = latest_run / "workspace"
+        self.assertTrue((workspace / "step1.txt").exists())
+        self.assertTrue((workspace / "step2.txt").exists())
+        self.assertEqual((workspace / "step1.txt").read_text(), "hello 1")
+        self.assertEqual((workspace / "step2.txt").read_text(), "hello 2")
+
+        # Invariant: Trace captured all turns across the session
+        trace_json = latest_run / "trace.json"
+        self.assertTrue(trace_json.exists())
+        trace_data = json.loads(trace_json.read_text(encoding="utf-8"))
+        self.assertEqual(trace_data["finish_reason"], "session_ended")
+        self.assertEqual(len(trace_data["steps"]), 4)
 
 
 if __name__ == "__main__":

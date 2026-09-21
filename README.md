@@ -15,6 +15,33 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
+## 💬 Continuous Interactive Chat
+
+Unlike single-shot test runners, `mini-harness` maintains persistent conversation memory and an isolated workspace throughout your session so you can chat with the agent continuously:
+
+```bash
+uv run mini-harness "Create a python script called fib.py that computes the 10th fibonacci number"
+```
+
+When the agent finishes its initial action, the session stays open:
+```text
+🤖 Agent: I have created fib.py and tested it with python3. Output is 55.
+
+👤 You: Now add unit tests in test_fib.py and run unittest
+...
+🤖 Agent: Created test_fib.py and verified that all tests passed.
+
+👤 You: exit
+📄 Complete session trace saved to: .runs/interactive_session_*/trace.md
+```
+
+If you prefer a one-and-done batch run (e.g. for CI), pass `--batch`:
+```bash
+uv run mini-harness "Run pytest and fix any errors" --batch
+```
+
+---
+
 ## ⚡ Quickstart with `uv`
 
 ### 1. Install & Sync Environment
@@ -26,15 +53,15 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 16 unit and integration tests run in ~1.3s)*
+*(All 24 unit and integration tests run in ~0.4s)*
 
-### 3. Run the Agent
+### 3. Run Predefined Benchmark Demos
 ```bash
-# Run the demo task (reads .env automatically if present):
-uv run mini-harness
+# Calculator SWE bug-fix benchmark with automated grading:
+uv run mini-harness --demo calculator
 
-# Or with custom options:
-uv run mini-harness --task greeting --model cohere/north-mini-code:free
+# Lightweight greeting benchmark:
+uv run mini-harness --demo greeting
 ```
 
 ---
@@ -52,7 +79,11 @@ harness = Harness(
     tools=[bash_tool, my_tool], # Custom tools
     evaluator=my_evaluator,     # Custom evaluator
 )
+# Batch mode:
 harness.run(task)
+
+# Or interactive mode:
+harness.run_interactive(initial_instruction="Start here")
 ```
 
 ---
@@ -69,8 +100,8 @@ harness.run(task)
    - Head + tail truncation preserves the initial setup and final stack trace/errors.
    - The full, raw output is spilled to `.logs/step_N.log` inside the workspace so the model can inspect it using tools (e.g. `grep` or `read_file`).
 
-3. **Context & Memory Compaction (`core/memory.py`)**
-   - Tracks conversation history.
+3. **Context & Memory Compaction Across Turns (`core/memory.py`)**
+   - Tracks conversation history across multiple turns.
    - When context size exceeds a threshold, older tool observations in middle turns are compacted into concise markers (`[Tool output collapsed...]`) while preserving the system prompt, initial task, and recent turns.
 
 4. **Structured Tracing & Debugging (`core/tracer.py`)**
@@ -102,14 +133,14 @@ mini-harness/
 │   ├── loop.py         # Pure ReAct loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py       # Telemetry collector & trace exporter
-│   └── harness.py      # Harness orchestrator
+│   └── harness.py      # Harness orchestrator (supports batch and interactive chat)
 └── tests/
     ├── test_environment.py # Path sandboxing & bash timeout tests
     ├── test_tools.py       # Tools, truncation & disk spillover tests
     ├── test_memory.py      # Conversation history & compaction tests
     ├── test_model.py       # Endpoint normalization & mock model tests
     ├── test_evaluator.py   # Grader assertions tests
-    └── test_harness.py     # End-to-end lifecycle & guardrails tests
+    └── test_harness.py     # End-to-end lifecycle, multi-turn chat & guardrails tests
 ```
 
 ---
