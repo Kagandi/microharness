@@ -15,11 +15,29 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from core.evaluator import CommandTestEvaluator
 from core.harness import Harness
 from core.model import HttpChatModel, MockModel, Model
 from core.types import Task, ToolCall
+
+
+def load_dotenv(path: str = ".env") -> None:
+    """Minimal zero-dependency .env file loader."""
+    env_file = Path(path)
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip("'\"")
+        # Existing environment variables take precedence over .env file
+        if key and key not in os.environ:
+            os.environ[key] = val
 
 
 def create_demo_task() -> Task:
@@ -136,25 +154,28 @@ def build_mock_agent_script() -> MockModel:
 
 
 def main():
+    # Load .env file automatically if present
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Run the mini-harness educational demonstration.")
     parser.add_argument(
         "--endpoint",
         default=os.getenv("MODEL_ENDPOINT"),
-        help="HTTP chat completions endpoint (e.g. 'http://localhost:11434/v1', 'https://openrouter.ai/api/v1')",
+        help="HTTP chat completions endpoint (env: MODEL_ENDPOINT)",
     )
     parser.add_argument(
         "--model",
         default=os.getenv("MODEL_NAME"),
-        help="Model identifier (e.g. 'qwen2.5-coder', 'anthropic/claude-3.5-sonnet')",
+        help="Model identifier (env: MODEL_NAME)",
     )
     parser.add_argument(
         "--api-key",
         default=os.getenv("MODEL_API_KEY", os.getenv("OPENROUTER_API_KEY")),
-        help="API key if required by the endpoint",
+        help="API key (env: MODEL_API_KEY or OPENROUTER_API_KEY)",
     )
     args = parser.parse_args()
 
-    # 1. Select Model: If an endpoint is supplied, use the generic HttpChatModel; otherwise use MockModel.
+    # 1. Select Model: If an endpoint is configured, connect via HttpChatModel; else use MockModel.
     if args.endpoint:
         model_name = args.model or "qwen2.5-coder"
         print(f"🔌 Connected to: {args.endpoint} (model: {model_name})")
@@ -165,7 +186,7 @@ def main():
         )
     else:
         print("🎓 Running with deterministic MockModel (offline, no endpoint needed).")
-        print("Tip: Pass --endpoint <url> and --model <name> to connect any live model.\n")
+        print("Tip: Add MODEL_ENDPOINT to .env or pass --endpoint to connect a live model.\n")
         model = build_mock_agent_script()
 
     # 2. Define Evaluator (tests must pass with exit code 0)
