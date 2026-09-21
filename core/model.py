@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -10,28 +9,39 @@ from core.types import Message, ToolCall
 
 
 class Model(Protocol):
-    """Protocol for pluggable LLM callers."""
+    """Protocol for pluggable LLM callers.
+
+    Any class or adapter with a `generate` method can be plugged directly
+    into the Harness without modifying any harness code.
+    """
 
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]:
-        """Given conversation history and tool schemas, returns (response_text, tool_calls)."""
         ...
 
 
-class _BaseHttpChatModel:
-    """Base helper for HTTP chat completion endpoints with tool calling."""
+class HttpChatModel:
+    """A generic HTTP model client for any OpenAI-compatible completions endpoint.
+
+    Works identically with:
+    - OpenRouter (https://openrouter.ai/api/v1)
+    - Ollama (http://localhost:11434/v1)
+    - vLLM (http://localhost:8000/v1)
+    - LM Studio (http://localhost:1234/v1)
+    - Any standard completions gateway
+    """
 
     def __init__(
         self,
         base_url: str,
-        model_name: str,
+        model: str,
         api_key: str | None = None,
         headers: dict[str, str] | None = None,
-        timeout: float = 60.0,
+        timeout: float = 90.0,
     ):
         self.base_url = base_url.rstrip("/")
-        self.model_name = model_name
+        self.model = model
         self.api_key = api_key
         self.extra_headers = headers or {}
         self.timeout = timeout
@@ -40,12 +50,12 @@ class _BaseHttpChatModel:
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]:
         endpoint = f"{self.base_url}/chat/completions"
-        headers = {
+        req_headers = {
             "Content-Type": "application/json",
             **self.extra_headers,
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            req_headers["Authorization"] = f"Bearer {self.api_key}"
 
         formatted_messages = []
         for msg in messages:
@@ -69,7 +79,7 @@ class _BaseHttpChatModel:
             formatted_messages.append(item)
 
         payload: dict[str, Any] = {
-            "model": self.model_name,
+            "model": self.model,
             "messages": formatted_messages,
         }
         if tools:
@@ -79,7 +89,7 @@ class _BaseHttpChatModel:
         req = urllib.request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
+            headers=req_headers,
             method="POST",
         )
 
@@ -96,8 +106,6 @@ class _BaseHttpChatModel:
                 f"Could not connect to model endpoint at {endpoint}.\n"
                 f"Is the server running and reachable? (Detail: {exc.reason})"
             ) from exc
-        except Exception as exc:
-            raise RuntimeError(f"Unexpected error communicating with model: {exc}") from exc
 
         choice = res_body["choices"][0]["message"]
         content = choice.get("content") or ""
@@ -119,56 +127,8 @@ class _BaseHttpChatModel:
         return content, tool_calls
 
 
-class OpenRouterModel(_BaseHttpChatModel):
-    """Direct API caller for OpenRouter (https://openrouter.ai)."""
-
-    def __init__(
-        self,
-        model_name: str = "anthropic/claude-3.5-sonnet",
-        api_key: str | None = None,
-        site_url: str = "https://github.com/mini-harness",
-        app_name: str = "mini-harness",
-        timeout: float = 90.0,
-    ):
-        key = api_key or os.getenv("OPENROUTER_API_KEY", "")
-        if not key:
-            raise ValueError(
-                "OPENROUTER_API_KEY is not set. Please set the environment variable or pass api_key."
-            )
-        super().__init__(
-            base_url="https://openrouter.ai/api/v1",
-            model_name=model_name,
-            api_key=key,
-            headers={
-                "HTTP-Referer": site_url,
-                "X-Title": app_name,
-            },
-            timeout=timeout,
-        )
-
-
-class LocalEndpointModel(_BaseHttpChatModel):
-    """Direct caller for local endpoints (e.g. Ollama, vLLM, LM Studio, LocalAI)."""
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434/v1",
-        model_name: str = "qwen2.5-coder",
-        api_key: str | None = "dummy-local-key",
-        timeout: float = 120.0,
-    ):
-        configured_url = os.getenv("LOCAL_API_BASE", base_url)
-        configured_model = os.getenv("LOCAL_MODEL_NAME", model_name)
-        super().__init__(
-            base_url=configured_url,
-            model_name=configured_model,
-            api_key=api_key,
-            timeout=timeout,
-        )
-
-
 class MockModel:
-    """A deterministic scripted model for offline testing and educational demonstrations."""
+    """Deterministic model for offline testing and educational walkthroughs."""
 
     def __init__(self, script: list[tuple[str, list[ToolCall]]]):
         self.script = list(script)

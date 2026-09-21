@@ -8,17 +8,17 @@ Demonstrates:
 5. Context memory compaction.
 6. Structured tracing (trace.json and trace.md).
 7. Automated post-run evaluation.
-8. Pluggable models: MockModel (offline), OpenRouter, or Local endpoint (Ollama/vLLM/LM Studio).
+8. True pluggability: plug in any Model, Tools, or Evaluators without modifying the harness.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
+import os
 
 from core.evaluator import CommandTestEvaluator
 from core.harness import Harness
-from core.model import LocalEndpointModel, MockModel, Model, OpenRouterModel
+from core.model import HttpChatModel, MockModel, Model
 from core.types import Task, ToolCall
 
 
@@ -63,7 +63,7 @@ def create_demo_task() -> Task:
 
 
 def build_mock_agent_script() -> MockModel:
-    """Builds a deterministic scripted model demonstrating the full agent trajectory."""
+    """Deterministic scripted model demonstrating the full agent trajectory."""
     fixed_code = (
         "def add(a: float, b: float) -> float:\n"
         "    return a + b\n\n"
@@ -74,7 +74,6 @@ def build_mock_agent_script() -> MockModel:
     )
 
     script = [
-        # Step 1: Initial test run
         (
             "I will first run the tests to inspect what fails.",
             [
@@ -85,7 +84,6 @@ def build_mock_agent_script() -> MockModel:
                 )
             ],
         ),
-        # Step 2: Verbose diagnostic run (demonstrating log truncation)
         (
             "Let me print a verbose diagnostic report to see system details.",
             [
@@ -98,7 +96,6 @@ def build_mock_agent_script() -> MockModel:
                 )
             ],
         ),
-        # Step 3: Inspect code
         (
             "Now let's inspect the calculator implementation.",
             [
@@ -109,7 +106,6 @@ def build_mock_agent_script() -> MockModel:
                 )
             ],
         ),
-        # Step 4: Write fix
         (
             "I see the bug: `divide` performs multiplication and does not raise `ValueError` on 0. Fixing it now.",
             [
@@ -120,7 +116,6 @@ def build_mock_agent_script() -> MockModel:
                 )
             ],
         ),
-        # Step 5: Verification test run
         (
             "Now re-running unit tests to verify the fix.",
             [
@@ -131,7 +126,6 @@ def build_mock_agent_script() -> MockModel:
                 )
             ],
         ),
-        # Step 6: Final answer
         (
             "The tests now pass completely. The bug in `calculator.py` has been resolved.",
             [],
@@ -141,55 +135,38 @@ def build_mock_agent_script() -> MockModel:
     return MockModel(script=script)
 
 
-def get_model(provider: str, model_name: str | None, base_url: str | None) -> Model:
-    """Instantiates the requested pluggable model."""
-    if provider == "mock":
-        print("🎓 Running with deterministic MockModel (offline, no API key needed).")
-        return build_mock_agent_script()
-
-    elif provider == "openrouter":
-        chosen_model = model_name or "anthropic/claude-3.5-sonnet"
-        print(f"🌐 Running with OpenRouter | Model: {chosen_model}")
-        try:
-            return OpenRouterModel(model_name=chosen_model)
-        except ValueError as exc:
-            print(f"❌ Configuration error: {exc}")
-            print("Tip: export OPENROUTER_API_KEY='sk-or-...'")
-            sys.exit(1)
-
-    elif provider == "local":
-        endpoint = base_url or "http://localhost:11434/v1"
-        chosen_model = model_name or "qwen2.5-coder"
-        print(f"💻 Running with Local Endpoint | URL: {endpoint} | Model: {chosen_model}")
-        return LocalEndpointModel(base_url=endpoint, model_name=chosen_model)
-
-    else:
-        print(f"❌ Unknown provider '{provider}'. Choose from: mock, openrouter, local.")
-        sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run the mini-harness educational demonstration.")
     parser.add_argument(
-        "--provider",
-        choices=["mock", "openrouter", "local"],
-        default="mock",
-        help="LLM provider: 'mock' (offline), 'openrouter', or 'local' (default: mock)",
+        "--endpoint",
+        default=os.getenv("MODEL_ENDPOINT"),
+        help="HTTP chat completions endpoint (e.g. 'http://localhost:11434/v1', 'https://openrouter.ai/api/v1')",
     )
     parser.add_argument(
         "--model",
-        default=None,
-        help="Model identifier (e.g. 'anthropic/claude-3.5-sonnet', 'deepseek/deepseek-chat', 'qwen2.5-coder')",
+        default=os.getenv("MODEL_NAME"),
+        help="Model identifier (e.g. 'qwen2.5-coder', 'anthropic/claude-3.5-sonnet')",
     )
     parser.add_argument(
-        "--base-url",
-        default=None,
-        help="Custom base URL for local endpoint (e.g. 'http://localhost:11434/v1' for Ollama, 'http://localhost:8000/v1' for vLLM)",
+        "--api-key",
+        default=os.getenv("MODEL_API_KEY", os.getenv("OPENROUTER_API_KEY")),
+        help="API key if required by the endpoint",
     )
     args = parser.parse_args()
 
-    # 1. Initialize Model
-    model = get_model(provider=args.provider, model_name=args.model, base_url=args.base_url)
+    # 1. Select Model: If an endpoint is supplied, use the generic HttpChatModel; otherwise use MockModel.
+    if args.endpoint:
+        model_name = args.model or "qwen2.5-coder"
+        print(f"🔌 Connected to: {args.endpoint} (model: {model_name})")
+        model: Model = HttpChatModel(
+            base_url=args.endpoint,
+            model=model_name,
+            api_key=args.api_key,
+        )
+    else:
+        print("🎓 Running with deterministic MockModel (offline, no endpoint needed).")
+        print("Tip: Pass --endpoint <url> and --model <name> to connect any live model.\n")
+        model = build_mock_agent_script()
 
     # 2. Define Evaluator (tests must pass with exit code 0)
     evaluator = CommandTestEvaluator(
@@ -197,12 +174,12 @@ def main():
         expected_exit_code=0,
     )
 
-    # 3. Initialize Harness
+    # 3. Initialize Harness (plugs in the chosen model, evaluator, and defaults)
     harness = Harness(
         model=model,
         evaluator=evaluator,
-        max_tool_chars=1200,    # Triggers truncation demo on long logs
-        max_context_chars=3500,  # Triggers compaction demo on large history
+        max_tool_chars=1200,    # Truncation demonstration threshold
+        max_context_chars=3500,  # Compaction demonstration threshold
         verbose=True,
     )
 

@@ -8,10 +8,28 @@ Built with **zero external dependencies** (standard library only) to teach the c
 
 ## 💡 The Core Mental Model: Harness vs. Loop
 
-| Component | Responsibility | Examples in `mini-harness` |
+| Component | Responsibility | Location in `mini-harness` |
 | :--- | :--- | :--- |
 | **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
 | **Harness** *(The Chassis)* | The outer environment: sandboxing, guardrails/budgets, memory compaction, telemetry/tracing, and post-run grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
+
+---
+
+## 🔑 True Pluggability (Zero Code Modifications)
+
+Because components follow minimal Python `Protocols`, you can plug in any Model, Tool, or Evaluator from the outside without touching a single line of harness code:
+
+```python
+from core.harness import Harness
+
+# Plug in ANY object or adapter that implements `generate(messages, tools)`
+harness = Harness(
+    model=my_custom_model,      # Or HttpChatModel(endpoint, model, key)
+    tools=[bash_tool, my_tool], # Custom tools
+    evaluator=my_evaluator,     # Custom evaluator
+)
+harness.run(task)
+```
 
 ---
 
@@ -28,7 +46,7 @@ Built with **zero external dependencies** (standard library only) to teach the c
    - The full, raw output is spilled to `.logs/step_N.log` inside the workspace so the model can inspect it using tools (e.g. `grep` or `read_file`).
 
 3. **Context & Memory Compaction (`core/memory.py`)**
-   - Tracks the ongoing conversation history.
+   - Tracks conversation history.
    - When context size exceeds a threshold, older tool observations in middle turns are compacted into concise markers (`[Tool output collapsed...]`) while preserving the system prompt, initial task, and recent turns.
 
 4. **Structured Tracing & Debugging (`core/tracer.py`)**
@@ -37,11 +55,6 @@ Built with **zero external dependencies** (standard library only) to teach the c
 
 5. **Automated Evaluation (`core/evaluator.py`)**
    - Evaluators test whether the agent actually succeeded (e.g. running test commands or asserting file contents).
-
-6. **Pluggable Model Architecture (`core/model.py`)**
-   - `MockModel`: Deterministic, offline replay model for testing without API keys or costs.
-   - `OpenRouterModel`: Direct API client for OpenRouter (`https://openrouter.ai/api/v1`) using standard library `urllib.request`.
-   - `LocalEndpointModel`: Direct client for local servers (Ollama, vLLM, LM Studio) without extra dependencies.
 
 ---
 
@@ -58,7 +71,7 @@ mini-harness/
     ├── environment.py  # Isolated workspace & bash runner
     ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
     ├── memory.py       # Context manager & compaction policies
-    ├── model.py        # Pluggable models (MockModel, OpenRouter, Local endpoints)
+    ├── model.py        # Model protocol, generic HttpChatModel & MockModel
     ├── loop.py         # Pure ReAct loop (~40 lines)
     ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
     ├── tracer.py       # Telemetry collector & trace exporter
@@ -69,9 +82,9 @@ mini-harness/
 
 ## 🚀 Quickstart
 
-### 1. Offline Educational Demo (No API Key needed)
+### 1. Offline Educational Demo (No API Key / Endpoint needed)
 ```bash
-python3 main.py --provider mock
+python3 main.py
 ```
 This executes a full software engineering bug-fix scenario with the built-in deterministic `MockModel`:
 - Runs tests and captures the initial test failure.
@@ -79,27 +92,27 @@ This executes a full software engineering bug-fix scenario with the built-in det
 - Inspects code, applies the bug fix, and triggers memory compaction.
 - Verifies test passage and grades the final workspace state.
 
-### 2. Live with OpenRouter
+### 2. Connect to Any Live Endpoint
+
+#### OpenRouter:
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
-
-# Default uses claude-3.5-sonnet:
-python3 main.py --provider openrouter
-
-# Or pick any model on OpenRouter:
-python3 main.py --provider openrouter --model deepseek/deepseek-chat
-python3 main.py --provider openrouter --model meta-llama/llama-3.3-70b-instruct
+python3 main.py \
+  --endpoint https://openrouter.ai/api/v1 \
+  --model anthropic/claude-3.5-sonnet \
+  --api-key sk-or-v1-...
 ```
 
-### 3. Live with Local Endpoint (Ollama / vLLM / LM Studio)
-Make sure your local server is running (e.g. `ollama run qwen2.5-coder`):
+#### Local Endpoint (Ollama / vLLM / LM Studio):
 ```bash
-# Default targets http://localhost:11434/v1 with qwen2.5-coder:
-python3 main.py --provider local
+# Ollama default:
+python3 main.py \
+  --endpoint http://localhost:11434/v1 \
+  --model qwen2.5-coder
 
-# Or specify a custom model and port:
-python3 main.py --provider local --model qwen2.5-coder:7b --base-url http://localhost:11434/v1
-python3 main.py --provider local --model mistralai/Mistral-7B-Instruct-v0.3 --base-url http://localhost:8000/v1
+# vLLM / Local server:
+python3 main.py \
+  --endpoint http://localhost:8000/v1 \
+  --model mistralai/Mistral-7B-Instruct-v0.3
 ```
 
 ---
