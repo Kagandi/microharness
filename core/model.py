@@ -49,6 +49,12 @@ class HttpChatModel:
         self.model = model
         self.api_key = api_key
         self.extra_headers = headers or {}
+        # OpenRouter recommends HTTP-Referer and X-Title
+        if "openrouter.ai" in self.endpoint:
+            if "HTTP-Referer" not in self.extra_headers:
+                self.extra_headers["HTTP-Referer"] = "https://github.com/mini-harness"
+            if "X-Title" not in self.extra_headers:
+                self.extra_headers["X-Title"] = "mini-harness"
         self.timeout = timeout
 
     def generate(

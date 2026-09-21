@@ -17,7 +17,7 @@ import argparse
 import os
 from pathlib import Path
 
-from core.evaluator import CommandTestEvaluator
+from core.evaluator import CommandTestEvaluator, FileContentEvaluator
 from core.harness import Harness
 from core.model import HttpChatModel, MockModel, Model
 from core.types import Task, ToolCall
@@ -40,8 +40,8 @@ def load_dotenv(path: str = ".env") -> None:
             os.environ[key] = val
 
 
-def create_demo_task() -> Task:
-    """Creates a sample software engineering task with an intentional bug."""
+def create_calculator_task() -> tuple[Task, CommandTestEvaluator]:
+    """Task: Investigate failing test suite and fix the bug in calculator.py."""
     initial_calculator_code = (
         "def add(a: float, b: float) -> float:\n"
         "    return a + b\n\n"
@@ -64,7 +64,7 @@ def create_demo_task() -> Task:
         "    unittest.main()\n"
     )
 
-    return Task(
+    task = Task(
         id="fix_calculator_bug",
         instruction=(
             "The calculator suite is failing. Run the unit tests using `python -m unittest test_calculator.py`.\n"
@@ -78,6 +78,26 @@ def create_demo_task() -> Task:
         max_steps=10,
         timeout_seconds=60.0,
     )
+    evaluator = CommandTestEvaluator(
+        command="python -m unittest test_calculator.py",
+        expected_exit_code=0,
+    )
+    return task, evaluator
+
+
+def create_greeting_task() -> tuple[Task, FileContentEvaluator]:
+    """A lightweight task ideal for free-tier or rate-limited models."""
+    task = Task(
+        id="write_greeting",
+        instruction="Create a file named greeting.txt with the content Hello from Harness using the write_file tool.",
+        max_steps=4,
+        timeout_seconds=30.0,
+    )
+    evaluator = FileContentEvaluator(
+        file_path="greeting.txt",
+        must_contain=["Hello from Harness"],
+    )
+    return task, evaluator
 
 
 def build_mock_agent_script() -> MockModel:
@@ -159,6 +179,12 @@ def main():
 
     parser = argparse.ArgumentParser(description="Run the mini-harness educational demonstration.")
     parser.add_argument(
+        "--task",
+        choices=["calculator", "greeting"],
+        default="greeting" if os.getenv("MODEL_ENDPOINT") else "calculator",
+        help="Task to run: 'calculator' (SWE bug fix) or 'greeting' (fast, light 2-step task)",
+    )
+    parser.add_argument(
         "--endpoint",
         default=os.getenv("MODEL_ENDPOINT"),
         help="HTTP chat completions endpoint (env: MODEL_ENDPOINT)",
@@ -177,7 +203,7 @@ def main():
 
     # 1. Select Model: If an endpoint is configured, connect via HttpChatModel; else use MockModel.
     if args.endpoint:
-        model_name = args.model or "qwen2.5-coder"
+        model_name = args.model or "cohere/north-mini-code:free"
         print(f"🔌 Connected to: {args.endpoint} (model: {model_name})")
         model: Model = HttpChatModel(
             base_url=args.endpoint,
@@ -189,13 +215,13 @@ def main():
         print("Tip: Add MODEL_ENDPOINT to .env or pass --endpoint to connect a live model.\n")
         model = build_mock_agent_script()
 
-    # 2. Define Evaluator (tests must pass with exit code 0)
-    evaluator = CommandTestEvaluator(
-        command="python -m unittest test_calculator.py",
-        expected_exit_code=0,
-    )
+    # 2. Select Task & Evaluator
+    if args.task == "greeting":
+        task, evaluator = create_greeting_task()
+    else:
+        task, evaluator = create_calculator_task()
 
-    # 3. Initialize Harness (plugs in the chosen model, evaluator, and defaults)
+    # 3. Initialize Harness
     harness = Harness(
         model=model,
         evaluator=evaluator,
@@ -205,7 +231,6 @@ def main():
     )
 
     # 4. Run Task
-    task = create_demo_task()
     result = harness.run(task)
 
     print("=" * 60)
