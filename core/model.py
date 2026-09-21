@@ -24,12 +24,11 @@ class Model(Protocol):
 class HttpChatModel:
     """A generic HTTP model client for any OpenAI-compatible completions endpoint.
 
-    Works identically with:
-    - OpenRouter (https://openrouter.ai/api/v1)
-    - Ollama (http://localhost:11434/v1)
-    - vLLM (http://localhost:8000/v1)
-    - LM Studio (http://localhost:1234/v1)
-    - Any standard completions gateway
+    Accepts either:
+    - A base URL (e.g. 'https://openrouter.ai/api/v1' or 'http://localhost:11434/v1')
+    - A full endpoint URL (e.g. 'https://openrouter.ai/api/v1/chat/completions')
+
+    Works identically with OpenRouter, Ollama, vLLM, LM Studio, etc.
     """
 
     def __init__(
@@ -40,7 +39,13 @@ class HttpChatModel:
         headers: dict[str, str] | None = None,
         timeout: float = 90.0,
     ):
-        self.base_url = base_url.rstrip("/")
+        clean_url = base_url.rstrip("/")
+        # Automatically handle both base URL and full /chat/completions URL
+        if not clean_url.endswith("/chat/completions"):
+            self.endpoint = f"{clean_url}/chat/completions"
+        else:
+            self.endpoint = clean_url
+
         self.model = model
         self.api_key = api_key
         self.extra_headers = headers or {}
@@ -49,7 +54,6 @@ class HttpChatModel:
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]:
-        endpoint = f"{self.base_url}/chat/completions"
         req_headers = {
             "Content-Type": "application/json",
             **self.extra_headers,
@@ -87,7 +91,7 @@ class HttpChatModel:
             payload["tool_choice"] = "auto"
 
         req = urllib.request.Request(
-            endpoint,
+            self.endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers=req_headers,
             method="POST",
@@ -99,11 +103,11 @@ class HttpChatModel:
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"Model API returned HTTP {exc.code} from {endpoint}:\n{err_body}"
+                f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
             ) from exc
         except urllib.error.URLError as exc:
             raise ConnectionError(
-                f"Could not connect to model endpoint at {endpoint}.\n"
+                f"Could not connect to model endpoint at {self.endpoint}.\n"
                 f"Is the server running and reachable? (Detail: {exc.reason})"
             ) from exc
 
