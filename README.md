@@ -64,19 +64,39 @@ harness.run(task)
 mini-harness/
 ├── SPEC.md             # Detailed specification & design rationale
 ├── README.md           # Quickstart and overview
+├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration
-└── core/
-    ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
-    ├── prompts.py      # System prompt templates
-    ├── environment.py  # Isolated workspace & bash runner
-    ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
-    ├── memory.py       # Context manager & compaction policies
-    ├── model.py        # Model protocol, generic HttpChatModel & MockModel
-    ├── loop.py         # Pure ReAct loop (~40 lines)
-    ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
-    ├── tracer.py       # Telemetry collector & trace exporter
-    └── harness.py      # Harness orchestrator
+├── core/
+│   ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
+│   ├── prompts.py      # System prompt templates
+│   ├── environment.py  # Isolated workspace & bash runner
+│   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
+│   ├── memory.py       # Context manager & compaction policies
+│   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
+│   ├── loop.py         # Pure ReAct loop (~40 lines)
+│   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
+│   ├── tracer.py       # Telemetry collector & trace exporter
+│   └── harness.py      # Harness orchestrator
+└── tests/
+    ├── test_environment.py # Path sandboxing & bash timeout tests
+    ├── test_tools.py       # Tools, truncation & disk spillover tests
+    ├── test_memory.py      # Conversation history & compaction tests
+    ├── test_model.py       # Endpoint normalization & mock model tests
+    ├── test_evaluator.py   # Grader assertions tests
+    └── test_harness.py     # End-to-end lifecycle & guardrails tests
 ```
+
+---
+
+## 🧪 Running the Test Suite
+
+Run the automated test suite with Python's standard library (no installs required):
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+All 16 unit and integration tests run in ~1.3s.
 
 ---
 
@@ -86,11 +106,6 @@ mini-harness/
 ```bash
 python3 main.py
 ```
-This executes a full software engineering bug-fix scenario with the built-in deterministic `MockModel`:
-- Runs tests and captures the initial test failure.
-- Triggers a verbose log to demonstrate log truncation and disk spillover.
-- Inspects code, applies the bug fix, and triggers memory compaction.
-- Verifies test passage and grades the final workspace state.
 
 ### 2. Connect to Any Live Endpoint
 
@@ -98,7 +113,7 @@ This executes a full software engineering bug-fix scenario with the built-in det
 ```bash
 python3 main.py \
   --endpoint https://openrouter.ai/api/v1 \
-  --model anthropic/claude-3.5-sonnet \
+  --model cohere/north-mini-code:free \
   --api-key sk-or-v1-...
 ```
 
@@ -108,11 +123,11 @@ python3 main.py \
 python3 main.py \
   --endpoint http://localhost:11434/v1 \
   --model qwen2.5-coder
+```
 
-# vLLM / Local server:
-python3 main.py \
-  --endpoint http://localhost:8000/v1 \
-  --model mistralai/Mistral-7B-Instruct-v0.3
+Or copy `.env.example` to `.env` and simply run:
+```bash
+python3 main.py
 ```
 
 ---
