@@ -9,11 +9,12 @@ from typing import Optional
 
 
 class Environment:
-    """Provides an isolated workspace sandbox and execution environment."""
+    """Provides workspace execution and sandboxing."""
 
     def __init__(
         self,
         workspace_dir: Optional[Path | str] = None,
+        logs_dir: Optional[Path | str] = None,
         cleanup_on_teardown: bool = False,
     ):
         if workspace_dir:
@@ -25,8 +26,12 @@ class Environment:
             self._is_temp = True
 
         self.cleanup_on_teardown = cleanup_on_teardown
-        # Create dedicated logs directory for raw tool outputs / spillover
-        self.logs_dir = self.workspace_dir / ".logs"
+
+        # If logs_dir is provided, store logs there; otherwise default to workspace/.logs
+        if logs_dir:
+            self.logs_dir = Path(logs_dir).resolve()
+        else:
+            self.logs_dir = self.workspace_dir / ".logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
     def populate_files(self, files: dict[str, str]) -> None:

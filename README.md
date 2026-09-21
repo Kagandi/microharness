@@ -11,25 +11,45 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 | Component | Responsibility | Location in `mini-harness` |
 | :--- | :--- | :--- |
 | **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
-| **Harness** *(The Chassis)* | The outer environment: sandboxing, guardrails/budgets, memory compaction, telemetry/tracing, and post-run grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
+| **Harness** *(The Chassis)* | The outer environment: workspace directory, sandboxing, budgets, memory compaction, telemetry/tracing, and grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
+
+---
+
+## 🛠️ Working on Existing Projects
+
+By default, the agent runs directly in your **current working directory** (like Claude Code or Aider). It sees all your existing files, respects git, and resumes right where you left off:
+
+```bash
+# Operate in the current directory:
+uv run mini-harness "Inspect the files in this directory and explain the architecture"
+
+# Or point to any other project directory with -d:
+uv run mini-harness -d /path/to/my-project "Fix the bug in auth.py"
+```
+
+If you ever want an isolated disposable scratchpad (e.g. for testing without touching real files), pass `--sandbox`:
+```bash
+uv run mini-harness --sandbox "Experiment with writing a new scraper"
+```
 
 ---
 
 ## 💬 Continuous Interactive Chat
 
-Unlike single-shot test runners, `mini-harness` maintains persistent conversation memory and an isolated workspace throughout your session so you can chat with the agent continuously:
+The agent maintains persistent conversation memory and your workspace throughout the session so you can chat with it continuously:
 
 ```bash
 uv run mini-harness "Create a python script called fib.py that computes the 10th fibonacci number"
 ```
 
-When the agent finishes its initial action, the session stays open:
 ```text
-🤖 Agent: I have created fib.py and tested it with python3. Output is 55.
+🤖 Agent:
+I created fib.py and ran it with python3. Output is 55.
 
 👤 You: Now add unit tests in test_fib.py and run unittest
 ...
-🤖 Agent: Created test_fib.py and verified that all tests passed.
+🤖 Agent:
+Created test_fib.py and verified that all tests pass.
 
 👤 You: exit
 📄 Complete session trace saved to: .runs/interactive_session_*/trace.md
@@ -37,7 +57,7 @@ When the agent finishes its initial action, the session stays open:
 
 If you prefer a one-and-done batch run (e.g. for CI), pass `--batch`:
 ```bash
-uv run mini-harness "Run pytest and fix any errors" --batch
+uv run mini-harness "Run pytest and fix any failures" --batch
 ```
 
 ---
@@ -53,7 +73,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 24 unit and integration tests run in ~0.4s)*
+*(All 25 unit and integration tests run in ~0.4s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
@@ -73,32 +93,28 @@ Because components follow minimal Python `Protocols`, you can plug in any Model,
 ```python
 from core.harness import Harness
 
-# Plug in ANY object or adapter that implements `generate(messages, tools)`
+# In-place coding agent on your repo:
 harness = Harness(
     model=my_custom_model,      # Or HttpChatModel(endpoint, model, key)
+    workspace_dir=".",          # Works directly on your project
     tools=[bash_tool, my_tool], # Custom tools
-    evaluator=my_evaluator,     # Custom evaluator
 )
-# Batch mode:
-harness.run(task)
-
-# Or interactive mode:
-harness.run_interactive(initial_instruction="Start here")
+harness.run_interactive("Help me refactor the database layer")
 ```
 
 ---
 
 ## 🔑 Key Educational Paradigms Demonstrated
 
-1. **Workspace Sandboxing (`core/environment.py`)**
-   - Each task runs in an isolated directory (`.runs/<task_id>_<timestamp>/workspace/`).
-   - Prevents path traversal outside the sandbox.
+1. **In-Place Project Operation vs. Sandboxing (`core/environment.py`)**
+   - By default, operates directly on existing project files.
+   - Optional `--sandbox` creates an isolated scratchpad in `.runs/`.
+   - Prevents path traversal outside the project boundaries.
    - Executes bash with timeouts and combined stdout/stderr.
 
 2. **Large Log Handling & Spillover (`core/tools.py`)**
-   - When a command generates massive output, it is **not** dumped directly into the LLM context.
-   - Head + tail truncation preserves the initial setup and final stack trace/errors.
-   - The full, raw output is spilled to `.logs/step_N.log` inside the workspace so the model can inspect it using tools (e.g. `grep` or `read_file`).
+   - Massive command outputs are head + tail truncated.
+   - The full, raw output is spilled to `.runs/<run_id>/logs/` so it never pollutes the user's project root.
 
 3. **Context & Memory Compaction Across Turns (`core/memory.py`)**
    - Tracks conversation history across multiple turns.
@@ -126,7 +142,7 @@ mini-harness/
 ├── core/
 │   ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
 │   ├── prompts.py      # System prompt templates
-│   ├── environment.py  # Isolated workspace & bash runner
+│   ├── environment.py  # Workspace & bash runner (supports in-place and sandbox)
 │   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py       # Context manager & compaction policies
 │   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
@@ -142,12 +158,3 @@ mini-harness/
     ├── test_evaluator.py   # Grader assertions tests
     └── test_harness.py     # End-to-end lifecycle, multi-turn chat & guardrails tests
 ```
-
----
-
-## 🔍 Inspecting Traces
-Every run produces artifacts under `.runs/<task_id>_<timestamp>/`:
-- `trace.md`: Markdown summary of thoughts, actions, tool results, and evaluation.
-- `trace.json`: Full JSON record of prompt states, latencies, and tool calls.
-- `workspace/`: The real file directory manipulated by the agent.
-- `workspace/.logs/`: Full raw outputs of truncated commands.

@@ -151,6 +151,27 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(trace_data["finish_reason"], "session_ended")
         self.assertEqual(len(trace_data["steps"]), 4)
 
+    def test_existing_project_directory_mode(self):
+        # Simulate a developer's existing project folder
+        project_dir = Path(tempfile.mkdtemp(prefix="my_existing_project_"))
+        (project_dir / "app.py").write_text("def run():\n    return 'v1'\n")
+
+        # Harness configured with workspace_dir pointing to the existing project
+        script = [
+            ("Inspecting app.py", [ToolCall(id="t1", name="read_file", arguments={"path": "app.py"})]),
+            ("Upgrading app.py", [ToolCall(id="t2", name="write_file", arguments={"path": "app.py", "content": "def run():\n    return 'v2'\n"})]),
+            ("Done upgrading.", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(model=model, workspace_dir=project_dir, runs_dir=self.runs_dir, verbose=False)
+
+        task = Task(id="upgrade_task", instruction="Upgrade app.py from v1 to v2")
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        # Invariant: The actual project file was upgraded in-place!
+        self.assertEqual((project_dir / "app.py").read_text(), "def run():\n    return 'v2'\n")
+
 
 if __name__ == "__main__":
     unittest.main()

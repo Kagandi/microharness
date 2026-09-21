@@ -22,6 +22,8 @@ class Harness:
     def __init__(
         self,
         model: Model,
+        workspace_dir: Optional[Path | str] = None,
+        sandbox: bool = False,
         tools: Optional[list[Tool]] = None,
         evaluator: Optional[Evaluator] = None,
         runs_dir: Optional[Path | str] = None,
@@ -30,6 +32,8 @@ class Harness:
         verbose: bool = True,
     ):
         self.model = model
+        self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
+        self.sandbox = sandbox
         self.custom_tools = tools
         self.evaluator = evaluator
         self.runs_dir = Path(runs_dir or ".runs").resolve()
@@ -37,13 +41,29 @@ class Harness:
         self.max_context_chars = max_context_chars
         self.verbose = verbose
 
-    def _setup_run(self, task_id: str, system_prompt: str, initial_instruction: str, initial_files: dict[str, str]) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
+    def _setup_run(
+        self,
+        task_id: str,
+        system_prompt: str,
+        initial_instruction: str,
+        initial_files: dict[str, str],
+        force_sandbox: bool = False,
+    ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self.runs_dir / f"{task_id}_{timestamp}"
-        workspace_dir = run_dir / "workspace"
-        workspace_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = run_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
 
-        env = Environment(workspace_dir=workspace_dir, cleanup_on_teardown=False)
+        use_sandbox = self.sandbox or force_sandbox or (self.explicit_workspace_dir is None)
+
+        if use_sandbox:
+            workspace = run_dir / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+        else:
+            workspace = self.explicit_workspace_dir
+
+        env = Environment(workspace_dir=workspace, logs_dir=logs_dir, cleanup_on_teardown=False)
         if initial_files:
             env.populate_files(initial_files)
 
@@ -56,8 +76,16 @@ class Harness:
             tool_registry.register(ReadFileTool(env))
             tool_registry.register(WriteFileTool(env))
 
+        # Augment system prompt with current working directory context if operating in an existing project
+        active_system_prompt = system_prompt
+        if not use_sandbox:
+            active_system_prompt += (
+                f"\n\nContext:\nYou are working directly in an existing project directory at `{workspace}`.\n"
+                "Inspect existing files and git history to understand the codebase before making changes."
+            )
+
         memory = Memory(
-            system_prompt=system_prompt,
+            system_prompt=active_system_prompt,
             user_prompt=initial_instruction,
             max_context_chars=self.max_context_chars,
         )
@@ -78,6 +106,7 @@ class Harness:
             system_prompt=system_prompt,
             initial_instruction=task.instruction,
             initial_files=task.initial_files,
+            force_sandbox=bool(task.initial_files),
         )
 
         if self.verbose:
@@ -141,7 +170,11 @@ class Harness:
             eval_result=eval_result,
         )
 
-    def run_interactive(self, initial_instruction: Optional[str] = None, task_id: str = "interactive_session") -> None:
+    def run_interactive(
+        self,
+        initial_instruction: Optional[str] = None,
+        task_id: str = "interactive_session",
+    ) -> None:
         """Interactive multi-turn session mode allowing continuous conversation."""
         first_instruction = initial_instruction or input("👤 You: ").strip()
         if not first_instruction:
@@ -156,14 +189,13 @@ class Harness:
         )
 
         print(f"\n🚀 Interactive Session Started")
-        print(f"📁 Workspace: {env.workspace_dir}")
+        print(f"📁 Project Workspace: {env.workspace_dir}")
         print("💡 Type 'exit' or 'quit' anytime to end the session.\n")
 
         step_idx = 1
         current_instruction: Optional[str] = first_instruction
 
         while current_instruction:
-            # Run the agent loop until the agent answers (no more tool calls)
             while True:
                 try:
                     is_finished, step_trace = loop.step(step_index=step_idx)
@@ -178,7 +210,6 @@ class Harness:
                     print(f"\n❌ Error during turn: {exc}")
                     break
 
-            # Prompt user for follow-up instruction
             try:
                 user_followup = input("👤 You: ").strip()
             except (KeyboardInterrupt, EOFError):
@@ -189,10 +220,8 @@ class Harness:
                 print("\nEnding session.")
                 break
 
-            # Feed follow-up into persistent memory
             memory.messages.append(Message(role="user", content=user_followup))
             current_instruction = user_followup
 
-        # Finalize and export session trace
         json_path, md_path = tracer.finalize(finish_reason="session_ended")
         print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")

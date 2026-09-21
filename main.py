@@ -2,7 +2,7 @@
 
 Demonstrates:
 1. Boundary between Harness (chassis) and AgentLoop (engine).
-2. Workspace isolation & sandboxing.
+2. Project directory operation (edits real projects) vs. isolated sandboxing.
 3. Real bash and file tool execution.
 4. Large log truncation + spill to disk (.logs/).
 5. Context memory compaction across turns.
@@ -120,14 +120,24 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="mini-harness: Interactive AI coding agent harness.",
-        usage="%(prog)s [instruction] [--batch] [--demo {calculator,greeting}] [options]",
+        description="mini-harness: Interactive AI coding agent harness for existing projects or benchmarks.",
+        usage="%(prog)s [instruction] [-d DIR] [--sandbox] [--batch] [--demo {calculator,greeting}] [options]",
     )
     parser.add_argument(
         "instruction",
         nargs="?",
         default=None,
-        help="Initial instruction for the agent (e.g. 'Create a python script that prints primes')",
+        help="Instruction for the agent (e.g. 'Fix the bug in auth.py', 'Add tests')",
+    )
+    parser.add_argument(
+        "-d", "--dir",
+        default=".",
+        help="Target project directory where the agent operates (default: current directory '.')",
+    )
+    parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        help="Run in an isolated disposable scratch directory instead of your real project directory",
     )
     parser.add_argument(
         "--batch",
@@ -138,7 +148,7 @@ def main():
         "--demo",
         choices=["calculator", "greeting"],
         default=None,
-        help="Run a built-in educational benchmark demo (runs in batch mode with evaluation)",
+        help="Run a built-in educational benchmark demo (runs sandboxed with evaluation)",
     )
     parser.add_argument(
         "--endpoint",
@@ -171,10 +181,10 @@ def main():
         print("Tip: Add MODEL_ENDPOINT to .env or pass --endpoint to use a live model.\n")
         model = build_mock_agent_script()
 
-    # 2. If --demo is passed or --batch without instruction, run Batch Mode
+    # 2. If --demo is passed, run Benchmark Mode (isolated sandbox with evaluator)
     if args.demo:
         task, evaluator = create_calculator_demo() if args.demo == "calculator" else create_greeting_demo()
-        harness = Harness(model=model, evaluator=evaluator, verbose=True)
+        harness = Harness(model=model, sandbox=True, evaluator=evaluator, verbose=True)
         result = harness.run(task)
         print("=" * 60)
         print(f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})")
@@ -184,9 +194,18 @@ def main():
         print("=" * 60)
         return
 
+    # 3. Resolve Target Workspace
+    target_dir = Path(args.dir).resolve()
+    harness = Harness(
+        model=model,
+        workspace_dir=target_dir,
+        sandbox=args.sandbox,
+        verbose=True,
+    )
+
+    # 4. Batch Mode vs Interactive Mode
     if args.batch and args.instruction:
         task = Task(id="user_task", instruction=args.instruction.strip())
-        harness = Harness(model=model, verbose=True)
         result = harness.run(task)
         print("=" * 60)
         print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
@@ -196,8 +215,7 @@ def main():
         print("=" * 60)
         return
 
-    # 3. Default: Interactive Session Mode
-    harness = Harness(model=model, verbose=True)
+    # Default: Interactive Mode in the target project directory
     harness.run_interactive(initial_instruction=args.instruction)
 
 
