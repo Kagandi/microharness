@@ -19,22 +19,21 @@ class Model(Protocol):
         ...
 
 
-class OpenAICompatibleModel:
-    """Direct API caller for any OpenAI-compatible /v1/chat/completions endpoint.
-
-    Works with OpenAI, DeepSeek, Ollama, Groq, vLLM, etc., using Python's standard library.
-    """
+class _BaseHttpChatModel:
+    """Base helper for HTTP chat completion endpoints with tool calling."""
 
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        base_url: str,
+        model_name: str,
         api_key: str | None = None,
-        base_url: str = "https://api.openai.com/v1",
+        headers: dict[str, str] | None = None,
         timeout: float = 60.0,
     ):
+        self.base_url = base_url.rstrip("/")
         self.model_name = model_name
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
-        self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+        self.api_key = api_key
+        self.extra_headers = headers or {}
         self.timeout = timeout
 
     def generate(
@@ -43,8 +42,10 @@ class OpenAICompatibleModel:
         endpoint = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            **self.extra_headers,
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         formatted_messages = []
         for msg in messages:
@@ -88,10 +89,15 @@ class OpenAICompatibleModel:
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"API call failed with HTTP {exc.code}: {err_body}"
+                f"Model API returned HTTP {exc.code} from {endpoint}:\n{err_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ConnectionError(
+                f"Could not connect to model endpoint at {endpoint}.\n"
+                f"Is the server running and reachable? (Detail: {exc.reason})"
             ) from exc
         except Exception as exc:
-            raise RuntimeError(f"Network error calling model endpoint: {exc}") from exc
+            raise RuntimeError(f"Unexpected error communicating with model: {exc}") from exc
 
         choice = res_body["choices"][0]["message"]
         content = choice.get("content") or ""
@@ -113,11 +119,58 @@ class OpenAICompatibleModel:
         return content, tool_calls
 
 
+class OpenRouterModel(_BaseHttpChatModel):
+    """Direct API caller for OpenRouter (https://openrouter.ai)."""
+
+    def __init__(
+        self,
+        model_name: str = "anthropic/claude-3.5-sonnet",
+        api_key: str | None = None,
+        site_url: str = "https://github.com/mini-harness",
+        app_name: str = "mini-harness",
+        timeout: float = 90.0,
+    ):
+        key = api_key or os.getenv("OPENROUTER_API_KEY", "")
+        if not key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is not set. Please set the environment variable or pass api_key."
+            )
+        super().__init__(
+            base_url="https://openrouter.ai/api/v1",
+            model_name=model_name,
+            api_key=key,
+            headers={
+                "HTTP-Referer": site_url,
+                "X-Title": app_name,
+            },
+            timeout=timeout,
+        )
+
+
+class LocalEndpointModel(_BaseHttpChatModel):
+    """Direct caller for local endpoints (e.g. Ollama, vLLM, LM Studio, LocalAI)."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434/v1",
+        model_name: str = "qwen2.5-coder",
+        api_key: str | None = "dummy-local-key",
+        timeout: float = 120.0,
+    ):
+        configured_url = os.getenv("LOCAL_API_BASE", base_url)
+        configured_model = os.getenv("LOCAL_MODEL_NAME", model_name)
+        super().__init__(
+            base_url=configured_url,
+            model_name=configured_model,
+            api_key=api_key,
+            timeout=timeout,
+        )
+
+
 class MockModel:
     """A deterministic scripted model for offline testing and educational demonstrations."""
 
     def __init__(self, script: list[tuple[str, list[ToolCall]]]):
-        """Accepts a sequence of (content, tool_calls) tuples to yield sequentially."""
         self.script = list(script)
         self.step_idx = 0
 
@@ -128,5 +181,4 @@ class MockModel:
             result = self.script[self.step_idx]
             self.step_idx += 1
             return result
-        # Default stop condition if script runs out: respond without tools
         return "I have completed the task and verified all results.", []

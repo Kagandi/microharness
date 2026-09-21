@@ -8,17 +8,17 @@ Demonstrates:
 5. Context memory compaction.
 6. Structured tracing (trace.json and trace.md).
 7. Automated post-run evaluation.
+8. Pluggable models: MockModel (offline), OpenRouter, or Local endpoint (Ollama/vLLM/LM Studio).
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 from core.evaluator import CommandTestEvaluator
 from core.harness import Harness
-from core.model import MockModel, OpenAICompatibleModel
+from core.model import LocalEndpointModel, MockModel, Model, OpenRouterModel
 from core.types import Task, ToolCall
 
 
@@ -63,16 +63,7 @@ def create_demo_task() -> Task:
 
 
 def build_mock_agent_script() -> MockModel:
-    """Builds a deterministic scripted model demonstrating the full agent trajectory.
-
-    Included actions:
-    Step 1: Run unit tests to observe initial failure.
-    Step 2: Generate a large log to demonstrate output truncation + disk spillover.
-    Step 3: Read calculator.py to inspect the source.
-    Step 4: Write fixed calculator.py.
-    Step 5: Re-run unit tests to verify fix.
-    Step 6: Finish with final answer.
-    """
+    """Builds a deterministic scripted model demonstrating the full agent trajectory."""
     fixed_code = (
         "def add(a: float, b: float) -> float:\n"
         "    return a + b\n\n"
@@ -150,33 +141,55 @@ def build_mock_agent_script() -> MockModel:
     return MockModel(script=script)
 
 
+def get_model(provider: str, model_name: str | None, base_url: str | None) -> Model:
+    """Instantiates the requested pluggable model."""
+    if provider == "mock":
+        print("🎓 Running with deterministic MockModel (offline, no API key needed).")
+        return build_mock_agent_script()
+
+    elif provider == "openrouter":
+        chosen_model = model_name or "anthropic/claude-3.5-sonnet"
+        print(f"🌐 Running with OpenRouter | Model: {chosen_model}")
+        try:
+            return OpenRouterModel(model_name=chosen_model)
+        except ValueError as exc:
+            print(f"❌ Configuration error: {exc}")
+            print("Tip: export OPENROUTER_API_KEY='sk-or-...'")
+            sys.exit(1)
+
+    elif provider == "local":
+        endpoint = base_url or "http://localhost:11434/v1"
+        chosen_model = model_name or "qwen2.5-coder"
+        print(f"💻 Running with Local Endpoint | URL: {endpoint} | Model: {chosen_model}")
+        return LocalEndpointModel(base_url=endpoint, model_name=chosen_model)
+
+    else:
+        print(f"❌ Unknown provider '{provider}'. Choose from: mock, openrouter, local.")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the mini-harness educational demonstration.")
     parser.add_argument(
-        "--live",
-        action="store_true",
-        help="Use direct LLM API (reads OPENAI_API_KEY). If omitted, uses deterministic MockModel.",
+        "--provider",
+        choices=["mock", "openrouter", "local"],
+        default="mock",
+        help="LLM provider: 'mock' (offline), 'openrouter', or 'local' (default: mock)",
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o",
-        help="Model name to use for live API (default: gpt-4o)",
+        default=None,
+        help="Model identifier (e.g. 'anthropic/claude-3.5-sonnet', 'deepseek/deepseek-chat', 'qwen2.5-coder')",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Custom base URL for local endpoint (e.g. 'http://localhost:11434/v1' for Ollama, 'http://localhost:8000/v1' for vLLM)",
     )
     args = parser.parse_args()
 
-    # 1. Select Model
-    if args.live:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            print("❌ Error: OPENAI_API_KEY environment variable is not set.")
-            print("Tip: Run without --live to use the built-in offline educational MockModel.")
-            sys.exit(1)
-        print(f"🤖 Using Live API Model: {args.model}")
-        model = OpenAICompatibleModel(model_name=args.model, api_key=api_key)
-    else:
-        print("🎓 Running in Offline Educational Mode using deterministic MockModel.")
-        print("(Pass --live to run with real LLM credentials)\n")
-        model = build_mock_agent_script()
+    # 1. Initialize Model
+    model = get_model(provider=args.provider, model_name=args.model, base_url=args.base_url)
 
     # 2. Define Evaluator (tests must pass with exit code 0)
     evaluator = CommandTestEvaluator(
@@ -188,8 +201,8 @@ def main():
     harness = Harness(
         model=model,
         evaluator=evaluator,
-        max_tool_chars=1200,  # Lower threshold to trigger truncation demonstration
-        max_context_chars=3500,  # Lower threshold to trigger compaction demonstration
+        max_tool_chars=1200,    # Triggers truncation demo on long logs
+        max_context_chars=3500,  # Triggers compaction demo on large history
         verbose=True,
     )
 

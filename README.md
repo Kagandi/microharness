@@ -10,7 +10,7 @@ Built with **zero external dependencies** (standard library only) to teach the c
 
 | Component | Responsibility | Examples in `mini-harness` |
 | :--- | :--- | :--- |
-| **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and evaluations. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
+| **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
 | **Harness** *(The Chassis)* | The outer environment: sandboxing, guardrails/budgets, memory compaction, telemetry/tracing, and post-run grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
 
 ---
@@ -40,7 +40,8 @@ Built with **zero external dependencies** (standard library only) to teach the c
 
 6. **Pluggable Model Architecture (`core/model.py`)**
    - `MockModel`: Deterministic, offline replay model for testing without API keys or costs.
-   - `OpenAICompatibleModel`: Direct API client built with Python's standard library `urllib.request` (works with OpenAI, DeepSeek, Ollama, Groq, vLLM, etc.).
+   - `OpenRouterModel`: Direct API client for OpenRouter (`https://openrouter.ai/api/v1`) using standard library `urllib.request`.
+   - `LocalEndpointModel`: Direct client for local servers (Ollama, vLLM, LM Studio) without extra dependencies.
 
 ---
 
@@ -57,7 +58,7 @@ mini-harness/
     ├── environment.py  # Isolated workspace & bash runner
     ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
     ├── memory.py       # Context manager & compaction policies
-    ├── model.py        # Model protocol (Direct API + MockModel)
+    ├── model.py        # Pluggable models (MockModel, OpenRouter, Local endpoints)
     ├── loop.py         # Pure ReAct loop (~40 lines)
     ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
     ├── tracer.py       # Telemetry collector & trace exporter
@@ -68,9 +69,9 @@ mini-harness/
 
 ## 🚀 Quickstart
 
-### 1. Run the Offline Educational Demo (No API Key needed)
+### 1. Offline Educational Demo (No API Key needed)
 ```bash
-python3 main.py
+python3 main.py --provider mock
 ```
 This executes a full software engineering bug-fix scenario with the built-in deterministic `MockModel`:
 - Runs tests and captures the initial test failure.
@@ -78,13 +79,27 @@ This executes a full software engineering bug-fix scenario with the built-in det
 - Inspects code, applies the bug fix, and triggers memory compaction.
 - Verifies test passage and grades the final workspace state.
 
-### 2. Run with Live LLM (OpenAI / DeepSeek / Ollama)
+### 2. Live with OpenRouter
 ```bash
-export OPENAI_API_KEY="sk-..."
-# Optional custom base URL (e.g. Ollama, Groq, DeepSeek):
-# export OPENAI_BASE_URL="http://localhost:11434/v1"
+export OPENROUTER_API_KEY="sk-or-v1-..."
 
-python3 main.py --live --model gpt-4o
+# Default uses claude-3.5-sonnet:
+python3 main.py --provider openrouter
+
+# Or pick any model on OpenRouter:
+python3 main.py --provider openrouter --model deepseek/deepseek-chat
+python3 main.py --provider openrouter --model meta-llama/llama-3.3-70b-instruct
+```
+
+### 3. Live with Local Endpoint (Ollama / vLLM / LM Studio)
+Make sure your local server is running (e.g. `ollama run qwen2.5-coder`):
+```bash
+# Default targets http://localhost:11434/v1 with qwen2.5-coder:
+python3 main.py --provider local
+
+# Or specify a custom model and port:
+python3 main.py --provider local --model qwen2.5-coder:7b --base-url http://localhost:11434/v1
+python3 main.py --provider local --model mistralai/Mistral-7B-Instruct-v0.3 --base-url http://localhost:8000/v1
 ```
 
 ---
