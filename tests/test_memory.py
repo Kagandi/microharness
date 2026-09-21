@@ -14,43 +14,72 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(msgs[1].role, "user")
         self.assertEqual(msgs[1].content, "TASK")
 
-    def test_compaction_preserves_boundaries_and_prunes_middle(self):
-        # max_context_chars is small (300) so compaction triggers
+    def test_compaction_inert_when_under_budget(self):
         mem = Memory(
-            system_prompt="SYSTEM_INSTRUCTION",
-            user_prompt="USER_TASK_GOAL",
-            max_context_chars=300,
+            system_prompt="System instructions",
+            user_prompt="Task goal",
+            max_context_chars=1000,
+        )
+        mem.add_assistant("Short response")
+        mem.add_tool_result(ToolResult(call_id="c1", output="Short output"))
+
+        # Invariant: Compaction does nothing when below max_context_chars
+        compacted = mem.compact_if_needed()
+        self.assertFalse(compacted)
+        self.assertEqual(mem.messages[-1].content, "Short output")
+
+    def test_compaction_never_corrupts_system_or_task_prompts(self):
+        huge_system = "SYSTEM_CRITICAL_INVARIANT_" * 50
+        huge_task = "TASK_CRITICAL_GOAL_" * 50
+
+        # Budget is lower than initial prompts
+        mem = Memory(
+            system_prompt=huge_system,
+            user_prompt=huge_task,
+            max_context_chars=100,
             keep_recent_turns=2,
         )
-
-        # Step 1: Assistant + Tool (long output in the middle)
-        mem.add_assistant("Thinking about step 1", [ToolCall(id="c1", name="bash", arguments={})])
-        mem.add_tool_result(ToolResult(call_id="c1", output="A" * 300))
-
-        # Step 2: Recent turns (should be kept intact)
-        mem.add_assistant("Recent thought", [])
+        mem.add_assistant("Step 1 thought")
+        mem.add_tool_result(ToolResult(call_id="c1", output="Bloated log " * 50))
+        mem.add_assistant("Recent thought")
         mem.add_tool_result(ToolResult(call_id="c2", output="Recent observation"))
 
-        self.assertGreater(mem.total_chars(), 300)
-
-        # Run compaction
         compacted = mem.compact_if_needed()
         self.assertTrue(compacted)
 
-        msgs = mem.get_messages()
-        # System and Task preserved
-        self.assertEqual(msgs[0].content, "SYSTEM_INSTRUCTION")
-        self.assertEqual(msgs[1].content, "USER_TASK_GOAL")
+        # Invariant: System and Task prompts are 100% byte-for-byte identical
+        self.assertEqual(mem.messages[0].content, huge_system)
+        self.assertEqual(mem.messages[1].content, huge_task)
 
-        # Middle tool observation collapsed
-        middle_tool_msg = msgs[3]
-        self.assertEqual(middle_tool_msg.role, "tool")
-        self.assertIn("[Tool output collapsed", middle_tool_msg.content)
-        self.assertNotIn("A" * 300, middle_tool_msg.content)
+    def test_compaction_preserves_recent_turns_and_assistant_thoughts(self):
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="GOAL",
+            max_context_chars=150,
+            keep_recent_turns=2,
+        )
 
-        # Recent turns preserved
-        self.assertEqual(msgs[-2].content, "Recent thought")
-        self.assertEqual(msgs[-1].content, "Recent observation")
+        # Middle turn
+        mem.add_assistant("My crucial plan for step 1")
+        mem.add_tool_result(ToolResult(call_id="c1", output="X" * 300))
+
+        # Recent turns
+        mem.add_assistant("Recent turn thought")
+        mem.add_tool_result(ToolResult(call_id="c2", output="Recent observation"))
+
+        compacted = mem.compact_if_needed()
+        self.assertTrue(compacted)
+
+        # Invariant: Assistant plan thought in middle is NOT pruned
+        self.assertEqual(mem.messages[2].content, "My crucial plan for step 1")
+
+        # Invariant: Middle tool result IS pruned to tombstone
+        self.assertIn("[Tool output collapsed", mem.messages[3].content)
+        self.assertNotIn("X" * 300, mem.messages[3].content)
+
+        # Invariant: Recent turns are NOT pruned
+        self.assertEqual(mem.messages[-2].content, "Recent turn thought")
+        self.assertEqual(mem.messages[-1].content, "Recent observation")
 
 
 if __name__ == "__main__":
