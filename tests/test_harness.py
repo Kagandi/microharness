@@ -131,8 +131,8 @@ class TestHarnessIntegration(unittest.TestCase):
         model = MockModel(script)
         harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
 
-        # Mock user typing follow-up and then 'exit'
-        user_inputs = iter(["Now do step 2", "exit"])
+        # Mock user typing slash commands, follow-up, and then 'exit'
+        user_inputs = iter(["/status", "/help", "/compact", "Now do step 2", "/status", "exit"])
         with patch("builtins.input", lambda *args: next(user_inputs)):
             harness.run_interactive(initial_instruction="Start step 1")
 

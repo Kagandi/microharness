@@ -15,12 +15,32 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
+## 💬 Continuous Interactive Chat & Meta-Commands
+
+When you chat with the agent, the harness maintains persistent memory and renders a clean **context budget status line** before every turn:
+
+```text
+─── 📊 Context: 1,420 / 8,000 chars (17.8%) | Messages: 6 ───
+👤 You: 
+```
+
+### Slash Commands (No Model Call)
+You can inspect or control the harness runtime directly:
+
+* **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage).
+* **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
+* **`/new`**: Starts a fresh conversation context while keeping all your project files intact.
+* **`/help`**: Lists available commands.
+* **`/exit`**: Finalizes and exports the session trace.
+
+---
+
 ## 🛠️ Working on Existing Projects
 
 By default, the agent runs directly in your **current working directory** (like Claude Code or Aider). It sees all your existing files, respects git, and resumes right where you left off:
 
 ```bash
-# Operate in the current directory:
+# Operates directly on the current directory:
 uv run mini-harness "Inspect the files in this directory and explain the architecture"
 
 # Or point to any other project directory with -d:
@@ -30,29 +50,6 @@ uv run mini-harness -d /path/to/my-project "Fix the bug in auth.py"
 If you ever want an isolated disposable scratchpad (e.g. for testing without touching real files), pass `--sandbox`:
 ```bash
 uv run mini-harness --sandbox "Experiment with writing a new scraper"
-```
-
----
-
-## 💬 Continuous Interactive Chat
-
-The agent maintains persistent conversation memory and your workspace throughout the session so you can chat with it continuously:
-
-```bash
-uv run mini-harness "Create a python script called fib.py that computes the 10th fibonacci number"
-```
-
-```text
-🤖 Agent:
-I created fib.py and ran it with python3. Output is 55.
-
-👤 You: Now add unit tests in test_fib.py and run unittest
-...
-🤖 Agent:
-Created test_fib.py and verified that all tests pass.
-
-👤 You: exit
-📄 Complete session trace saved to: .runs/interactive_session_*/trace.md
 ```
 
 If you prefer a one-and-done batch run (e.g. for CI), pass `--batch`:
@@ -73,7 +70,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 25 unit and integration tests run in ~0.4s)*
+*(All 27 unit and integration tests run in ~0.4s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
@@ -118,7 +115,7 @@ harness.run_interactive("Help me refactor the database layer")
 
 3. **Context & Memory Compaction Across Turns (`core/memory.py`)**
    - Tracks conversation history across multiple turns.
-   - When context size exceeds a threshold, older tool observations in middle turns are compacted into concise markers (`[Tool output collapsed...]`) while preserving the system prompt, initial task, and recent turns.
+   - Automatically (or via `/compact`) collapses older middle tool observations while preserving system prompt, initial task, and recent turns.
 
 4. **Structured Tracing & Debugging (`core/tracer.py`)**
    - Real-time terminal streaming of thoughts, actions, observations, truncations, and compactions.
@@ -153,7 +150,7 @@ mini-harness/
 └── tests/
     ├── test_environment.py # Path sandboxing & bash timeout tests
     ├── test_tools.py       # Tools, truncation & disk spillover tests
-    ├── test_memory.py      # Conversation history & compaction tests
+    ├── test_memory.py      # Conversation history, stats & compaction tests
     ├── test_model.py       # Endpoint normalization & mock model tests
     ├── test_evaluator.py   # Grader assertions tests
     └── test_harness.py     # End-to-end lifecycle, multi-turn chat & guardrails tests

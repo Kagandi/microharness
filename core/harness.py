@@ -76,7 +76,6 @@ class Harness:
             tool_registry.register(ReadFileTool(env))
             tool_registry.register(WriteFileTool(env))
 
-        # Augment system prompt with current working directory context if operating in an existing project
         active_system_prompt = system_prompt
         if not use_sandbox:
             active_system_prompt += (
@@ -175,7 +174,7 @@ class Harness:
         initial_instruction: Optional[str] = None,
         task_id: str = "interactive_session",
     ) -> None:
-        """Interactive multi-turn session mode allowing continuous conversation."""
+        """Interactive multi-turn session with slash commands and context usage tracking."""
         first_instruction = initial_instruction or input("👤 You: ").strip()
         if not first_instruction:
             print("No instruction provided. Exiting.")
@@ -190,38 +189,81 @@ class Harness:
 
         print(f"\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
-        print("💡 Type 'exit' or 'quit' anytime to end the session.\n")
+        print("💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /exit\n")
 
         step_idx = 1
         current_instruction: Optional[str] = first_instruction
 
-        while current_instruction:
-            while True:
-                try:
-                    is_finished, step_trace = loop.step(step_index=step_idx)
-                    tracer.record_step(step_trace)
-                    step_idx += 1
+        while True:
+            # If we have an active instruction to execute, run the agent loop
+            if current_instruction:
+                while True:
+                    try:
+                        is_finished, step_trace = loop.step(step_index=step_idx)
+                        tracer.record_step(step_trace)
+                        step_idx += 1
 
-                    if is_finished:
-                        agent_reply = step_trace.model_response.get("content", "")
-                        print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
+                        if is_finished:
+                            agent_reply = step_trace.model_response.get("content", "")
+                            print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
+                            break
+                    except Exception as exc:
+                        print(f"\n❌ Error during turn: {exc}")
                         break
-                except Exception as exc:
-                    print(f"\n❌ Error during turn: {exc}")
-                    break
+                current_instruction = None
+
+            # Render minimal context usage footer
+            stats = memory.stats()
+            print(f"─── 📊 Context: {stats['total_chars']} / {stats['max_context_chars']} chars ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───")
 
             try:
-                user_followup = input("👤 You: ").strip()
+                user_input = input("👤 You: ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nSession interrupted.")
                 break
 
-            if not user_followup or user_followup.lower() in ("exit", "quit", "/exit", "/quit"):
-                print("\nEnding session.")
+            if not user_input:
+                continue
+
+            # Handle Meta / Slash Commands without calling the model
+            cmd = user_input.lower().strip()
+            if cmd in ("/exit", "exit", "/quit", "quit"):
+                print("Ending session.")
                 break
 
-            memory.messages.append(Message(role="user", content=user_followup))
-            current_instruction = user_followup
+            elif cmd in ("/help", "help"):
+                print("\nAvailable meta-commands:")
+                print("  /status   - Show context window size, message breakdown, and budget")
+                print("  /compact  - Manually collapse older observations to free context")
+                print("  /new      - Clear conversation history while keeping workspace files")
+                print("  /exit     - Save session trace and exit\n")
+                continue
+
+            elif cmd in ("/status", "/context", "status"):
+                s = memory.stats()
+                print(f"\n📊 Context Breakdown:")
+                print(f"  • Usage: {s['total_chars']} / {s['max_context_chars']} chars ({s['usage_pct']}%)")
+                print(f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, {s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n")
+                continue
+
+            elif cmd in ("/compact", "compact"):
+                old_chars = memory.total_chars()
+                did_compact = memory.compact_if_needed(force=True)
+                new_chars = memory.total_chars()
+                if did_compact:
+                    print(f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n")
+                else:
+                    print("\nℹ️ No older observations eligible for compaction at this time.\n")
+                continue
+
+            elif cmd in ("/new", "/reset", "new", "reset"):
+                memory.reset()
+                print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
+                continue
+
+            # Normal user message: feed into memory and execute
+            memory.messages.append(Message(role="user", content=user_input))
+            current_instruction = user_input
 
         json_path, md_path = tracer.finalize(finish_reason="session_ended")
         print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")

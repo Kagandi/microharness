@@ -81,6 +81,41 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(mem.messages[-2].content, "Recent turn thought")
         self.assertEqual(mem.messages[-1].content, "Recent observation")
 
+    def test_stats_metrics(self):
+        mem = Memory(system_prompt="SYS", user_prompt="TASK", max_context_chars=1000)
+        mem.add_assistant("reply", [])
+        mem.add_tool_result(ToolResult(call_id="c1", output="tool_out"))
+
+        s = mem.stats()
+        self.assertEqual(s["total_messages"], 4)
+        self.assertEqual(s["by_role"]["system"], 1)
+        self.assertEqual(s["by_role"]["user"], 1)
+        self.assertEqual(s["by_role"]["assistant"], 1)
+        self.assertEqual(s["by_role"]["tool"], 1)
+        self.assertGreater(s["total_chars"], 0)
+        self.assertGreater(s["usage_pct"], 0.0)
+
+    def test_reset_and_force_compact(self):
+        mem = Memory(system_prompt="SYS_PROMPT", user_prompt="INITIAL", max_context_chars=5000, keep_recent_turns=2)
+        mem.add_assistant("Plan", [ToolCall(id="c1", name="bash", arguments={})])
+        mem.add_tool_result(ToolResult(call_id="c1", output="A" * 200))
+        mem.add_assistant("Recent", [])
+        mem.add_tool_result(ToolResult(call_id="c2", output="Recent obs"))
+
+        # Under budget: standard compact does nothing
+        self.assertFalse(mem.compact_if_needed(force=False))
+
+        # Force compact: collapses even under budget
+        self.assertTrue(mem.compact_if_needed(force=True))
+        self.assertIn("[Tool output collapsed", mem.messages[3].content)
+
+        # Reset: preserves system prompt, clears history
+        mem.reset(new_instruction="FRESH_START")
+        msgs = mem.get_messages()
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0].content, "SYS_PROMPT")
+        self.assertEqual(msgs[1].content, "FRESH_START")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from core.types import Message, ToolCall, ToolResult
 
 
 class Memory:
-    """Manages the conversation history and implements context compaction policies."""
+    """Manages conversation history and implements context compaction policies."""
 
     def __init__(
         self,
@@ -15,6 +15,7 @@ class Memory:
         max_context_chars: int = 15000,
         keep_recent_turns: int = 4,
     ):
+        self.system_prompt = system_prompt
         self.max_context_chars = max_context_chars
         self.keep_recent_turns = keep_recent_turns
         self.messages: list[Message] = []
@@ -47,8 +48,25 @@ class Memory:
     def total_chars(self) -> int:
         return sum(len(m.content) for m in self.messages)
 
-    def compact_if_needed(self) -> bool:
-        """Prunes older tool observations if total message content exceeds max_context_chars.
+    def stats(self) -> dict[str, Any]:
+        """Returns diagnostic metrics on memory and context budget."""
+        chars = self.total_chars()
+        pct = round((chars / self.max_context_chars) * 100, 1) if self.max_context_chars else 0.0
+        return {
+            "total_messages": len(self.messages),
+            "total_chars": chars,
+            "max_context_chars": self.max_context_chars,
+            "usage_pct": pct,
+            "by_role": {
+                "system": sum(1 for m in self.messages if m.role == "system"),
+                "user": sum(1 for m in self.messages if m.role == "user"),
+                "assistant": sum(1 for m in self.messages if m.role == "assistant"),
+                "tool": sum(1 for m in self.messages if m.role == "tool"),
+            },
+        }
+
+    def compact_if_needed(self, force: bool = False) -> bool:
+        """Prunes older tool observations if total context exceeds budget or if force=True.
 
         Preserves:
         1. System prompt (first message).
@@ -56,31 +74,32 @@ class Memory:
         3. The most recent `keep_recent_turns` messages.
 
         Returns:
-            True if compaction occurred, False otherwise.
+            True if any messages were compacted, False otherwise.
         """
-        if self.total_chars() <= self.max_context_chars:
+        if not force and self.total_chars() <= self.max_context_chars:
             return False
 
-        # If history is too short to safely prune, skip
-        safe_prefix_count = 2  # System + Task
+        safe_prefix_count = 2  # System + Initial Task
         if len(self.messages) <= safe_prefix_count + self.keep_recent_turns:
             return False
 
         pruned_any = False
-        # Target middle messages (between initial prompts and recent turns)
         middle_end_index = len(self.messages) - self.keep_recent_turns
         for i in range(safe_prefix_count, middle_end_index):
             msg = self.messages[i]
-            # Prune older tool observations that are still substantial
             if msg.role == "tool" and len(msg.content) > 120:
                 original_len = len(msg.content)
-                collapsed_notice = (
+                msg.content = (
                     f"[Tool output collapsed ({original_len} chars) to conserve context window]"
                 )
-                msg.content = collapsed_notice
                 pruned_any = True
 
         return pruned_any
+
+    def reset(self, new_instruction: str = "") -> None:
+        """Resets the conversation history while preserving the system instructions."""
+        self.messages.clear()
+        self._init(self.system_prompt, new_instruction)
 
     def get_messages(self) -> list[Message]:
         return list(self.messages)
