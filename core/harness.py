@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from core.environment import Environment
 from core.evaluator import Evaluator
@@ -15,6 +17,20 @@ from core.tracer import Tracer
 from core.types import EvalResult, RunResult, Task
 
 DEFAULT_GLOBAL_DIR = Path.home() / ".mini-harness"
+
+
+def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
+    """Loads user baseline configuration from ~/.mini-harness/config.json."""
+    if not global_dir:
+        return {}
+    config_file = global_dir / "config.json"
+    if not config_file.is_file():
+        return {}
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
@@ -152,12 +168,13 @@ class Harness:
         model: Model,
         workspace_dir: Path | str | None = None,
         global_dir: Path | str | None = None,
-        sandbox: bool = False,
+        sandbox: bool | None = None,
         tools: list[Tool] | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
-        max_tool_chars: int = 2000,
-        max_context_chars: int = 8000,
+        max_tool_chars: int | None = None,
+        max_context_chars: int | None = None,
+        trigger_ratio: float | None = None,
         verbose: bool = True,
     ):
         self.model = model
@@ -165,12 +182,29 @@ class Harness:
         self.global_dir = (
             Path(global_dir).resolve() if global_dir is not None else DEFAULT_GLOBAL_DIR
         )
-        self.sandbox = sandbox
+        self.global_config = load_global_config(self.global_dir)
+
+        self.sandbox = (
+            sandbox if sandbox is not None else bool(self.global_config.get("sandbox", False))
+        )
         self.custom_tools = tools
         self.evaluator = evaluator
         self.runs_dir = Path(runs_dir or ".runs").resolve()
-        self.max_tool_chars = max_tool_chars
-        self.max_context_chars = max_context_chars
+        self.max_tool_chars = (
+            max_tool_chars
+            if max_tool_chars is not None
+            else int(self.global_config.get("max_tool_chars", 2000))
+        )
+        self.max_context_chars = (
+            max_context_chars
+            if max_context_chars is not None
+            else int(self.global_config.get("max_context_chars", 8000))
+        )
+        self.trigger_ratio = (
+            trigger_ratio
+            if trigger_ratio is not None
+            else float(self.global_config.get("trigger_ratio", 0.80))
+        )
         self.verbose = verbose
 
     def _setup_run(
@@ -256,6 +290,7 @@ class Harness:
             system_prompt=active_system_prompt,
             user_prompt=effective_instruction,
             max_context_chars=self.max_context_chars,
+            trigger_ratio=self.trigger_ratio,
         )
 
         task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)

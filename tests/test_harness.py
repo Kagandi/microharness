@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.evaluator import FileContentEvaluator
-from core.harness import Harness, _discover_commands, _expand_command
+from core.harness import Harness, _discover_commands, _expand_command, load_global_config
 from core.model import MockModel
 from core.types import Message, Task, ToolCall
 
@@ -679,6 +679,81 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(len(captured_prompts), 2)
         turn2_user_prompt = captured_prompts[1][-1].content
         self.assertIn("Perform security audit on target: api.py", turn2_user_prompt)
+
+    def test_load_global_config_scenarios(self):
+        global_dir = Path(tempfile.mkdtemp(prefix="global_cfg_test_"))
+
+        # 1. Missing config.json -> returns {}
+        self.assertEqual(load_global_config(global_dir), {})
+
+        # 2. None directory -> returns {}
+        self.assertEqual(load_global_config(None), {})
+
+        # 3. Valid config.json
+        cfg_path = global_dir / "config.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "endpoint": "https://api.openai.com/v1",
+                    "model": "gpt-4o",
+                    "max_context_chars": 24000,
+                    "trigger_ratio": 0.85,
+                    "sandbox": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = load_global_config(global_dir)
+        self.assertEqual(loaded["model"], "gpt-4o")
+        self.assertEqual(loaded["endpoint"], "https://api.openai.com/v1")
+        self.assertEqual(loaded["max_context_chars"], 24000)
+        self.assertEqual(loaded["trigger_ratio"], 0.85)
+        self.assertTrue(loaded["sandbox"])
+
+        # 4. Corrupted config.json -> returns {} gracefully without crashing
+        cfg_path.write_text("{malformed_json: true,", encoding="utf-8")
+        self.assertEqual(load_global_config(global_dir), {})
+
+    def test_harness_inherits_and_overrides_global_config(self):
+        global_dir = Path(tempfile.mkdtemp(prefix="harness_cfg_test_"))
+        cfg_path = global_dir / "config.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "max_context_chars": 16000,
+                    "trigger_ratio": 0.75,
+                    "max_tool_chars": 1500,
+                    "sandbox": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Harness with defaults inheriting from config.json
+        h1 = Harness(
+            model=MockModel([]),
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+        self.assertEqual(h1.max_context_chars, 16000)
+        self.assertEqual(h1.trigger_ratio, 0.75)
+        self.assertEqual(h1.max_tool_chars, 1500)
+        self.assertTrue(h1.sandbox)
+
+        # Harness with explicit overrides taking precedence over config.json
+        h2 = Harness(
+            model=MockModel([]),
+            global_dir=global_dir,
+            max_context_chars=32000,
+            trigger_ratio=0.90,
+            sandbox=False,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+        self.assertEqual(h2.max_context_chars, 32000)
+        self.assertEqual(h2.trigger_ratio, 0.90)
+        self.assertFalse(h2.sandbox)
 
 
 if __name__ == "__main__":

@@ -82,7 +82,12 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(mem.messages[-1].content, "Recent observation")
 
     def test_stats_metrics(self):
-        mem = Memory(system_prompt="SYS", user_prompt="TASK", max_context_chars=1000)
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_chars=1000,
+            trigger_ratio=0.80,
+        )
         mem.add_assistant("reply", [])
         mem.add_tool_result(ToolResult(call_id="c1", output="tool_out"))
 
@@ -92,8 +97,36 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(s["by_role"]["user"], 1)
         self.assertEqual(s["by_role"]["assistant"], 1)
         self.assertEqual(s["by_role"]["tool"], 1)
+        self.assertEqual(s["trigger_ratio"], 0.80)
+        self.assertEqual(s["trigger_threshold_chars"], 800)
         self.assertGreater(s["total_chars"], 0)
         self.assertGreater(s["usage_pct"], 0.0)
+
+    def test_compaction_triggers_at_high_water_mark_ratio(self):
+        # max_context_chars = 1000, trigger_ratio = 0.80 -> threshold is 800 chars
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="GOAL",
+            max_context_chars=1000,
+            trigger_ratio=0.80,
+            keep_recent_turns=1,
+        )
+        # Add 750 characters of middle tool output -> total chars ~ 760 (< 800)
+        mem.add_assistant("Plan")
+        mem.add_tool_result(ToolResult(call_id="c1", output="X" * 750))
+        mem.add_assistant("Recent")
+
+        # 760 chars <= 800 chars -> should not trigger yet
+        self.assertFalse(mem.compact_if_needed(force=False))
+
+        # Add another 100 chars -> total chars ~ 860 (> 800 chars threshold, but < 1000 chars max)
+        mem.add_tool_result(ToolResult(call_id="c2", output="Y" * 100))
+        mem.add_assistant("Latest")
+
+        # Invariant: Compaction triggers proactively at 80% (800 chars), well before hitting 100% (1000 chars)
+        self.assertTrue(mem.compact_if_needed(force=False))
+        # Verify middle output was collapsed
+        self.assertIn("[Tool output collapsed", mem.messages[3].content)
 
     def test_reset_and_force_compact(self):
         mem = Memory(

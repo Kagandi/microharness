@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
-from core.harness import Harness
+from core.harness import DEFAULT_GLOBAL_DIR, Harness, load_global_config
 from core.model import HttpChatModel, MockModel, Model
 from core.types import Task, ToolCall
 
@@ -188,33 +188,52 @@ def main():
     )
     parser.add_argument(
         "--endpoint",
-        default=os.getenv("MODEL_ENDPOINT"),
-        help="HTTP chat completions endpoint (env: MODEL_ENDPOINT)",
+        default=None,
+        help="HTTP chat completions endpoint (env: MODEL_ENDPOINT or ~/.mini-harness/config.json)",
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("MODEL_NAME"),
-        help="Model identifier (env: MODEL_NAME)",
+        default=None,
+        help="Model identifier (env: MODEL_NAME or ~/.mini-harness/config.json)",
     )
     parser.add_argument(
         "--api-key",
-        default=os.getenv("MODEL_API_KEY", os.getenv("OPENROUTER_API_KEY")),
-        help="API key (env: MODEL_API_KEY or OPENROUTER_API_KEY)",
+        default=None,
+        help="API key (env: MODEL_API_KEY, OPENROUTER_API_KEY, or ~/.mini-harness/config.json)",
     )
     args = parser.parse_args()
 
-    # 1. Select Model
-    if args.endpoint:
-        model_name = args.model or "cohere/north-mini-code:free"
-        print(f"🔌 Connected to: {args.endpoint} (model: {model_name})")
+    # Resolve global config (~/.mini-harness/config.json)
+    global_dir = Path(args.global_dir).resolve() if args.global_dir else DEFAULT_GLOBAL_DIR
+    global_config = load_global_config(global_dir)
+
+    # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > global config.json > Fallback)
+    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or global_config.get("endpoint")
+    model_name = (
+        args.model
+        or os.getenv("MODEL_NAME")
+        or global_config.get("model")
+        or "cohere/north-mini-code:free"
+    )
+    api_key = (
+        args.api_key
+        or os.getenv("MODEL_API_KEY")
+        or os.getenv("OPENROUTER_API_KEY")
+        or global_config.get("api_key")
+    )
+
+    if endpoint:
+        print(f"🔌 Connected to: {endpoint} (model: {model_name})")
         model: Model = HttpChatModel(
-            base_url=args.endpoint,
+            base_url=endpoint,
             model=model_name,
-            api_key=args.api_key,
+            api_key=api_key,
         )
     else:
         print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
-        print("Tip: Add MODEL_ENDPOINT to .env or pass --endpoint to use a live model.\n")
+        print(
+            "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or configure ~/.mini-harness/config.json.\n"
+        )
         model = build_mock_agent_script()
 
     # 2. If --demo is passed, run Benchmark Mode (isolated sandbox with evaluator)
@@ -224,7 +243,7 @@ def main():
         )
         harness = Harness(
             model=model,
-            global_dir=args.global_dir,
+            global_dir=global_dir,
             sandbox=True,
             evaluator=evaluator,
             verbose=True,
@@ -240,13 +259,14 @@ def main():
         print("=" * 60)
         return
 
-    # 3. Resolve Target Workspace
+    # 3. Resolve Target Workspace and Sandbox Flag
     target_dir = Path(args.dir).resolve()
+    sandbox = args.sandbox or bool(global_config.get("sandbox", False))
     harness = Harness(
         model=model,
         workspace_dir=target_dir,
-        global_dir=args.global_dir,
-        sandbox=args.sandbox,
+        global_dir=global_dir,
+        sandbox=sandbox,
         verbose=True,
     )
 

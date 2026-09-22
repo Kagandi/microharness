@@ -13,10 +13,12 @@ class Memory:
         system_prompt: str,
         user_prompt: str,
         max_context_chars: int = 15000,
+        trigger_ratio: float = 0.80,
         keep_recent_turns: int = 4,
     ):
         self.system_prompt = system_prompt
         self.max_context_chars = max_context_chars
+        self.trigger_ratio = trigger_ratio
         self.keep_recent_turns = keep_recent_turns
         self.messages: list[Message] = []
         self._init(system_prompt, user_prompt)
@@ -55,12 +57,15 @@ class Memory:
         """Returns diagnostic metrics on memory and context budget."""
         chars = self.total_chars()
         pct = round((chars / self.max_context_chars) * 100, 1) if self.max_context_chars else 0.0
+        trigger_threshold = int(self.max_context_chars * self.trigger_ratio)
         return {
             "total_messages": len(self.messages),
             "total_chars": chars,
             "estimated_tokens": chars // 4,
             "max_context_chars": self.max_context_chars,
             "max_estimated_tokens": self.max_context_chars // 4,
+            "trigger_ratio": self.trigger_ratio,
+            "trigger_threshold_chars": trigger_threshold,
             "usage_pct": pct,
             "by_role": {
                 "system": sum(1 for m in self.messages if m.role == "system"),
@@ -81,7 +86,8 @@ class Memory:
         Returns:
             True if any messages were compacted, False otherwise.
         """
-        if not force and self.total_chars() <= self.max_context_chars:
+        threshold = int(self.max_context_chars * self.trigger_ratio)
+        if not force and self.total_chars() <= threshold:
             return False
 
         safe_prefix_count = sum(1 for m in self.messages[:2] if m.role in ("system", "user"))
