@@ -27,6 +27,9 @@ class Memory:
         if user_prompt:
             self.messages.append(Message(role="user", content=user_prompt))
 
+    def add_user(self, content: str) -> None:
+        self.messages.append(Message(role="user", content=content or ""))
+
     def add_assistant(self, content: str, tool_calls: list[ToolCall] | None = None) -> None:
         self.messages.append(
             Message(
@@ -71,8 +74,8 @@ class Memory:
         """Prunes older tool observations if total context exceeds budget or if force=True.
 
         Preserves:
-        1. System prompt (first message).
-        2. Task prompt (second message).
+        1. System prompt (if present).
+        2. Initial task prompt (first user message).
         3. The most recent `keep_recent_turns` messages.
 
         Returns:
@@ -81,7 +84,7 @@ class Memory:
         if not force and self.total_chars() <= self.max_context_chars:
             return False
 
-        safe_prefix_count = 2  # System + Initial Task
+        safe_prefix_count = sum(1 for m in self.messages[:2] if m.role in ("system", "user"))
         if len(self.messages) <= safe_prefix_count + self.keep_recent_turns:
             return False
 
@@ -89,7 +92,11 @@ class Memory:
         middle_end_index = len(self.messages) - self.keep_recent_turns
         for i in range(safe_prefix_count, middle_end_index):
             msg = self.messages[i]
-            if msg.role == "tool" and len(msg.content) > 120:
+            if (
+                msg.role == "tool"
+                and len(msg.content) > 120
+                and not msg.content.startswith("[Tool output collapsed")
+            ):
                 original_len = len(msg.content)
                 msg.content = (
                     f"[Tool output collapsed ({original_len} chars) to conserve context window]"

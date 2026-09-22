@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,7 +20,7 @@ class Message:
     tool_calls: list[ToolCall] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"role": self.role, "content": self.content}
+        data: dict[str, Any] = {"role": self.role, "content": self.content or ""}
         if self.tool_call_id:
             data["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
@@ -29,7 +30,11 @@ class Message:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": tc.arguments if isinstance(tc.arguments, str) else None,
+                        "arguments": (
+                            json.dumps(tc.arguments)
+                            if isinstance(tc.arguments, dict)
+                            else str(tc.arguments or "{}")
+                        ),
                     },
                 }
                 for tc in self.tool_calls
@@ -44,6 +49,15 @@ class ToolResult:
     exit_code: int = 0
     was_truncated: bool = False
     raw_log_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "call_id": self.call_id,
+            "output": self.output,
+            "exit_code": self.exit_code,
+            "was_truncated": self.was_truncated,
+            "raw_log_path": self.raw_log_path,
+        }
 
 
 @dataclass

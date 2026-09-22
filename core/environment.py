@@ -105,6 +105,8 @@ class Environment:
     def write_file(self, rel_path: str, content: str) -> None:
         """Write or overwrite a file within the workspace (strictly workspace-scoped)."""
         path = self.resolve_path(rel_path)
+        if path.is_dir():
+            raise IsADirectoryError(f"Target path is a directory: {rel_path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 

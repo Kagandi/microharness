@@ -135,6 +135,12 @@ class TestEnvironment(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.env.edit_file("../../etc/passwd", "root", "toor")
 
+    def test_write_file_on_directory_raises_error(self):
+        # Create a directory inside the workspace
+        (Path(self.temp_dir) / "somedir").mkdir()
+        with self.assertRaises(IsADirectoryError):
+            self.env.write_file("somedir", "data")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -229,14 +229,26 @@ class ToolRegistry:
                 exit_code=1,
             )
 
+        if not isinstance(tool_call.arguments, dict):
+            return ToolResult(
+                call_id=tool_call.id,
+                output=(
+                    f"Error: Tool arguments for '{tool_call.name}' must be a dictionary/object, "
+                    f"got: {type(tool_call.arguments).__name__}"
+                ),
+                exit_code=1,
+            )
+
         try:
             exit_code, raw_output = tool.execute(**tool_call.arguments)
         except Exception as exc:
             exit_code = 1
             raw_output = f"Error executing tool '{tool_call.name}': {exc}"
 
+        raw_output_str = str(raw_output) if raw_output is not None else ""
+
         formatted_output, was_truncated, raw_log_path = format_tool_output(
-            output=raw_output,
+            output=raw_output_str,
             call_id=tool_call.id,
             tool_name=tool_call.name,
             step_index=step_index,

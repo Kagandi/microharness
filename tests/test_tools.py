@@ -139,6 +139,13 @@ class TestTools(unittest.TestCase):
         self.assertIn("write_file(path: string, content: string):", snippet)
         self.assertIn("edit_file(path: string, old_str: string, new_str: string):", snippet)
 
+    def test_tool_dispatch_with_non_dict_arguments(self):
+        # When an LLM sends a string or list instead of a dict for arguments
+        call = ToolCall(id="e3", name="bash", arguments="echo hello")  # type: ignore
+        res = self.registry.dispatch(call, step_index=1)
+        self.assertEqual(res.exit_code, 1)
+        self.assertIn("must be a dictionary/object", res.output)
+
 
 if __name__ == "__main__":
     unittest.main()

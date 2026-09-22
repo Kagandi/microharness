@@ -71,16 +71,7 @@ class AgentLoop:
                 "content": content,
                 "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
             },
-            tool_results=[
-                {
-                    "call_id": tr.call_id,
-                    "output": tr.output,
-                    "exit_code": tr.exit_code,
-                    "was_truncated": tr.was_truncated,
-                    "raw_log_path": tr.raw_log_path,
-                }
-                for tr in tool_results
-            ],
+            tool_results=[tr.to_dict() for tr in tool_results],
             compaction_applied=compaction_applied,
             duration_s=duration,
         )

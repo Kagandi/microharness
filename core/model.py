@@ -66,26 +66,7 @@ class HttpChatModel:
         if self.api_key:
             req_headers["Authorization"] = f"Bearer {self.api_key}"
 
-        formatted_messages = []
-        for msg in messages:
-            item: dict[str, Any] = {"role": msg.role, "content": msg.content or ""}
-            if msg.tool_call_id:
-                item["tool_call_id"] = msg.tool_call_id
-            if msg.tool_calls:
-                item["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
-                            if isinstance(tc.arguments, dict)
-                            else str(tc.arguments),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
-            formatted_messages.append(item)
+        formatted_messages = [msg.to_dict() for msg in messages]
 
         payload: dict[str, Any] = {
             "model": self.model,
@@ -124,7 +105,14 @@ class HttpChatModel:
             for raw_tc in choice["tool_calls"]:
                 func_data = raw_tc["function"]
                 args_raw = func_data.get("arguments", "{}")
-                parsed_args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                if isinstance(args_raw, str):
+                    try:
+                        parsed_args = json.loads(args_raw)
+                    except json.JSONDecodeError:
+                        parsed_args = {"_raw_arguments": args_raw}
+                else:
+                    parsed_args = args_raw or {}
+
                 tool_calls.append(
                     ToolCall(
                         id=raw_tc["id"],

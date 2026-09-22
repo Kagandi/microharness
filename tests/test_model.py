@@ -42,6 +42,55 @@ class TestModel(unittest.TestCase):
         self.assertIn("completed", text3)
         self.assertEqual(len(calls3), 0)
 
+    def test_message_to_dict_standard_user_and_tool(self):
+        m1 = Message(role="user", content="hello")
+        self.assertEqual(m1.to_dict(), {"role": "user", "content": "hello"})
+
+        m2 = Message(role="tool", content="out", tool_call_id="call_123")
+        self.assertEqual(
+            m2.to_dict(),
+            {"role": "tool", "content": "out", "tool_call_id": "call_123"},
+        )
+
+    def test_message_to_dict_serializes_tool_call_arguments_as_json_string(self):
+        tc = ToolCall(id="c1", name="bash", arguments={"command": "ls -la"})
+        msg = Message(role="assistant", content="Running command", tool_calls=[tc])
+        data = msg.to_dict()
+
+        self.assertEqual(data["role"], "assistant")
+        self.assertEqual(data["content"], "Running command")
+        self.assertIn("tool_calls", data)
+        self.assertEqual(len(data["tool_calls"]), 1)
+        self.assertEqual(data["tool_calls"][0]["id"], "c1")
+        self.assertEqual(data["tool_calls"][0]["type"], "function")
+        self.assertEqual(data["tool_calls"][0]["function"]["name"], "bash")
+        # Invariant: OpenAI expects function arguments to be a JSON string, not a python dict or None
+        self.assertEqual(
+            data["tool_calls"][0]["function"]["arguments"],
+            '{"command": "ls -la"}',
+        )
+
+    def test_tool_result_to_dict(self):
+        from core.types import ToolResult
+
+        tr = ToolResult(
+            call_id="call_99",
+            output="test output",
+            exit_code=0,
+            was_truncated=True,
+            raw_log_path="/path/to/log.log",
+        )
+        self.assertEqual(
+            tr.to_dict(),
+            {
+                "call_id": "call_99",
+                "output": "test output",
+                "exit_code": 0,
+                "was_truncated": True,
+                "raw_log_path": "/path/to/log.log",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

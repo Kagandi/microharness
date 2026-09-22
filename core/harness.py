@@ -12,7 +12,7 @@ from core.model import Model
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
-from core.types import EvalResult, Message, RunResult, Task
+from core.types import EvalResult, RunResult, Task
 
 DEFAULT_GLOBAL_DIR = Path.home() / ".mini-harness"
 
@@ -377,16 +377,19 @@ class Harness:
         )
 
         step_idx = 1
-        current_instruction: str | None = first_instruction
+        has_pending_turn = True
+        max_steps_per_turn = 30
 
         while True:
             # If we have an active instruction to execute, run the agent loop
-            if current_instruction:
-                while True:
+            if has_pending_turn:
+                turn_steps = 0
+                while turn_steps < max_steps_per_turn:
                     try:
                         is_finished, step_trace = loop.step(step_index=step_idx)
                         tracer.record_step(step_trace)
                         step_idx += 1
+                        turn_steps += 1
 
                         if is_finished:
                             agent_reply = step_trace.model_response.get("content", "")
@@ -398,7 +401,11 @@ class Harness:
                     except Exception as exc:
                         print(f"\n❌ Error during turn: {exc}")
                         break
-                current_instruction = None
+                else:
+                    print(
+                        f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
+                    )
+                has_pending_turn = False
 
             # Render minimal context usage footer
             stats = memory.stats()
@@ -473,8 +480,8 @@ class Harness:
                     _, template, scope = custom_commands[cmd_key]
                     expanded_prompt = _expand_command(template, args_part)
                     print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
-                    memory.messages.append(Message(role="user", content=expanded_prompt))
-                    current_instruction = expanded_prompt
+                    memory.add_user(expanded_prompt)
+                    has_pending_turn = True
                     continue
                 else:
                     print(
@@ -483,8 +490,8 @@ class Harness:
                     continue
 
             # Normal user message: feed into memory and execute
-            memory.messages.append(Message(role="user", content=user_input))
-            current_instruction = user_input
+            memory.add_user(user_input)
+            has_pending_turn = True
 
         patch_diff = env.get_git_patch()
         if patch_diff:

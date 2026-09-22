@@ -121,6 +121,32 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(msgs[0].content, "SYS_PROMPT")
         self.assertEqual(msgs[1].content, "FRESH_START")
 
+    def test_add_user(self):
+        mem = Memory(system_prompt="SYS", user_prompt="Initial")
+        mem.add_user("Next turn from user")
+        msgs = mem.get_messages()
+        self.assertEqual(len(msgs), 3)
+        self.assertEqual(msgs[-1].role, "user")
+        self.assertEqual(msgs[-1].content, "Next turn from user")
+
+    def test_compaction_with_no_system_prompt(self):
+        # When system_prompt is empty, only initial user prompt is at index 0
+        mem = Memory(
+            system_prompt="", user_prompt="TASK", max_context_chars=100, keep_recent_turns=1
+        )
+        mem.add_assistant("Step 1")
+        mem.add_tool_result(ToolResult(call_id="c1", output="A" * 300))
+        mem.add_assistant("Recent")
+
+        self.assertTrue(mem.compact_if_needed(force=True))
+        # Initial user task is preserved
+        self.assertEqual(mem.messages[0].role, "user")
+        self.assertEqual(mem.messages[0].content, "TASK")
+        # Middle tool output is collapsed
+        self.assertIn("[Tool output collapsed", mem.messages[2].content)
+        # Recent turn is preserved
+        self.assertEqual(mem.messages[-1].content, "Recent")
+
 
 if __name__ == "__main__":
     unittest.main()
