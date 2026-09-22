@@ -3,6 +3,10 @@ __pycache__/
 .runs/
 .DS_Store
 .venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 .env
 .env.local
 .env.*.local
