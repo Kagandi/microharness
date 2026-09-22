@@ -16,6 +16,44 @@ from core.tracer import Tracer
 from core.types import EvalResult, Message, RunResult, Task
 
 
+def _discover_project_context(workspace: Path) -> str:
+    """Discovers AGENTS.md instructions and available skills via progressive disclosure."""
+    sections: list[str] = []
+
+    # 1. Project-level steering instructions (AGENTS.md)
+    agents_file = workspace / "AGENTS.md"
+    if agents_file.is_file():
+        content = agents_file.read_text(encoding="utf-8", errors="replace").strip()
+        if content:
+            sections.append(
+                f"--- Project Instructions (from AGENTS.md) ---\n"
+                f"{content}\n"
+                f"-------------------------------------------"
+            )
+
+    # 2. Available project skills (progressive disclosure from skills/ or .skills/)
+    skills_index: list[str] = []
+    for s_dir in [workspace / "skills", workspace / ".skills"]:
+        if s_dir.is_dir():
+            for entry in sorted(s_dir.iterdir()):
+                skill_doc = entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
+                if skill_doc and skill_doc.is_file() and entry.name != "README.md":
+                    lines = skill_doc.read_text(encoding="utf-8", errors="replace").splitlines()
+                    summary = next((line.strip().lstrip("#").strip() for line in lines if line.strip()), entry.stem)
+                    rel_path = skill_doc.relative_to(workspace)
+                    skills_index.append(f"- {entry.stem}: {summary} (read `{rel_path}` for full instructions)")
+
+    if skills_index:
+        sections.append(
+            "--- Available Project Skills (Progressive Disclosure) ---\n"
+            + "\n".join(skills_index)
+            + "\nTip: Use the `read_file` tool to inspect a skill's full instructions only when needed.\n"
+            + "---------------------------------------------------------"
+        )
+
+    return ("\n\n" + "\n\n".join(sections)) if sections else ""
+
+
 class Harness:
     """The orchestrator / chassis that hosts, constrains, traces, and evaluates the agent loop."""
 
@@ -82,6 +120,11 @@ class Harness:
                 f"\n\nContext:\nYou are working directly in an existing project directory at `{workspace}`.\n"
                 "Inspect existing files and git history to understand the codebase before making changes."
             )
+
+        # Discover and inject project instructions (AGENTS.md) and progressive skills index
+        project_context = _discover_project_context(workspace)
+        if project_context:
+            active_system_prompt += project_context
 
         memory = Memory(
             system_prompt=active_system_prompt,

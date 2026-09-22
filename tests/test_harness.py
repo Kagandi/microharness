@@ -172,6 +172,50 @@ class TestHarnessIntegration(unittest.TestCase):
         # Invariant: The actual project file was upgraded in-place!
         self.assertEqual((project_dir / "app.py").read_text(), "def run():\n    return 'v2'\n")
 
+    def test_agents_md_and_skills_progressive_disclosure(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="project_with_skills_"))
+        # 1. Project instructions
+        (project_dir / "AGENTS.md").write_text("Always format with ruff and follow standard conventions.\n")
+
+        # 2. Skill folder with SKILL.md
+        skill_dir = project_dir / "skills" / "deploy-tool"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# Deploy Workflow\nDetailed multi-step deployment commands and token rules.\n")
+
+        # Model captures the messages sent to it
+        captured_prompts: list[list[Message]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(list(messages))
+                # Agent uses read_file to inspect the skill on-demand
+                if len(captured_prompts) == 1:
+                    return "Need skill info", [ToolCall(id="s1", name="read_file", arguments={"path": "skills/deploy-tool/SKILL.md"})]
+                return "Finished task using skill", []
+
+        harness = Harness(model=RecordingModel(), workspace_dir=project_dir, runs_dir=self.runs_dir, verbose=False)
+        task = Task(id="skill_task", instruction="Deploy the app")
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+
+        # Inspect the system prompt in the first step
+        system_prompt = captured_prompts[0][0].content
+
+        # Invariant 1: AGENTS.md instructions are injected
+        self.assertIn("Always format with ruff", system_prompt)
+
+        # Invariant 2: Progressive disclosure indexed the skill without dumping the entire file body
+        self.assertIn("deploy-tool: Deploy Workflow", system_prompt)
+        self.assertIn("read `skills/deploy-tool/SKILL.md`", system_prompt)
+        # The full internal body of the skill was NOT dumped into the system prompt!
+        self.assertNotIn("Detailed multi-step deployment commands and token rules", system_prompt)
+
+        # Invariant 3: The agent was able to read the full skill on demand using read_file
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        step1_tool_output = trace_data["steps"][0]["tool_results"][0]["output"]
+        self.assertIn("Detailed multi-step deployment commands", step1_tool_output)
+
 
 if __name__ == "__main__":
     unittest.main()
