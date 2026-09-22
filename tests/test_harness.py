@@ -280,7 +280,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertIn("Detailed multi-step deployment commands", step1_tool_output)
 
     def test_global_and_project_cascading_and_shadowing(self):
-        # 1. Setup mock global dir (~/.mini-harness)
+        # 1. Setup mock global dir (~/.microharness)
         global_dir = Path(tempfile.mkdtemp(prefix="global_harness_")).resolve()
         (global_dir / "AGENTS.md").write_text(
             "GLOBAL RULE: Always write explicit type annotations.\n"
@@ -361,7 +361,7 @@ class TestHarnessIntegration(unittest.TestCase):
 
         # Invariant 1: System prompt cascading order: Global baseline first, Project local second
         system_prompt = captured_prompts[0][0].content
-        global_idx = system_prompt.find("Global User Instructions (~/.mini-harness/AGENTS.md)")
+        global_idx = system_prompt.find("Global User Instructions (~/.microharness/AGENTS.md)")
         project_idx = system_prompt.find("Project Instructions (AGENTS.md)")
         self.assertGreater(global_idx, -1)
         self.assertGreater(project_idx, -1)

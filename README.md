@@ -1,6 +1,6 @@
-# mini-harness
+# microharness
 
-An educational, minimalist, and fully pluggable AI agent harness in Python.
+A minimalist, zero-dependency, and fully pluggable AI agent microframework in Python.
 
 Built with **zero external runtime dependencies** (standard library only) to teach the core architectural boundaries of agentic systems. Compatible with modern packaging tools like [`uv`](https://github.com/astral-sh/uv).
 
@@ -8,7 +8,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ## 💡 The Core Mental Model: Harness vs. Loop
 
-| Component | Responsibility | Location in `mini-harness` |
+| Component | Responsibility | Location in `microharness` |
 | :--- | :--- | :--- |
 | **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
 | **Harness** *(The Chassis)* | The outer environment: workspace directory, sandboxing, budgets, memory compaction, telemetry/tracing, and grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
@@ -17,12 +17,12 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ## 🧭 Configuration, Steering, Skills & Commands
 
-`mini-harness` supports cascading configuration at two distinct scopes:
-1. **Global User Baseline** (`~/.mini-harness/` or `--global-dir`)
+`microharness` supports cascading configuration at two distinct scopes:
+1. **Global User Baseline** (`~/.microharness/` or `--global-dir`)
 2. **Project-Local Scope** (`./` in current workspace root)
 
-### 1. Global Configuration File (`~/.mini-harness/config.json`)
-Configure your baseline model, endpoint, API key, and limits once on your machine so you can run `mini-harness` from any repository without copying `.env` files:
+### 1. Global Configuration File (`~/.microharness/config.json`)
+Configure your baseline model, endpoint, API key, and limits once on your machine so you can run `microharness` from any repository without copying `.env` files:
 
 ```json
 {
@@ -39,26 +39,26 @@ Configure your baseline model, endpoint, API key, and limits once on your machin
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)
-3. **Global Config** (`~/.mini-harness/config.json`) — *Machine baseline*
+3. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
 4. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
 
 ### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:
-* **Global Baseline**: `~/.mini-harness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
+* **Global Baseline**: `~/.microharness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
 * **Project Conventions**: `./AGENTS.md` in the repo root (e.g., repo-specific test commands, architecture rules).
 
 The harness loads both in cascading order (Global baseline first, Project local second) into the system prompt.
 
 ### 3. Progressive Skills Disclosure (`skills/` & Shadowing) — Agent-Facing
 Define reusable task workflows for the **agent** in `skills/<skill_name>/SKILL.md` (or `.skills/`):
-* **Global Skills** (`~/.mini-harness/skills/`): Available across all projects on your machine.
+* **Global Skills** (`~/.microharness/skills/`): Available across all projects on your machine.
 * **Project Skills** (`./skills/`): Project-specific tools and workflows.
 * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project version cleanly overrides it.
 * **Progressive Disclosure**: Full skill files are never dumped into the prompt. Instead, the harness injects a 1-line index with scope badges (`[global]` or `[project]`).
 * **Lazy Loading & Security**: The agent reads full instructions on demand via `read_file`. Global skills are authorized for reading, while all file writes remain strictly sandboxed to the project directory.
 
 ### 4. Custom Slash Commands (`commands/*.md`) — User-Facing
-Define reusable prompt templates and macros for the **user** in `commands/<name>.md` (or `.commands/`, globally in `~/.mini-harness/commands/`):
+Define reusable prompt templates and macros for the **user** in `commands/<name>.md` (or `.commands/`, globally in `~/.microharness/commands/`):
 ```markdown
 # Review code changes
 Review the git diff or specified files: $ARGUMENTS.
@@ -68,7 +68,7 @@ Check for:
 3. Adherence to conventions in AGENTS.md
 ```
 * **Skills vs. Commands**: Skills teach the **agent** how to perform complex workflows; Commands give the **user** prompt shortcuts.
-* **Invocation**: Type `/review src/auth.py` in interactive chat or pass `mini-harness "/review src/auth.py"`.
+* **Invocation**: Type `/review src/auth.py` in interactive chat or pass `microharness "/review src/auth.py"`.
 * **Argument Substitution**: `$ARGUMENTS` or `{args}` is substituted with your trailing arguments.
 * **Dynamic Help & Shadowing**: `/help` lists all discovered custom commands with their descriptions and scopes (`[project]` or `[global]`). Project commands shadow global ones.
 
@@ -80,20 +80,20 @@ By default, the agent runs directly in your **current working directory** (like 
 
 ```bash
 # Operates directly on the current directory:
-uv run mini-harness "Inspect the files in this directory and explain the architecture"
+uv run microharness "Inspect the files in this directory and explain the architecture"
 
 # Or point to any other project directory with -d:
-uv run mini-harness -d /path/to/my-project "Fix the bug in auth.py"
+uv run microharness -d /path/to/my-project "Fix the bug in auth.py"
 ```
 
 If you ever want an isolated disposable scratchpad (e.g. for testing without touching real files), pass `--sandbox`:
 ```bash
-uv run mini-harness --sandbox "Experiment with writing a new scraper"
+uv run microharness --sandbox "Experiment with writing a new scraper"
 ```
 
 If you prefer a one-and-done batch run (e.g. for CI), pass `--batch`:
 ```bash
-uv run mini-harness "Run pytest and fix any failures" --batch
+uv run microharness "Run pytest and fix any failures" --batch
 ```
 
 ---
@@ -129,15 +129,15 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 58 unit and integration tests run in ~0.9s)*
+*(All 62 unit and integration tests run in ~0.9s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
 # Calculator SWE bug-fix benchmark with automated grading:
-uv run mini-harness --demo calculator
+uv run microharness --demo calculator
 
 # Lightweight greeting benchmark:
-uv run mini-harness --demo greeting
+uv run microharness --demo greeting
 ```
 
 ---
@@ -153,7 +153,7 @@ from core.harness import Harness
 harness = Harness(
     model=my_custom_model,  # Or HttpChatModel(endpoint, model, key)
     workspace_dir=".",  # Works directly on your project
-    global_dir="~/.mini-harness",  # Global config, instructions & skills
+    global_dir="~/.microharness",  # Global config, instructions & skills
     tools=[bash_tool, my_tool],  # Custom tools (dynamically documented in system prompt)
 )
 harness.run_interactive("Help me refactor the database layer")
@@ -170,8 +170,8 @@ harness.run_interactive("Help me refactor the database layer")
    - Executes bash with timeouts and combined stdout/stderr.
 
 2. **Cascading Configuration & Steering (`core/harness.py`)**
-   - Loads global defaults from `~/.mini-harness/config.json`.
-   - Injects global user instructions (`~/.mini-harness/AGENTS.md`) and project instructions (`./AGENTS.md`) in cascading order.
+   - Loads global defaults from `~/.microharness/config.json`.
+   - Injects global user instructions (`~/.microharness/AGENTS.md`) and project instructions (`./AGENTS.md`) in cascading order.
    - Discovers `skills/` and `commands/` globally and locally; project definitions cleanly shadow global ones.
    - Indexes skills lazily with scope badges to conserve context tokens.
 
@@ -206,7 +206,7 @@ harness.run_interactive("Help me refactor the database layer")
 ## 📁 Project Structure
 
 ```
-mini-harness/
+microharness/
 ├── pyproject.toml      # Modern PEP 621 packaging for uv & hatchling
 ├── uv.lock             # Deterministic lockfile generated by uv
 ├── SPEC.md             # Detailed specification & design rationale

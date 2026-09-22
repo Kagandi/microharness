@@ -1,7 +1,7 @@
 [project]
-name = "mini-harness"
+name = "microharness"
 version = "0.1.0"
-description = "A minimal, educational, and pluggable AI agent harness in Python"
+description = "A minimal, zero-dependency, and pluggable AI agent microframework in Python"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -10,6 +10,7 @@ authors = [
 dependencies = []
 
 [project.scripts]
+microharness = "main:main"
 mini-harness = "main:main"
 
 [dependency-groups]

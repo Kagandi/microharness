@@ -72,7 +72,7 @@ class Environment:
         if target.is_relative_to(self.workspace_dir):
             return target
 
-        # Check allowed external read directories (e.g. ~/.mini-harness/)
+        # Check allowed external read directories (e.g. ~/.microharness/)
         for allowed in self.allowed_read_dirs:
             if target.is_relative_to(allowed):
                 return target

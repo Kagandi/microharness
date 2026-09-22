@@ -1,1 +1,1 @@
-"""Unit and integration tests for mini-harness."""
+"""Unit and integration tests for microharness."""

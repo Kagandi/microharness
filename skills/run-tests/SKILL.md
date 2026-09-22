@@ -1,6 +1,6 @@
 # Test Execution & Verification
 
-Run the test suite and verify code quality for mini-harness.
+Run the test suite and verify code quality for microharness.
 
 ## Commands
 1. Run all unit & integration tests:

@@ -16,11 +16,15 @@ from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry,
 from core.tracer import Tracer
 from core.types import EvalResult, RunResult, Task
 
-DEFAULT_GLOBAL_DIR = Path.home() / ".mini-harness"
+DEFAULT_GLOBAL_DIR = (
+    Path.home() / ".microharness"
+    if (Path.home() / ".microharness").exists() or not (Path.home() / ".mini-harness").exists()
+    else Path.home() / ".mini-harness"
+)
 
 
 def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
-    """Loads user baseline configuration from ~/.mini-harness/config.json."""
+    """Loads user baseline configuration from ~/.microharness/config.json."""
     if not global_dir:
         return {}
     config_file = global_dir / "config.json"
@@ -37,14 +41,14 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
     """Loads global and project-level steering guidelines in cascading order."""
     sections: list[str] = []
 
-    # 1. Global user baseline instructions (~/.mini-harness/AGENTS.md)
+    # 1. Global user baseline instructions (~/.microharness/AGENTS.md)
     if global_dir:
         global_file = global_dir / "AGENTS.md"
         if global_file.is_file():
             content = global_file.read_text(encoding="utf-8", errors="replace").strip()
             if content:
                 sections.append(
-                    f"--- Global User Instructions (~/.mini-harness/AGENTS.md) ---\n"
+                    f"--- Global User Instructions (~/.microharness/AGENTS.md) ---\n"
                     f"{content}\n"
                     f"----------------------------------------------------------"
                 )
@@ -135,7 +139,7 @@ def _discover_commands(
             )
             commands[file.stem.lower()] = (desc, content, scope)
 
-    # 1. Global commands (~/.mini-harness/commands/)
+    # 1. Global commands (~/.microharness/commands/)
     if global_dir:
         for gd in [global_dir / "commands", global_dir / ".commands"]:
             scan_dir(gd, "global")

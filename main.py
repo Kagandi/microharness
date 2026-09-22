@@ -1,4 +1,4 @@
-"""mini-harness: Educational demonstration of an AI agent harness.
+"""microharness: Clean, zero-dependency AI agent microframework and coding harness.
 
 Demonstrates:
 1. Boundary between Harness (chassis) and AgentLoop (engine).
@@ -150,7 +150,7 @@ def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="mini-harness: Interactive AI coding agent harness for existing projects or benchmarks.",
+        description="microharness: Interactive AI coding agent microframework for existing projects or benchmarks.",
         usage="%(prog)s [instruction] [-d DIR] [--sandbox] [--batch] [--demo {calculator,greeting}] [options]",
     )
     parser.add_argument(
@@ -173,7 +173,7 @@ def main():
     parser.add_argument(
         "--global-dir",
         default=None,
-        help="Global configuration and skills directory (default: ~/.mini-harness)",
+        help="Global configuration and skills directory (default: ~/.microharness)",
     )
     parser.add_argument(
         "--batch",
@@ -189,21 +189,21 @@ def main():
     parser.add_argument(
         "--endpoint",
         default=None,
-        help="HTTP chat completions endpoint (env: MODEL_ENDPOINT or ~/.mini-harness/config.json)",
+        help="HTTP chat completions endpoint (env: MODEL_ENDPOINT or ~/.microharness/config.json)",
     )
     parser.add_argument(
         "--model",
         default=None,
-        help="Model identifier (env: MODEL_NAME or ~/.mini-harness/config.json)",
+        help="Model identifier (env: MODEL_NAME or ~/.microharness/config.json)",
     )
     parser.add_argument(
         "--api-key",
         default=None,
-        help="API key (env: MODEL_API_KEY, OPENROUTER_API_KEY, or ~/.mini-harness/config.json)",
+        help="API key (env: MODEL_API_KEY, OPENROUTER_API_KEY, or ~/.microharness/config.json)",
     )
     args = parser.parse_args()
 
-    # Resolve global config (~/.mini-harness/config.json)
+    # Resolve global config (~/.microharness/config.json)
     global_dir = Path(args.global_dir).resolve() if args.global_dir else DEFAULT_GLOBAL_DIR
     global_config = load_global_config(global_dir)
 
@@ -232,7 +232,7 @@ def main():
     else:
         print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
         print(
-            "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or configure ~/.mini-harness/config.json.\n"
+            "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or configure ~/.microharness/config.json.\n"
         )
         model = build_mock_agent_script()
 
