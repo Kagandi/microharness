@@ -15,20 +15,41 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 🧭 Steering, Skills & Commands (Cascading & Shadowing)
+## 🧭 Configuration, Steering, Skills & Commands
 
 `mini-harness` supports cascading configuration at two distinct scopes:
 1. **Global User Baseline** (`~/.mini-harness/` or `--global-dir`)
 2. **Project-Local Scope** (`./` in current workspace root)
 
-### 1. Cascading Instructions (`AGENTS.md`)
+### 1. Global Configuration File (`~/.mini-harness/config.json`)
+Configure your baseline model, endpoint, API key, and limits once on your machine so you can run `mini-harness` from any repository without copying `.env` files:
+
+```json
+{
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "anthropic/claude-3.5-sonnet",
+  "api_key": "sk-or-v1-...",
+  "max_context_chars": 32000,
+  "trigger_ratio": 0.80,
+  "max_tool_chars": 2500,
+  "sandbox": false
+}
+```
+
+#### Precedence Hierarchy:
+1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
+2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)
+3. **Global Config** (`~/.mini-harness/config.json`) — *Machine baseline*
+4. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+
+### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:
 * **Global Baseline**: `~/.mini-harness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
 * **Project Conventions**: `./AGENTS.md` in the repo root (e.g., repo-specific test commands, architecture rules).
 
 The harness loads both in cascading order (Global baseline first, Project local second) into the system prompt.
 
-### 2. Progressive Skills Disclosure (`skills/` & Shadowing) — Agent-Facing
+### 3. Progressive Skills Disclosure (`skills/` & Shadowing) — Agent-Facing
 Define reusable task workflows for the **agent** in `skills/<skill_name>/SKILL.md` (or `.skills/`):
 * **Global Skills** (`~/.mini-harness/skills/`): Available across all projects on your machine.
 * **Project Skills** (`./skills/`): Project-specific tools and workflows.
@@ -36,7 +57,7 @@ Define reusable task workflows for the **agent** in `skills/<skill_name>/SKILL.m
 * **Progressive Disclosure**: Full skill files are never dumped into the prompt. Instead, the harness injects a 1-line index with scope badges (`[global]` or `[project]`).
 * **Lazy Loading & Security**: The agent reads full instructions on demand via `read_file`. Global skills are authorized for reading, while all file writes remain strictly sandboxed to the project directory.
 
-### 3. Custom Slash Commands (`commands/*.md`) — User-Facing
+### 4. Custom Slash Commands (`commands/*.md`) — User-Facing
 Define reusable prompt templates and macros for the **user** in `commands/<name>.md` (or `.commands/`, globally in `~/.mini-harness/commands/`):
 ```markdown
 # Review code changes
@@ -108,7 +129,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 48 unit and integration tests run in ~0.9s)*
+*(All 58 unit and integration tests run in ~0.9s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
@@ -132,7 +153,7 @@ from core.harness import Harness
 harness = Harness(
     model=my_custom_model,  # Or HttpChatModel(endpoint, model, key)
     workspace_dir=".",  # Works directly on your project
-    global_dir="~/.mini-harness",  # Global instructions & skills
+    global_dir="~/.mini-harness",  # Global config, instructions & skills
     tools=[bash_tool, my_tool],  # Custom tools (dynamically documented in system prompt)
 )
 harness.run_interactive("Help me refactor the database layer")
@@ -148,9 +169,10 @@ harness.run_interactive("Help me refactor the database layer")
    - Prevents path traversal outside project boundaries while permitting read access to authorized global directories (`allowed_read_dirs`).
    - Executes bash with timeouts and combined stdout/stderr.
 
-2. **Cascading Steering & Progressive Skills (`core/harness.py`)**
+2. **Cascading Configuration & Steering (`core/harness.py`)**
+   - Loads global defaults from `~/.mini-harness/config.json`.
    - Injects global user instructions (`~/.mini-harness/AGENTS.md`) and project instructions (`./AGENTS.md`) in cascading order.
-   - Discovers `skills/` globally and locally; project skills cleanly shadow global skills of the same name.
+   - Discovers `skills/` and `commands/` globally and locally; project definitions cleanly shadow global ones.
    - Indexes skills lazily with scope badges to conserve context tokens.
 
 3. **Targeted File Editing vs. Full Rewrites (`core/tools.py`)**
@@ -164,9 +186,10 @@ harness.run_interactive("Help me refactor the database layer")
    - Massive command outputs are head + tail truncated.
    - The full, raw output is spilled to `.runs/<run_id>/logs/` so it never pollutes the user's project root.
 
-6. **Context & Memory Compaction Across Turns (`core/memory.py`)**
-   - Tracks conversation history across multiple turns with estimated token counts.
-   - Automatically (or via `/compact`) collapses older middle tool observations while preserving system prompt, initial task, and recent turns.
+6. **Proactive 80% Context Compaction (`core/memory.py`)**
+   - Proactively prunes older tool observations at an 80% high-water mark (`trigger_ratio = 0.80`), keeping 20% reserved for output tokens and model reasoning.
+   - Prevents mid-generation `finish_reason: "length"` cutoffs and provider HTTP 400 errors.
+   - Preserves system prompt, initial task, and recent working turns.
 
 7. **Git Patch Export (`patch.diff`) & Tracing (`core/tracer.py`)**
    - Automatic git diff extraction: generates `patch.diff` for coding tasks in git repositories.
@@ -190,6 +213,8 @@ mini-harness/
 ├── skills/             # On-demand skills (progressive disclosure)
 │   └── run-tests/
 │       └── SKILL.md
+├── commands/           # Custom slash commands (user prompt shortcuts)
+│   └── review.md
 ├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration & CLI entrypoint
 ├── core/
@@ -197,17 +222,17 @@ mini-harness/
 │   ├── prompts.py      # System prompt templates
 │   ├── environment.py  # Workspace & bash runner (supports in-place and sandbox)
 │   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
-│   ├── memory.py       # Context manager & compaction policies
+│   ├── memory.py       # Context manager & 80% high-water mark compaction
 │   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
 │   ├── loop.py         # Pure ReAct loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py       # Telemetry collector & trace exporter
-│   └── harness.py      # Harness orchestrator (supports batch and interactive chat)
+│   └── harness.py      # Harness orchestrator with global config & commands support
 └── tests/
     ├── test_environment.py # Path sandboxing & bash timeout tests
     ├── test_tools.py       # Tools, truncation & disk spillover tests
-    ├── test_memory.py      # Conversation history, stats & compaction tests
-    ├── test_model.py       # Endpoint normalization & mock model tests
+    ├── test_memory.py      # Conversation history, stats & 80% compaction tests
+    ├── test_model.py       # Endpoint normalization, serialization & mock model tests
     ├── test_evaluator.py   # Grader assertions tests
-    └── test_harness.py     # End-to-end lifecycle, multi-turn chat, skills & guardrails tests
+    └── test_harness.py     # End-to-end lifecycle, global config, commands & guardrails tests
 ```

@@ -163,12 +163,13 @@ When a command outputs excessive text (e.g. `> 2,000` chars):
 ---
 
 ### 3.4 Context & Memory Management (`core/memory.py`)
-Maintains message history across multi-turn sessions with automatic and on-demand compaction:
+Maintains message history across multi-turn sessions with proactive and on-demand compaction:
+* **Proactive 80% High-Water Mark (`trigger_ratio = 0.80`)**: Compaction triggers when cumulative characters exceed 80% of `max_context_chars`. This strictly preserves 20% of the window as output headroom for the model's thoughts, reasoning, and JSON tool calls, preventing mid-generation cutoffs (`finish_reason: "length"`) and provider HTTP 400 errors.
 * **Immutability of Core Prompts**: System instructions and the original task instruction are **never** pruned or modified.
-* **Recency Protection**: The last $K$ turns are kept completely intact.
+* **Recency Protection**: The last $K$ turns (`keep_recent_turns`, default: 4) are kept completely intact.
 * **Compaction Strategy**: Older tool observations in the middle are replaced with concise tombstone markers (`[Tool output collapsed (N chars) to conserve context window]`).
 * **Manual Compaction**: Supports `/compact` (forced compaction) regardless of total character count.
-* **Context Diagnostics**: `stats()` provides real-time character count, maximum allowance, usage percentage, and role breakdown.
+* **Context Diagnostics**: `stats()` provides real-time character count, estimated tokens, maximum allowance, trigger threshold (`trigger_threshold_chars`), usage percentage, and role breakdown.
 * **Reset**: `/new` clears message history while preserving system prompt and workspace files.
 
 ---
@@ -188,13 +189,17 @@ class Model(Protocol):
 
 ---
 
-### 3.6 Steering & Progressive Skills (`core/harness.py`)
-The harness discovers steering context and reusable skills across global and project-level scopes during run setup:
-1. **Cascading Instructions (`AGENTS.md`)**:
+### 3.6 Configuration, Steering & Progressive Skills (`core/harness.py`)
+The harness discovers global machine configuration, steering guidelines, skills, and custom commands:
+1. **Global Configuration File (`~/.mini-harness/config.json`)**:
+   * Machine-level defaults for `endpoint`, `model`, `api_key`, `max_context_chars`, `trigger_ratio`, `max_tool_chars`, and `sandbox`.
+   * **Cascading Precedence**: CLI Arguments > Environment Variables / Local `.env` > `config.json` > Built-in defaults.
+   * Enables seamless in-place execution in any repository on the developer machine without duplicating `.env` files.
+2. **Cascading Instructions (`AGENTS.md`)**:
    * **Global Baseline**: `~/.mini-harness/AGENTS.md` provides user-level baseline rules across all projects.
    * **Project Conventions**: `./AGENTS.md` in the project root specializes or overrides guidelines for the specific repository.
    * Both are merged in cascading order (Global baseline first, Project local second) into the system prompt.
-2. **Progressive Skills Disclosure (`skills/` or `.skills/`) & Shadowing**:
+3. **Progressive Skills Disclosure (`skills/` or `.skills/`) & Shadowing**:
    * Scans both global directories (`~/.mini-harness/skills/`, `~/.mini-harness/.skills/`) and project directories (`./skills/`, `./.skills/`).
    * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project-local skill cleanly shadows/replaces the global one.
    * Extracts a 1-line summary and indexes the available skills in the prompt:
@@ -205,7 +210,7 @@ The harness discovers steering context and reusable skills across global and pro
      Tip: Use the `read_file` tool to inspect a skill's full instructions only when needed.
      ```
    * **Context Efficiency & Security**: Full skill instructions are lazy-loaded on demand using `read_file`. Global skill files are authorized via `allowed_read_dirs`, while write permissions remain strictly scoped to `workspace_dir`.
-3. **Custom Slash Commands (`commands/*.md` or `.commands/`) — User-Facing**:
+4. **Custom Slash Commands (`commands/*.md` or `.commands/`) — User-Facing**:
    * Scans global (`~/.mini-harness/commands/`) and project (`./commands/`) directories for prompt templates.
    * Project commands shadow global commands of the same name.
    * Automatically replaces `$ARGUMENTS` or `{args}` with trailing input, or appends input as context.
@@ -249,10 +254,10 @@ while not done:
 ---
 
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/`:
-* `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
-* `test_tools.py`: Tool dispatching, exact head/tail boundary slice preservation, negative path write errors.
-* `test_memory.py`: Invariants when under budget, immutability of system prompts, stats calculation, forced compaction.
-* `test_model.py`: URL normalization, OpenRouter headers, mock sequencing.
+All features are tested against rigorous, non-tautological standards in `tests/` (58 passing tests in ~0.9s):
+* `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
+* `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors.
+* `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
+* `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing.
 * `test_evaluator.py`: Strict equality assertions, missing target files, forbidden string rejection.
-* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, and global-vs-project cascading and skill shadowing.
+* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, and global config (`config.json`) cascading precedence.
