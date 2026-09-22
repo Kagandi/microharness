@@ -96,6 +96,54 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
     )
 
 
+def _discover_commands(
+    workspace: Path, global_dir: Path | None = None
+) -> dict[str, tuple[str, str, str]]:
+    """Discovers custom slash commands from global and project commands/ directories.
+
+    Returns dict mapping: command_name -> (description, template, scope)
+    where scope is 'global' or 'project'. Project commands cleanly shadow global ones.
+    """
+    commands: dict[str, tuple[str, str, str]] = {}
+
+    def scan_dir(cmd_dir: Path, scope: str) -> None:
+        if not cmd_dir.is_dir():
+            return
+        for file in sorted(cmd_dir.glob("*.md")):
+            if file.name.lower() == "readme.md":
+                continue
+            content = file.read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines()
+            desc = next(
+                (line.strip().lstrip("#").strip() for line in lines if line.strip()), file.stem
+            )
+            commands[file.stem.lower()] = (desc, content, scope)
+
+    # 1. Global commands (~/.mini-harness/commands/)
+    if global_dir:
+        for gd in [global_dir / "commands", global_dir / ".commands"]:
+            scan_dir(gd, "global")
+
+    # 2. Project commands (./commands/ or ./.commands/, shadows global)
+    for pd in [workspace / "commands", workspace / ".commands"]:
+        scan_dir(pd, "project")
+
+    return commands
+
+
+def _expand_command(template: str, user_args: str) -> str:
+    """Expands a command template with user arguments."""
+    args = user_args.strip()
+    result = template
+    if "$ARGUMENTS" in result:
+        result = result.replace("$ARGUMENTS", args)
+    elif "{args}" in result:
+        result = result.replace("{args}", args)
+    elif args:
+        result = f"{result.strip()}\n\nAdditional Arguments / Target:\n{args}"
+    return result.strip()
+
+
 class Harness:
     """The orchestrator / chassis that hosts, constrains, traces, and evaluates the agent loop."""
 
@@ -192,13 +240,25 @@ class Harness:
         if skills_index:
             active_system_prompt += f"\n\n{skills_index}"
 
+        # Expand custom command if initial instruction is a slash command
+        custom_commands = _discover_commands(workspace, self.global_dir)
+        effective_instruction = initial_instruction
+        if initial_instruction.startswith("/"):
+            cmd_part, _, args_part = initial_instruction[1:].partition(" ")
+            cmd_key = cmd_part.lower().strip()
+            if cmd_key in custom_commands:
+                _, tmpl, scope = custom_commands[cmd_key]
+                effective_instruction = _expand_command(tmpl, args_part)
+                if self.verbose:
+                    print(f"⚡ Expanded custom command /{cmd_key} [{scope}]")
+
         memory = Memory(
             system_prompt=active_system_prompt,
-            user_prompt=initial_instruction,
+            user_prompt=effective_instruction,
             max_context_chars=self.max_context_chars,
         )
 
-        task = Task(id=task_id, instruction=initial_instruction, initial_files=initial_files)
+        task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)
         tracer = Tracer(task=task, output_dir=run_dir, verbose=self.verbose)
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
 
@@ -308,10 +368,12 @@ class Harness:
             initial_files={},
         )
 
+        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+
         print("\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
         print(
-            "💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /exit\n"
+            "💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /help | /exit\n"
         )
 
         step_idx = 1
@@ -361,14 +423,19 @@ class Harness:
                 break
 
             elif cmd in ("/help", "help"):
-                print("\nAvailable meta-commands:")
+                print("\nAvailable commands:")
                 print("  /status   - Show context window size, message breakdown, and budget")
                 print("  /compact  - Manually collapse older observations to free context")
                 print("  /new      - Clear conversation history while keeping workspace files")
-                print("  /exit     - Save session trace and exit\n")
+                print("  /exit     - Save session trace and exit")
+                if custom_commands:
+                    print("\nCustom slash commands (from commands/):")
+                    for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
+                        print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
+                print()
                 continue
 
-            elif cmd in ("/status", "/context", "status"):
+            elif cmd in ("/status", "/context", "status", "context"):
                 s = memory.stats()
                 print("\n📊 Context Breakdown:")
                 print(
@@ -397,6 +464,23 @@ class Harness:
                 memory.reset()
                 print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
                 continue
+
+            # Check for custom slash commands
+            elif user_input.startswith("/"):
+                cmd_part, _, args_part = user_input[1:].partition(" ")
+                cmd_key = cmd_part.lower().strip()
+                if cmd_key in custom_commands:
+                    _, template, scope = custom_commands[cmd_key]
+                    expanded_prompt = _expand_command(template, args_part)
+                    print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                    memory.messages.append(Message(role="user", content=expanded_prompt))
+                    current_instruction = expanded_prompt
+                    continue
+                else:
+                    print(
+                        f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n"
+                    )
+                    continue
 
             # Normal user message: feed into memory and execute
             memory.messages.append(Message(role="user", content=user_input))

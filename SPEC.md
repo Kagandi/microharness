@@ -205,6 +205,12 @@ The harness discovers steering context and reusable skills across global and pro
      Tip: Use the `read_file` tool to inspect a skill's full instructions only when needed.
      ```
    * **Context Efficiency & Security**: Full skill instructions are lazy-loaded on demand using `read_file`. Global skill files are authorized via `allowed_read_dirs`, while write permissions remain strictly scoped to `workspace_dir`.
+3. **Custom Slash Commands (`commands/*.md` or `.commands/`) — User-Facing**:
+   * Scans global (`~/.mini-harness/commands/`) and project (`./commands/`) directories for prompt templates.
+   * Project commands shadow global commands of the same name.
+   * Automatically replaces `$ARGUMENTS` or `{args}` with trailing input, or appends input as context.
+   * Expands commands in both batch instructions (`mini-harness "/review src/auth.py"`) and interactive chat (`👤 You: /review src/auth.py`).
+   * `/help` dynamically lists available custom commands alongside built-in meta-commands.
 
 ---
 

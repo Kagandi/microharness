@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.evaluator import FileContentEvaluator
-from core.harness import Harness
+from core.harness import Harness, _discover_commands, _expand_command
 from core.model import MockModel
 from core.types import Message, Task, ToolCall
 
@@ -554,6 +554,131 @@ class TestHarnessIntegration(unittest.TestCase):
             "custom_search(query: string): Search our proprietary internal documentation.",
             system_prompt,
         )
+
+    def test_custom_commands_discovery_and_shadowing(self):
+        global_dir = Path(tempfile.mkdtemp(prefix="global_cmds_")).resolve()
+        project_dir = Path(tempfile.mkdtemp(prefix="project_cmds_")).resolve()
+
+        # Global command
+        (global_dir / "commands").mkdir(parents=True)
+        (global_dir / "commands" / "explain.md").write_text(
+            "# Explain codebase\nExplain the architecture of $ARGUMENTS", encoding="utf-8"
+        )
+        (global_dir / "commands" / "review.md").write_text(
+            "# Global Review\nOld global review template", encoding="utf-8"
+        )
+
+        # Project command (shadows review.md)
+        (project_dir / "commands").mkdir(parents=True)
+        (project_dir / "commands" / "review.md").write_text(
+            "# Project Review\nProject specialized review for $ARGUMENTS", encoding="utf-8"
+        )
+        (project_dir / "commands" / "test-all.md").write_text(
+            "# Run All Tests\nExecute full test suite", encoding="utf-8"
+        )
+
+        cmds = _discover_commands(workspace=project_dir, global_dir=global_dir)
+
+        # Invariant 1: explain is discovered from global scope
+        self.assertIn("explain", cmds)
+        self.assertEqual(cmds["explain"][0], "Explain codebase")
+        self.assertEqual(cmds["explain"][2], "global")
+
+        # Invariant 2: test-all is discovered from project scope
+        self.assertIn("test-all", cmds)
+        self.assertEqual(cmds["test-all"][0], "Run All Tests")
+        self.assertEqual(cmds["test-all"][2], "project")
+
+        # Invariant 3: project review shadows global review
+        self.assertIn("review", cmds)
+        self.assertEqual(cmds["review"][0], "Project Review")
+        self.assertEqual(cmds["review"][2], "project")
+        self.assertIn("Project specialized review", cmds["review"][1])
+        self.assertNotIn("Old global review", cmds["review"][1])
+
+    def test_expand_command_placeholders(self):
+        # 1. $ARGUMENTS substitution
+        t1 = "Review changes in $ARGUMENTS carefully."
+        self.assertEqual(_expand_command(t1, "auth.py"), "Review changes in auth.py carefully.")
+
+        # 2. {args} substitution
+        t2 = "Run test suite on {args}."
+        self.assertEqual(
+            _expand_command(t2, "tests/test_harness.py"), "Run test suite on tests/test_harness.py."
+        )
+
+        # 3. Trailing append when no placeholder is present
+        t3 = "Run all benchmarks."
+        self.assertEqual(
+            _expand_command(t3, "--quick"),
+            "Run all benchmarks.\n\nAdditional Arguments / Target:\n--quick",
+        )
+
+        # 4. Empty arguments returns trimmed template
+        self.assertEqual(_expand_command(t3, "   "), "Run all benchmarks.")
+
+    def test_custom_command_execution_in_batch_mode(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="batch_cmd_")).resolve()
+        (project_dir / "commands").mkdir(parents=True)
+        (project_dir / "commands" / "lint.md").write_text(
+            "# Lint code\nRun linter on $ARGUMENTS and fix issues.", encoding="utf-8"
+        )
+
+        captured_prompts: list[list[Message]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(list(messages))
+                return "Linting complete.", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=project_dir,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+
+        # Initial instruction invokes custom command /lint core/
+        task = Task(id="run_lint_cmd", instruction="/lint core/")
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        # Invariant: Prompt sent to model had /lint expanded with template and argument
+        user_prompt = captured_prompts[0][1].content
+        self.assertIn("Run linter on core/ and fix issues.", user_prompt)
+        self.assertNotIn("/lint core/", user_prompt)
+
+    def test_custom_command_in_interactive_mode(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="interactive_cmd_")).resolve()
+        (project_dir / "commands").mkdir(parents=True)
+        (project_dir / "commands" / "audit.md").write_text(
+            "# Audit Security\nPerform security audit on target: $ARGUMENTS", encoding="utf-8"
+        )
+
+        captured_prompts: list[list[Message]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(list(messages))
+                return "Audit report generated.", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=project_dir,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+
+        # Mock interactive inputs: /help, custom command /audit api.py, then exit
+        user_inputs = iter(["/help", "/audit api.py", "exit"])
+        with patch("builtins.input", lambda *args: next(user_inputs)):
+            harness.run_interactive(initial_instruction="Initial prompt")
+
+        # Turn 1: Initial prompt
+        # Turn 2: /audit api.py expanded
+        self.assertEqual(len(captured_prompts), 2)
+        turn2_user_prompt = captured_prompts[1][-1].content
+        self.assertIn("Perform security audit on target: api.py", turn2_user_prompt)
 
 
 if __name__ == "__main__":

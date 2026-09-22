@@ -15,7 +15,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 🧭 Steering & Skills (Cascading & Shadowing)
+## 🧭 Steering, Skills & Commands (Cascading & Shadowing)
 
 `mini-harness` supports cascading configuration at two distinct scopes:
 1. **Global User Baseline** (`~/.mini-harness/` or `--global-dir`)
@@ -28,13 +28,28 @@ You can provide personal agent preferences globally, while projects can speciali
 
 The harness loads both in cascading order (Global baseline first, Project local second) into the system prompt.
 
-### 2. Progressive Skills Disclosure (`skills/` & Shadowing)
-Define reusable task workflows in `skills/<skill_name>/SKILL.md` (or `.skills/`):
+### 2. Progressive Skills Disclosure (`skills/` & Shadowing) — Agent-Facing
+Define reusable task workflows for the **agent** in `skills/<skill_name>/SKILL.md` (or `.skills/`):
 * **Global Skills** (`~/.mini-harness/skills/`): Available across all projects on your machine.
 * **Project Skills** (`./skills/`): Project-specific tools and workflows.
 * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project version cleanly overrides it.
 * **Progressive Disclosure**: Full skill files are never dumped into the prompt. Instead, the harness injects a 1-line index with scope badges (`[global]` or `[project]`).
 * **Lazy Loading & Security**: The agent reads full instructions on demand via `read_file`. Global skills are authorized for reading, while all file writes remain strictly sandboxed to the project directory.
+
+### 3. Custom Slash Commands (`commands/*.md`) — User-Facing
+Define reusable prompt templates and macros for the **user** in `commands/<name>.md` (or `.commands/`, globally in `~/.mini-harness/commands/`):
+```markdown
+# Review code changes
+Review the git diff or specified files: $ARGUMENTS.
+Check for:
+1. Correctness and edge-case logic bugs
+2. Unit test coverage
+3. Adherence to conventions in AGENTS.md
+```
+* **Skills vs. Commands**: Skills teach the **agent** how to perform complex workflows; Commands give the **user** prompt shortcuts.
+* **Invocation**: Type `/review src/auth.py` in interactive chat or pass `mini-harness "/review src/auth.py"`.
+* **Argument Substitution**: `$ARGUMENTS` or `{args}` is substituted with your trailing arguments.
+* **Dynamic Help & Shadowing**: `/help` lists all discovered custom commands with their descriptions and scopes (`[project]` or `[global]`). Project commands shadow global ones.
 
 ---
 
@@ -93,7 +108,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 44 unit and integration tests run in ~0.8s)*
+*(All 48 unit and integration tests run in ~0.9s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
