@@ -54,10 +54,14 @@ class Tracer:
                 print(f"   ... ({output.count(chr(10)) - 15} more lines in observation)")
 
     def finalize(
-        self, finish_reason: str, eval_result: EvalResult | None = None
+        self,
+        finish_reason: str,
+        eval_result: EvalResult | None = None,
+        patch_diff: str | None = None,
     ) -> tuple[Path, Path]:
         self.finish_reason = finish_reason
         self.eval_result = eval_result
+        self.patch_diff = patch_diff
 
         json_path = self.output_dir / "trace.json"
         md_path = self.output_dir / "trace.md"
@@ -76,6 +80,7 @@ class Tracer:
             },
             "finish_reason": self.finish_reason,
             "total_steps": len(self.steps),
+            "patch_diff": self.patch_diff,
             "eval_result": {
                 "passed": self.eval_result.passed if self.eval_result else None,
                 "score": self.eval_result.score if self.eval_result else None,
@@ -154,5 +159,14 @@ class Tracer:
                 if tr.get("raw_log_path"):
                     lines.append(f"*Full log saved at: `{tr['raw_log_path']}`*")
                 lines.append("")
+
+        if self.patch_diff:
+            lines.extend(
+                [
+                    "## Git Patch Diff",
+                    f"```diff\n{self.patch_diff}\n```",
+                    "",
+                ]
+            )
 
         path.write_text("\n".join(lines), encoding="utf-8")

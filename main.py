@@ -235,6 +235,8 @@ def main():
         print(f"Total Steps: {result.total_steps}")
         print(f"Workspace: {result.workspace_path}")
         print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+        if result.patch_path:
+            print(f"Patch: {result.patch_path}")
         print("=" * 60)
         return
 
@@ -257,6 +259,8 @@ def main():
         print(f"Total Steps: {result.total_steps}")
         print(f"Workspace: {result.workspace_path}")
         print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+        if result.patch_path:
+            print(f"Patch: {result.patch_path}")
         print("=" * 60)
         return
 

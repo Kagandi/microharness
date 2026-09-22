@@ -55,7 +55,9 @@ class Memory:
         return {
             "total_messages": len(self.messages),
             "total_chars": chars,
+            "estimated_tokens": chars // 4,
             "max_context_chars": self.max_context_chars,
+            "max_estimated_tokens": self.max_context_chars // 4,
             "usage_pct": pct,
             "by_role": {
                 "system": sum(1 for m in self.messages if m.role == "system"),

@@ -84,3 +84,4 @@ class RunResult:
     trace_path: str
     workspace_path: str
     eval_result: EvalResult | None = None
+    patch_path: str | None = None

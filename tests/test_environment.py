@@ -105,6 +105,36 @@ class TestEnvironment(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.env.resolve_read_path(str(sibling_file))
 
+    def test_edit_file_exact_replacement_success(self):
+        self.env.write_file("code.py", "def compute():\n    return 41\n")
+        count, msg = self.env.edit_file("code.py", "return 41", "return 42")
+        self.assertEqual(count, 1)
+        self.assertIn("Successfully replaced", msg)
+        self.assertEqual(
+            self.env.read_file("code.py"), "   1 | def compute():\n   2 |     return 42\n"
+        )
+
+    def test_edit_file_not_found_raises_value_error(self):
+        self.env.write_file("code.py", "x = 1\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file("code.py", "x = 99", "x = 2")
+        self.assertIn("Target string not found", str(ctx.exception))
+
+    def test_edit_file_ambiguous_multiple_matches_raises_value_error(self):
+        self.env.write_file("code.py", "line = 10\nline = 10\n")
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file("code.py", "line = 10", "line = 20")
+        self.assertIn("must be unique", str(ctx.exception))
+
+    def test_edit_file_empty_target_raises_value_error(self):
+        self.env.write_file("code.py", "data = 'hello'\n")
+        with self.assertRaises(ValueError):
+            self.env.edit_file("code.py", "", "new")
+
+    def test_edit_file_path_traversal_denied(self):
+        with self.assertRaises(PermissionError):
+            self.env.edit_file("../../etc/passwd", "root", "toor")
+
 
 if __name__ == "__main__":
     unittest.main()

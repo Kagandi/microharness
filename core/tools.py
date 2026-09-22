@@ -145,6 +145,42 @@ class WriteFileTool:
             return 1, f"Error writing file '{path}': {exc}"
 
 
+class EditFileTool:
+    name = "edit_file"
+    description = (
+        "Replaces an exact, unique occurrence of old_str with new_str in a file. "
+        "The old_str must match exactly (including whitespace/indentation) and be unique."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file relative to workspace root.",
+            },
+            "old_str": {
+                "type": "string",
+                "description": "The exact unique string or code block to replace.",
+            },
+            "new_str": {
+                "type": "string",
+                "description": "The replacement string or code block.",
+            },
+        },
+        "required": ["path", "old_str", "new_str"],
+    }
+
+    def __init__(self, env: Environment):
+        self.env = env
+
+    def execute(self, path: str, old_str: str, new_str: str) -> tuple[int, str]:
+        try:
+            _, message = self.env.edit_file(path, old_str, new_str)
+            return 0, message
+        except Exception as exc:
+            return 1, f"Error editing file '{path}': {exc}"
+
+
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
@@ -158,6 +194,18 @@ class ToolRegistry:
 
     def get_tool(self, name: str) -> Tool | None:
         return self._tools.get(name)
+
+    def to_system_prompt_snippet(self) -> str:
+        """Generates dynamic documentation for all registered tools."""
+        if not self._tools:
+            return ""
+        lines = ["You have access to tools to interact with the environment:"]
+        for i, tool in enumerate(self._tools.values(), 1):
+            props = tool.parameters.get("properties", {})
+            params = [f"{p_name}: {p_val.get('type', 'any')}" for p_name, p_val in props.items()]
+            params_str = ", ".join(params)
+            lines.append(f"{i}. {tool.name}({params_str}): {tool.description}")
+        return "\n".join(lines)
 
     def to_openai_schemas(self) -> list[dict[str, Any]]:
         return [

@@ -93,7 +93,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 33 unit and integration tests run in ~0.5s)*
+*(All 44 unit and integration tests run in ~0.8s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
@@ -118,7 +118,7 @@ harness = Harness(
     model=my_custom_model,  # Or HttpChatModel(endpoint, model, key)
     workspace_dir=".",  # Works directly on your project
     global_dir="~/.mini-harness",  # Global instructions & skills
-    tools=[bash_tool, my_tool],  # Custom tools
+    tools=[bash_tool, my_tool],  # Custom tools (dynamically documented in system prompt)
 )
 harness.run_interactive("Help me refactor the database layer")
 ```
@@ -138,19 +138,27 @@ harness.run_interactive("Help me refactor the database layer")
    - Discovers `skills/` globally and locally; project skills cleanly shadow global skills of the same name.
    - Indexes skills lazily with scope badges to conserve context tokens.
 
-3. **Large Log Handling & Spillover (`core/tools.py`)**
+3. **Targeted File Editing vs. Full Rewrites (`core/tools.py`)**
+   - Built-in `edit_file(path, old_str, new_str)` enforces exact, unique string replacement.
+   - Prevents token wastage and LLM hallucination bugs common when rewriting large files with `write_file`.
+
+4. **Dynamic Tool Introspection (`core/tools.py`)**
+   - `ToolRegistry.to_system_prompt_snippet()` automatically reflects registered tools in the system prompt. Custom tools require zero prompt tweaking.
+
+5. **Large Log Handling & Spillover (`core/tools.py`)**
    - Massive command outputs are head + tail truncated.
    - The full, raw output is spilled to `.runs/<run_id>/logs/` so it never pollutes the user's project root.
 
-4. **Context & Memory Compaction Across Turns (`core/memory.py`)**
-   - Tracks conversation history across multiple turns.
+6. **Context & Memory Compaction Across Turns (`core/memory.py`)**
+   - Tracks conversation history across multiple turns with estimated token counts.
    - Automatically (or via `/compact`) collapses older middle tool observations while preserving system prompt, initial task, and recent turns.
 
-5. **Structured Tracing & Debugging (`core/tracer.py`)**
+7. **Git Patch Export (`patch.diff`) & Tracing (`core/tracer.py`)**
+   - Automatic git diff extraction: generates `patch.diff` for coding tasks in git repositories.
    - Real-time terminal streaming of thoughts, actions, observations, truncations, and compactions.
    - Persists machine-readable [`trace.json`](file:///Users/dimakagan/Projects/mini-harness/.runs) and human-readable [`trace.md`](file:///Users/dimakagan/Projects/mini-harness/.runs) for every run.
 
-6. **Automated Evaluation (`core/evaluator.py`)**
+8. **Automated Evaluation (`core/evaluator.py`)**
    - Evaluators test whether the agent actually succeeded (e.g. running test commands or asserting file contents).
 
 ---

@@ -3,7 +3,14 @@ import unittest
 from pathlib import Path
 
 from core.environment import Environment
-from core.tools import BashTool, ReadFileTool, ToolRegistry, WriteFileTool, format_tool_output
+from core.tools import (
+    BashTool,
+    EditFileTool,
+    ReadFileTool,
+    ToolRegistry,
+    WriteFileTool,
+    format_tool_output,
+)
 from core.types import ToolCall
 
 
@@ -15,6 +22,7 @@ class TestTools(unittest.TestCase):
         self.registry.register(BashTool(self.env))
         self.registry.register(ReadFileTool(self.env))
         self.registry.register(WriteFileTool(self.env))
+        self.registry.register(EditFileTool(self.env))
 
     def tearDown(self):
         self.env.teardown()
@@ -99,6 +107,37 @@ class TestTools(unittest.TestCase):
         )
         self.assertEqual(res.exit_code, 1)
         self.assertIn("Simulated internal tool crash", res.output)
+
+    def test_edit_file_tool_dispatch_success(self):
+        self.env.write_file("greeting.py", "msg = 'hello world'\n")
+        call = ToolCall(
+            id="e1",
+            name="edit_file",
+            arguments={"path": "greeting.py", "old_str": "world", "new_str": "universe"},
+        )
+        res = self.registry.dispatch(call, step_index=1)
+        self.assertEqual(res.exit_code, 0)
+        self.assertIn("Successfully replaced", res.output)
+        self.assertIn("hello universe", self.env.read_file("greeting.py"))
+
+    def test_edit_file_tool_dispatch_error(self):
+        self.env.write_file("greeting.py", "msg = 'hello world'\n")
+        call = ToolCall(
+            id="e2",
+            name="edit_file",
+            arguments={"path": "greeting.py", "old_str": "non_existent", "new_str": "foo"},
+        )
+        res = self.registry.dispatch(call, step_index=1)
+        self.assertEqual(res.exit_code, 1)
+        self.assertIn("Error editing file", res.output)
+
+    def test_tool_registry_to_system_prompt_snippet(self):
+        snippet = self.registry.to_system_prompt_snippet()
+        self.assertIn("You have access to tools to interact with the environment:", snippet)
+        self.assertIn("bash(command: string):", snippet)
+        self.assertIn("read_file(path: string, start_line: integer, end_line: integer):", snippet)
+        self.assertIn("write_file(path: string, content: string):", snippet)
+        self.assertIn("edit_file(path: string, old_str: string, new_str: string):", snippet)
 
 
 if __name__ == "__main__":

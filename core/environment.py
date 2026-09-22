@@ -108,6 +108,45 @@ class Environment:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
+    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
+        """Replaces a unique exact occurrence of old_str with new_str in a workspace file."""
+        if not old_str:
+            raise ValueError("old_str cannot be empty.")
+        path = self.resolve_path(rel_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {rel_path}")
+        if not path.is_file():
+            raise IsADirectoryError(f"Path is a directory: {rel_path}")
+
+        content = path.read_text(encoding="utf-8", errors="replace")
+        occurrences = content.count(old_str)
+        if occurrences == 0:
+            raise ValueError(
+                f"Target string not found in '{rel_path}'. Make sure old_str matches exactly, including indentation."
+            )
+        if occurrences > 1:
+            raise ValueError(
+                f"Target string found {occurrences} times in '{rel_path}'. "
+                "The target string must be unique. Provide more surrounding context lines to disambiguate."
+            )
+
+        updated_content = content.replace(old_str, new_str, 1)
+        path.write_text(updated_content, encoding="utf-8")
+        return occurrences, f"Successfully replaced 1 occurrence in '{rel_path}'."
+
+    def get_git_patch(self) -> str | None:
+        """Captures git diff of the workspace if it is a git repository."""
+        code, _ = self.execute_bash("git rev-parse --is-inside-work-tree")
+        if code != 0:
+            return None
+        # Add intent-to-add so untracked files are represented in diff
+        self.execute_bash("git add -N .")
+        code, diff_out = self.execute_bash("git diff HEAD")
+        if code != 0 or not diff_out.strip():
+            code, diff_out = self.execute_bash("git diff")
+        self.execute_bash("git reset")
+        return diff_out.strip() if diff_out.strip() else None
+
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the workspace directory."""
         try:

@@ -10,7 +10,7 @@ from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import Model
 from core.prompts import DEFAULT_SYSTEM_PROMPT
-from core.tools import BashTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
+from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
 from core.types import EvalResult, Message, RunResult, Task
 
@@ -165,8 +165,17 @@ class Harness:
             tool_registry.register(BashTool(env))
             tool_registry.register(ReadFileTool(env))
             tool_registry.register(WriteFileTool(env))
+            tool_registry.register(EditFileTool(env))
 
         active_system_prompt = system_prompt
+        tool_docs = tool_registry.to_system_prompt_snippet()
+        if (
+            tool_docs
+            and "You have access to tools to interact with the environment:"
+            not in active_system_prompt
+        ):
+            active_system_prompt += f"\n\n{tool_docs}"
+
         if not use_sandbox:
             active_system_prompt += (
                 f"\n\nContext:\nYou are working directly in an existing project directory at `{workspace}`.\n"
@@ -252,8 +261,17 @@ class Harness:
                 )
                 print(f"Feedback: {eval_result.feedback.strip()}")
 
+        patch_diff = env.get_git_patch()
+        patch_path: str | None = None
+        if patch_diff:
+            patch_file = run_dir / "patch.diff"
+            patch_file.write_text(patch_diff, encoding="utf-8")
+            patch_path = str(patch_file)
+            if self.verbose:
+                print(f"📦 Git patch saved to: {patch_file}")
+
         json_trace_path, md_trace_path = tracer.finalize(
-            finish_reason=finish_reason, eval_result=eval_result
+            finish_reason=finish_reason, eval_result=eval_result, patch_diff=patch_diff
         )
 
         passed = eval_result.passed if eval_result else (finish_reason == "completed")
@@ -269,6 +287,7 @@ class Harness:
             trace_path=str(json_trace_path),
             workspace_path=str(env.workspace_dir),
             eval_result=eval_result,
+            patch_path=patch_path,
         )
 
     def run_interactive(
@@ -311,6 +330,9 @@ class Harness:
                             agent_reply = step_trace.model_response.get("content", "")
                             print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
                             break
+                    except KeyboardInterrupt:
+                        print("\n⚠️ Step interrupted by user (Ctrl+C). Returning to prompt.\n")
+                        break
                     except Exception as exc:
                         print(f"\n❌ Error during turn: {exc}")
                         break
@@ -319,7 +341,8 @@ class Harness:
             # Render minimal context usage footer
             stats = memory.stats()
             print(
-                f"─── 📊 Context: {stats['total_chars']} / {stats['max_context_chars']} chars ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+                f"─── 📊 Context: {stats['total_chars']:,} chars (~{stats['estimated_tokens']:,} tokens) / "
+                f"{stats['max_context_chars']:,} ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
             )
 
             try:
@@ -349,10 +372,12 @@ class Harness:
                 s = memory.stats()
                 print("\n📊 Context Breakdown:")
                 print(
-                    f"  • Usage: {s['total_chars']} / {s['max_context_chars']} chars ({s['usage_pct']}%)"
+                    f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
+                    f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
                 )
                 print(
-                    f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, {s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n"
+                    f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
+                    f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n"
                 )
                 continue
 
@@ -377,5 +402,11 @@ class Harness:
             memory.messages.append(Message(role="user", content=user_input))
             current_instruction = user_input
 
-        json_path, md_path = tracer.finalize(finish_reason="session_ended")
+        patch_diff = env.get_git_patch()
+        if patch_diff:
+            patch_file = run_dir / "patch.diff"
+            patch_file.write_text(patch_diff, encoding="utf-8")
+            print(f"📦 Git patch saved to: {patch_file}")
+
+        json_path, md_path = tracer.finalize(finish_reason="session_ended", patch_diff=patch_diff)
         print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")

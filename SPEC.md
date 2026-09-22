@@ -148,6 +148,10 @@ Tools implement the `Tool` Protocol: `name`, `description`, `parameters` (JSON S
 1. `bash(command: str)`: Executes shell commands inside the workspace.
 2. `read_file(path: str, start_line: int = 1, end_line: int = -1)`: Reads files with line numbering and slicing.
 3. `write_file(path: str, content: str)`: Creates or overwrites files inside the workspace.
+4. `edit_file(path: str, old_str: str, new_str: str)`: Replaces an exact, unique occurrence of `old_str` with `new_str` (prevents whole-file rewrites and hallucinations).
+
+#### Dynamic Tool Introspection
+`ToolRegistry.to_system_prompt_snippet()` automatically documents registered tools in the system prompt. Custom tools plugged in from the outside are dynamically formatted without manual prompt changes.
 
 #### Massive Output Handling (Head/Tail Truncation + Spillover)
 When a command outputs excessive text (e.g. `> 2,000` chars):
@@ -222,15 +226,17 @@ while not done:
 
 ---
 
-### 3.8 Telemetry & Interactive Chat (`core/tracer.py`, `core/harness.py`)
+### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/harness.py`)
 * **Real-time Terminal Streaming**: Clean emoji indicators for Thoughts (`🧠`), Actions (`⚡`), Observations (`👁️`), Compactions (`🧹`), and User Input (`👤`).
 * **Artifact Persistence**: Every run writes:
-  * `trace.json`: Full machine-readable record of prompt states, latencies, and tool calls.
-  * `trace.md`: Formatted human-readable summary of the entire session.
-* **Interactive Meta-Commands**:
-  * `/status`: Displays context window usage and message role counts.
+  * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, and patch diff.
+  * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
+  * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
+* **Interactive Meta-Commands & Resilience**:
+  * Graceful interruption: Hitting `Ctrl+C` during an active tool step cancels the step and returns cleanly to the prompt without aborting the session.
+  * `/status`: Displays context window usage (chars and estimated tokens) and message role counts.
   * `/compact`: Triggers manual memory compaction.
-  * `/new`: Resets conversation context.
+  * `/new`: Resets conversation context while preserving workspace files.
   * `/help`: Lists available slash commands.
   * `/exit`: Saves trace and terminates session.
 

@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -386,6 +387,173 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(step3_res["exit_code"], 1)
         self.assertIn("Access denied", step3_res["output"])
         self.assertFalse((global_dir / "pwn.txt").exists())
+
+    def test_edit_file_in_task_execution(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="edit_task_")).resolve()
+        initial_code = (
+            "def add(x, y):\n"
+            "    return x + y\n\n"
+            "def multiply(x, y):\n"
+            "    # BUG: addition instead of multiplication\n"
+            "    return x + y\n"
+        )
+        (project_dir / "math_lib.py").write_text(initial_code, encoding="utf-8")
+
+        script = [
+            (
+                "Fixing multiplication bug using targeted edit",
+                [
+                    ToolCall(
+                        id="e1",
+                        name="edit_file",
+                        arguments={
+                            "path": "math_lib.py",
+                            "old_str": "    return x + y\n",
+                            "new_str": "    return x * y\n",
+                        },
+                    )
+                ],
+            ),
+            (
+                "First replacement had ambiguity, let's include surrounding context line",
+                [
+                    ToolCall(
+                        id="e2",
+                        name="edit_file",
+                        arguments={
+                            "path": "math_lib.py",
+                            "old_str": "def multiply(x, y):\n    # BUG: addition instead of multiplication\n    return x + y\n",
+                            "new_str": "def multiply(x, y):\n    return x * y\n",
+                        },
+                    )
+                ],
+            ),
+            ("Done with fix.", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(
+            model=model, workspace_dir=project_dir, runs_dir=self.runs_dir, verbose=False
+        )
+
+        task = Task(id="fix_math", instruction="Fix multiply in math_lib.py", max_steps=5)
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        fixed_content = (project_dir / "math_lib.py").read_text(encoding="utf-8")
+        self.assertIn("def multiply(x, y):\n    return x * y", fixed_content)
+        self.assertIn("def add(x, y):\n    return x + y", fixed_content)
+
+        # Check trace: step 1 failed due to multiple occurrences ("must be unique"), step 2 succeeded
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        step1_res = trace_data["steps"][0]["tool_results"][0]
+        self.assertEqual(step1_res["exit_code"], 1)
+        self.assertIn("must be unique", step1_res["output"])
+
+        step2_res = trace_data["steps"][1]["tool_results"][0]
+        self.assertEqual(step2_res["exit_code"], 0)
+        self.assertIn("Successfully replaced", step2_res["output"])
+
+    def test_git_patch_export_when_working_in_git_repo(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="git_repo_")).resolve()
+        # Initialize real git repo
+        subprocess.run("git init", shell=True, cwd=project_dir, check=True, capture_output=True)
+        subprocess.run("git config user.name 'Test'", shell=True, cwd=project_dir, check=True)
+        subprocess.run(
+            "git config user.email 'test@test.com'", shell=True, cwd=project_dir, check=True
+        )
+        (project_dir / "server.py").write_text("PORT = 8000\nDEBUG = False\n", encoding="utf-8")
+        subprocess.run(
+            "git add . && git commit -m 'Initial commit'",
+            shell=True,
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+        )
+
+        # Agent modifies server.py
+        script = [
+            (
+                "Enabling debug",
+                [
+                    ToolCall(
+                        id="c1",
+                        name="edit_file",
+                        arguments={
+                            "path": "server.py",
+                            "old_str": "DEBUG = False",
+                            "new_str": "DEBUG = True",
+                        },
+                    )
+                ],
+            ),
+            ("Finished change", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(
+            model=model, workspace_dir=project_dir, runs_dir=self.runs_dir, verbose=False
+        )
+
+        task = Task(id="enable_debug", instruction="Enable debug mode")
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        # Invariant 1: patch_path is generated and points to patch.diff
+        self.assertIsNotNone(result.patch_path)
+        patch_file = Path(result.patch_path)
+        self.assertTrue(patch_file.exists())
+        patch_content = patch_file.read_text(encoding="utf-8")
+        self.assertIn("-DEBUG = False", patch_content)
+        self.assertIn("+DEBUG = True", patch_content)
+
+        # Invariant 2: trace.json records patch_diff
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        self.assertIn("-DEBUG = False", trace_data["patch_diff"])
+
+        # Invariant 3: trace.md renders git patch section
+        md_content = (patch_file.parent / "trace.md").read_text(encoding="utf-8")
+        self.assertIn("## Git Patch Diff", md_content)
+        self.assertIn("+DEBUG = True", md_content)
+
+    def test_custom_tools_dynamically_reflected_in_system_prompt(self):
+        project_dir = Path(tempfile.mkdtemp(prefix="custom_tools_")).resolve()
+
+        class CustomSearchTool:
+            name = "custom_search"
+            description = "Search our proprietary internal documentation."
+            parameters = {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            }
+
+            def execute(self, **kwargs):
+                return 0, "found docs"
+
+        captured_prompts: list[list[Message]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(list(messages))
+                return "All set", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=project_dir,
+            tools=[CustomSearchTool()],
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+
+        task = Task(id="custom_task", instruction="Search docs")
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        # Invariant: The custom tool is dynamically formatted into the system prompt
+        system_prompt = captured_prompts[0][0].content
+        self.assertIn(
+            "custom_search(query: string): Search our proprietary internal documentation.",
+            system_prompt,
+        )
 
 
 if __name__ == "__main__":
