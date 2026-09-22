@@ -6,9 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.environment import Environment
 from core.evaluator import FileContentEvaluator
 from core.harness import Harness, _discover_commands, _expand_command, load_global_config
+from core.loop import AgentLoop
+from core.memory import Memory
 from core.model import MockModel
+from core.tools import EditFileTool, ToolRegistry, WriteFileTool
 from core.types import Message, Task, ToolCall
 
 
@@ -754,6 +758,93 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(h2.max_context_chars, 32000)
         self.assertEqual(h2.trigger_ratio, 0.90)
         self.assertFalse(h2.sandbox)
+
+    def test_agent_loop_records_modified_files_in_memory(self):
+        ws_dir = Path(self.runs_dir) / "test_loop_ws"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = Path(self.runs_dir) / "test_loop_logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        env = Environment(
+            workspace_dir=ws_dir,
+            logs_dir=logs_dir,
+            cleanup_on_teardown=False,
+        )
+        registry = ToolRegistry(env=env)
+        registry.register(WriteFileTool(env))
+        registry.register(EditFileTool(env))
+
+        # Memory with small context to trigger compaction easily
+        memory = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_chars=120,
+            keep_recent_turns=1,
+        )
+        script = [
+            (
+                "Step 1: Write file",
+                [
+                    ToolCall(
+                        id="c1",
+                        name="write_file",
+                        arguments={"path": "code.py", "content": "x = 1\n"},
+                    )
+                ],
+            ),
+            (
+                "Step 2: Negative failure case - edit non-existent text",
+                [
+                    ToolCall(
+                        id="c2",
+                        name="edit_file",
+                        arguments={
+                            "path": "unmodified.py",
+                            "old_str": "non_existent",
+                            "new_str": "val",
+                        },
+                    )
+                ],
+            ),
+            (
+                "Step 3: Edit file successfully",
+                [
+                    ToolCall(
+                        id="c3",
+                        name="edit_file",
+                        arguments={
+                            "path": "code.py",
+                            "old_str": "x = 1",
+                            "new_str": "x = 2",
+                        },
+                    )
+                ],
+            ),
+            ("Step 4: Done", []),
+        ]
+        model = MockModel(script)
+        loop = AgentLoop(model=model, memory=memory, tools=registry)
+
+        # Step 1: write_file succeeds
+        finished, trace1 = loop.step(1)
+        self.assertFalse(finished)
+        self.assertEqual(memory.modified_files, {"code.py"})
+
+        # Step 2: edit_file fails (exit code 1) -> unmodified.py MUST NOT be recorded
+        finished, trace2 = loop.step(2)
+        self.assertFalse(finished)
+        self.assertEqual(trace2.tool_results[0]["exit_code"], 1)
+        self.assertEqual(memory.modified_files, {"code.py"})
+        self.assertNotIn("unmodified.py", memory.modified_files)
+
+        # Step 3: edit_file succeeds -> code.py recorded
+        finished, trace3 = loop.step(3)
+        self.assertFalse(finished)
+        self.assertEqual(memory.modified_files, {"code.py"})
+
+        # Step 4: final answer -> finishes
+        finished, trace4 = loop.step(4)
+        self.assertTrue(finished)
 
 
 if __name__ == "__main__":

@@ -60,6 +60,10 @@ class AgentLoop:
         tool_results: list[ToolResult] = []
         for call in tool_calls:
             result = self.tools.dispatch(call, step_index=step_index)
+            if result.exit_code == 0 and call.name in ("write_file", "edit_file"):
+                target_path = call.arguments.get("path")
+                if target_path:
+                    self.memory.record_modified_file(str(target_path))
             self.memory.add_tool_result(result)
             tool_results.append(result)
 

@@ -18,6 +18,7 @@ class Message:
     content: str
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] | None = None
+    raw_log_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role, "content": self.content or ""}

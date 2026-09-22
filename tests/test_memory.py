@@ -180,6 +180,148 @@ class TestMemory(unittest.TestCase):
         # Recent turn is preserved
         self.assertEqual(mem.messages[-1].content, "Recent")
 
+    def test_compaction_prunes_thinking_tags(self):
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_chars=100,
+            keep_recent_turns=2,
+        )
+        # Turn 1: thinking with actual response and tool call
+        mem.add_assistant(
+            "<think>Analyzing dependencies and planning changes...</think>I will now inspect the project.",
+            [ToolCall(id="c1", name="bash", arguments={"command": "ls"})],
+        )
+        mem.add_tool_result(ToolResult(call_id="c1", output="output1"))
+
+        # Turn 2: thinking-only response
+        mem.add_assistant(
+            "<thinking>\nInternal step-by-step reasoning that should be discarded.\n</thinking>"
+        )
+        mem.add_tool_result(ToolResult(call_id="c2", output="output2"))
+
+        # Recent turns: should keep thinking intact
+        mem.add_assistant("<think>Recent reasoning stream</think>Recent answer")
+        mem.add_tool_result(ToolResult(call_id="c3", output="recent output"))
+
+        self.assertTrue(mem.compact_if_needed(force=True))
+
+        messages = mem.get_messages()
+        # Middle turn 1: <think> pruned, visible answer preserved, tool call preserved
+        self.assertEqual(messages[2].content, "I will now inspect the project.")
+        self.assertIsNotNone(messages[2].tool_calls)
+        self.assertEqual(len(messages[2].tool_calls), 1)
+        self.assertEqual(messages[2].tool_calls[0].id, "c1")
+
+        # Middle turn 2: pure thinking tag collapsed to fallback tombstone
+        self.assertEqual(
+            messages[4].content,
+            "[Reasoning stream collapsed to conserve context window]",
+        )
+
+        # Recent turn: not compacted, <think> is preserved
+        self.assertEqual(
+            messages[-2].content,
+            "<think>Recent reasoning stream</think>Recent answer",
+        )
+
+    def test_compaction_enriches_tombstone_with_log_path(self):
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_chars=100,
+            keep_recent_turns=1,
+        )
+        mem.add_assistant("Step 1")
+        mem.add_tool_result(
+            ToolResult(
+                call_id="c1",
+                output="Log line\n" * 30,  # > 120 chars
+                raw_log_path="/tmp/workspace/runs/logs/step_01_bash_c1.log",
+            )
+        )
+        mem.add_assistant("Step 2")
+        mem.add_tool_result(
+            ToolResult(
+                call_id="c2",
+                output="Another line\n" * 30,
+                raw_log_path=None,
+            )
+        )
+        mem.add_assistant("Recent")
+
+        self.assertTrue(mem.compact_if_needed(force=True))
+
+        msgs = mem.get_messages()
+        len1 = len("Log line\n" * 30)
+        len2 = len("Another line\n" * 30)
+        # Message with raw_log_path includes exact log path and tip
+        self.assertEqual(
+            msgs[3].content,
+            f"[Tool output collapsed ({len1} chars). "
+            f"Full log: `/tmp/workspace/runs/logs/step_01_bash_c1.log`. Use `read_file` to inspect if needed.]",
+        )
+        # Message without raw_log_path uses standard collapse message
+        self.assertEqual(
+            msgs[5].content,
+            f"[Tool output collapsed ({len2} chars) to conserve context window]",
+        )
+
+    def test_compaction_injects_and_updates_modified_files_ledger(self):
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_chars=100,
+            keep_recent_turns=1,
+        )
+        mem.record_modified_file("src/main.py")
+        mem.record_modified_file("src/utils.py")
+
+        mem.add_assistant("Step 1")
+        mem.add_tool_result(ToolResult(call_id="c1", output="A" * 300))
+        mem.add_assistant("Recent")
+
+        # First compaction: injects ledger at index 2 (after system & user)
+        self.assertTrue(mem.compact_if_needed(force=True))
+
+        msgs = mem.get_messages()
+        self.assertEqual(msgs[0].role, "system")
+        self.assertEqual(msgs[0].content, "SYS")
+        self.assertEqual(msgs[1].role, "user")
+        self.assertEqual(msgs[1].content, "TASK")
+        self.assertEqual(msgs[2].role, "system")
+        self.assertEqual(
+            msgs[2].content,
+            "[Session Files Modified: src/main.py, src/utils.py]",
+        )
+
+        # Record another modified file and run compaction again
+        mem.record_modified_file("tests/test_main.py")
+        mem.add_tool_result(ToolResult(call_id="c2", output="B" * 300))
+        mem.add_assistant("Latest")
+
+        self.assertTrue(mem.compact_if_needed(force=True))
+
+        msgs = mem.get_messages()
+        # Ledger was updated in-place at index 2, not duplicated
+        self.assertEqual(msgs[2].role, "system")
+        self.assertEqual(
+            msgs[2].content,
+            "[Session Files Modified: src/main.py, src/utils.py, tests/test_main.py]",
+        )
+        self.assertNotEqual(msgs[3].content, msgs[2].content)
+
+        # Stats reflect modified files
+        stats = mem.stats()
+        self.assertEqual(
+            stats["modified_files"],
+            ["src/main.py", "src/utils.py", "tests/test_main.py"],
+        )
+
+        # Reset clears modified files
+        mem.reset(new_instruction="NEW_TASK")
+        self.assertEqual(mem.stats()["modified_files"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

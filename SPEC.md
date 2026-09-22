@@ -167,7 +167,9 @@ Maintains message history across multi-turn sessions with proactive and on-deman
 * **Proactive 80% High-Water Mark (`trigger_ratio = 0.80`)**: Compaction triggers when cumulative characters exceed 80% of `max_context_chars`. This strictly preserves 20% of the window as output headroom for the model's thoughts, reasoning, and JSON tool calls, preventing mid-generation cutoffs (`finish_reason: "length"`) and provider HTTP 400 errors.
 * **Immutability of Core Prompts**: System instructions and the original task instruction are **never** pruned or modified.
 * **Recency Protection**: The last $K$ turns (`keep_recent_turns`, default: 4) are kept completely intact.
-* **Compaction Strategy**: Older tool observations in the middle are replaced with concise tombstone markers (`[Tool output collapsed (N chars) to conserve context window]`).
+* **Historical Reasoning Pruning**: Older assistant turns have transient `<think>...</think>` and `<thinking>...</thinking>` reasoning streams stripped out, collapsing pure-reasoning turns to lightweight placeholders while keeping final answers and tool calls fully intact.
+* **Enriched Tool Tombstones with Log Pointers**: Older tool outputs in the middle are replaced with enriched tombstone markers embedding the spilled log path (`[Tool output collapsed (N chars). Full log: <path>. Use read_file to inspect if needed.]`), allowing the model to recover full outputs if needed.
+* **Session "Files Touched" Ledger**: Tracks all files successfully modified via `write_file` or `edit_file` during the session and injects/updates an active system ledger (`[Session Files Modified: ...]`) at the safe prefix upon compaction.
 * **Manual Compaction**: Supports `/compact` (forced compaction) regardless of total character count.
 * **Context Diagnostics**: `stats()` provides real-time character count, estimated tokens, maximum allowance, trigger threshold (`trigger_threshold_chars`), usage percentage, and role breakdown.
 * **Reset**: `/new` clears message history while preserving system prompt and workspace files.

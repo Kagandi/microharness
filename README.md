@@ -186,9 +186,11 @@ harness.run_interactive("Help me refactor the database layer")
    - Massive command outputs are head + tail truncated.
    - The full, raw output is spilled to `.runs/<run_id>/logs/` so it never pollutes the user's project root.
 
-6. **Proactive 80% Context Compaction (`core/memory.py`)**
+6. **Proactive 80% Context Compaction & Memory Optimization (`core/memory.py`)**
    - Proactively prunes older tool observations at an 80% high-water mark (`trigger_ratio = 0.80`), keeping 20% reserved for output tokens and model reasoning.
-   - Prevents mid-generation `finish_reason: "length"` cutoffs and provider HTTP 400 errors.
+   - **Enriched Tombstones with Log Pointers**: Collapsed tool outputs embed the exact spilled log file path (`Full log: <path>. Use read_file to inspect if needed.`), giving the agent a deterministic bridge to inspect full outputs.
+   - **Historical Reasoning Pruning**: Automatically prunes transient `<think>...</think>` and `<thinking>...</thinking>` reasoning streams from older assistant turns to reclaim thousands of tokens for reasoning models (DeepSeek-R1, Claude 3.7 Thinking, o1/o3).
+   - **Session Files Modified Ledger**: Injects and maintains an active session ledger (`[Session Files Modified: file1.py, file2.py]`) across compactions at the safe prefix.
    - Preserves system prompt, initial task, and recent working turns.
 
 7. **Git Patch Export (`patch.diff`) & Tracing (`core/tracer.py`)**
