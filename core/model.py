@@ -17,8 +17,7 @@ class Model(Protocol):
 
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
-    ) -> tuple[str, list[ToolCall]]:
-        ...
+    ) -> tuple[str, list[ToolCall]]: ...
 
 
 class HttpChatModel:
@@ -121,7 +120,7 @@ class HttpChatModel:
         content = choice.get("content") or ""
         tool_calls: list[ToolCall] = []
 
-        if "tool_calls" in choice and choice["tool_calls"]:
+        if choice.get("tool_calls"):
             for raw_tc in choice["tool_calls"]:
                 func_data = raw_tc["function"]
                 args_raw = func_data.get("arguments", "{}")

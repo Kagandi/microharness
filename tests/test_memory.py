@@ -96,7 +96,12 @@ class TestMemory(unittest.TestCase):
         self.assertGreater(s["usage_pct"], 0.0)
 
     def test_reset_and_force_compact(self):
-        mem = Memory(system_prompt="SYS_PROMPT", user_prompt="INITIAL", max_context_chars=5000, keep_recent_turns=2)
+        mem = Memory(
+            system_prompt="SYS_PROMPT",
+            user_prompt="INITIAL",
+            max_context_chars=5000,
+            keep_recent_turns=2,
+        )
         mem.add_assistant("Plan", [ToolCall(id="c1", name="bash", arguments={})])
         mem.add_tool_result(ToolResult(call_id="c1", output="A" * 200))
         mem.add_assistant("Recent", [])

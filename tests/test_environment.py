@@ -14,10 +14,12 @@ class TestEnvironment(unittest.TestCase):
         self.env.teardown()
 
     def test_populate_and_read_files(self):
-        self.env.populate_files({
-            "a.txt": "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
-            "nested/b.py": "x = 42",
-        })
+        self.env.populate_files(
+            {
+                "a.txt": "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
+                "nested/b.py": "x = 42",
+            }
+        )
 
         content = self.env.read_file("a.txt")
         self.assertIn("Line 1", content)
@@ -53,14 +55,55 @@ class TestEnvironment(unittest.TestCase):
 
     def test_bash_nonzero_exit_and_stderr(self):
         # Verify stderr is captured and non-zero exit codes are preserved
-        exit_code, output = self.env.execute_bash("python3 -c 'import sys; sys.stderr.write(\"CRASH_TRACE\"); sys.exit(42)'")
+        exit_code, output = self.env.execute_bash(
+            "python3 -c 'import sys; sys.stderr.write(\"CRASH_TRACE\"); sys.exit(42)'"
+        )
         self.assertEqual(exit_code, 42)
         self.assertIn("CRASH_TRACE", output)
 
     def test_bash_timeout_kill(self):
-        exit_code, output = self.env.execute_bash("python3 -c 'import time; time.sleep(5)'", timeout=0.1)
+        exit_code, output = self.env.execute_bash(
+            "python3 -c 'import time; time.sleep(5)'", timeout=0.1
+        )
         self.assertEqual(exit_code, 124)
         self.assertIn("timed out after 0.1", output)
+
+    def test_allowed_read_dirs_permits_external_read(self):
+        allowed_dir = Path(tempfile.mkdtemp(prefix="allowed_dir_"))
+        external_file = allowed_dir / "global_skill.md"
+        external_file.write_text("global skill body", encoding="utf-8")
+
+        env = Environment(workspace_dir=self.temp_dir, allowed_read_dirs=[allowed_dir])
+        content = env.read_file(str(external_file))
+        self.assertIn("global skill body", content)
+
+    def test_write_outside_workspace_strictly_denied_even_in_allowed_read_dirs(self):
+        allowed_dir = Path(tempfile.mkdtemp(prefix="allowed_dir_"))
+        env = Environment(workspace_dir=self.temp_dir, allowed_read_dirs=[allowed_dir])
+
+        with self.assertRaises(PermissionError):
+            env.write_file(str(allowed_dir / "overwrite.txt"), "malicious write")
+
+    def test_read_outside_workspace_and_allowed_read_dirs_raises_permission_error(self):
+        unauthorized_dir = Path(tempfile.mkdtemp(prefix="unauthorized_"))
+        unauth_file = unauthorized_dir / "private.txt"
+        unauth_file.write_text("private", encoding="utf-8")
+
+        env = Environment(workspace_dir=self.temp_dir, allowed_read_dirs=[])
+        with self.assertRaises(PermissionError):
+            env.read_file(str(unauth_file))
+
+    def test_sibling_directory_prefix_traversal_prevention(self):
+        # Sibling directory starting with same prefix must be denied
+        sibling_dir = Path(f"{self.temp_dir}_sibling")
+        sibling_dir.mkdir(exist_ok=True)
+        sibling_file = sibling_dir / "secret.txt"
+        sibling_file.write_text("secret", encoding="utf-8")
+
+        with self.assertRaises(PermissionError):
+            self.env.resolve_path(str(sibling_file))
+        with self.assertRaises(PermissionError):
+            self.env.resolve_read_path(str(sibling_file))
 
 
 if __name__ == "__main__":

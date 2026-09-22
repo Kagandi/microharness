@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from core.types import EvalResult, StepTrace, Task
 
@@ -29,7 +28,7 @@ class Tracer:
         if not self.verbose:
             return
 
-        print(f"\n{'='*25} Step {step.step_index} ({step.duration_s:.2f}s) {'='*25}")
+        print(f"\n{'=' * 25} Step {step.step_index} ({step.duration_s:.2f}s) {'=' * 25}")
         model_text = step.model_response.get("content")
         tool_calls = step.model_response.get("tool_calls") or []
 
@@ -54,7 +53,9 @@ class Tracer:
             if output.count("\n") > 15:
                 print(f"   ... ({output.count(chr(10)) - 15} more lines in observation)")
 
-    def finalize(self, finish_reason: str, eval_result: EvalResult | None = None) -> tuple[Path, Path]:
+    def finalize(
+        self, finish_reason: str, eval_result: EvalResult | None = None
+    ) -> tuple[Path, Path]:
         self.finish_reason = finish_reason
         self.eval_result = eval_result
 
@@ -102,24 +103,30 @@ class Tracer:
         ]
         if self.eval_result:
             status_tag = "PASSED" if self.eval_result.passed else "FAILED"
-            lines.extend([
-                f"- **Evaluation**: `{status_tag}` (Score: {self.eval_result.score})",
-                f"- **Feedback**: {self.eval_result.feedback}",
-            ])
+            lines.extend(
+                [
+                    f"- **Evaluation**: `{status_tag}` (Score: {self.eval_result.score})",
+                    f"- **Feedback**: {self.eval_result.feedback}",
+                ]
+            )
 
-        lines.extend([
-            "",
-            "## Task Instruction",
-            f"```\n{self.task.instruction}\n```",
-            "",
-            "## Execution Steps",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Task Instruction",
+                f"```\n{self.task.instruction}\n```",
+                "",
+                "## Execution Steps",
+            ]
+        )
 
         for s in self.steps:
-            lines.extend([
-                f"### Step {s.step_index} ({s.duration_s:.2f}s)",
-                "",
-            ])
+            lines.extend(
+                [
+                    f"### Step {s.step_index} ({s.duration_s:.2f}s)",
+                    "",
+                ]
+            )
             if s.compaction_applied:
                 lines.append("> ℹ️ *Context Compaction was applied during this step.*")
 
@@ -129,17 +136,21 @@ class Tracer:
 
             tool_calls = s.model_response.get("tool_calls") or []
             for tc in tool_calls:
-                lines.extend([
-                    f"**Action**: `{tc.get('name')}`",
-                    f"```json\n{json.dumps(tc.get('arguments', {}), indent=2)}\n```",
-                ])
+                lines.extend(
+                    [
+                        f"**Action**: `{tc.get('name')}`",
+                        f"```json\n{json.dumps(tc.get('arguments', {}), indent=2)}\n```",
+                    ]
+                )
 
             for tr in s.tool_results:
                 trunc = " (Truncated)" if tr.get("was_truncated") else ""
-                lines.extend([
-                    f"**Observation** (Exit code: {tr.get('exit_code')}){trunc}:",
-                    f"```\n{tr.get('output', '').strip()}\n```",
-                ])
+                lines.extend(
+                    [
+                        f"**Observation** (Exit code: {tr.get('exit_code')}){trunc}:",
+                        f"```\n{tr.get('output', '').strip()}\n```",
+                    ]
+                )
                 if tr.get("raw_log_path"):
                     lines.append(f"*Full log saved at: `{tr['raw_log_path']}`*")
                 lines.append("")

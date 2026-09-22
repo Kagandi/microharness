@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from core.environment import Environment
 from core.evaluator import Evaluator
@@ -15,42 +14,86 @@ from core.tools import BashTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
 from core.types import EvalResult, Message, RunResult, Task
 
+DEFAULT_GLOBAL_DIR = Path.home() / ".mini-harness"
 
-def _load_agents_instructions(workspace: Path) -> str:
-    """Loads project-level steering guidelines from AGENTS.md if present."""
-    agents_file = workspace / "AGENTS.md"
-    if agents_file.is_file():
-        content = agents_file.read_text(encoding="utf-8", errors="replace").strip()
+
+def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
+    """Loads global and project-level steering guidelines in cascading order."""
+    sections: list[str] = []
+
+    # 1. Global user baseline instructions (~/.mini-harness/AGENTS.md)
+    if global_dir:
+        global_file = global_dir / "AGENTS.md"
+        if global_file.is_file():
+            content = global_file.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                sections.append(
+                    f"--- Global User Instructions (~/.mini-harness/AGENTS.md) ---\n"
+                    f"{content}\n"
+                    f"----------------------------------------------------------"
+                )
+
+    # 2. Project-level instructions (./AGENTS.md, takes precedence/specializes)
+    local_file = workspace / "AGENTS.md"
+    if local_file.is_file():
+        content = local_file.read_text(encoding="utf-8", errors="replace").strip()
         if content:
-            return (
-                f"--- Project Instructions (from AGENTS.md) ---\n"
+            sections.append(
+                f"--- Project Instructions (AGENTS.md) ---\n"
                 f"{content}\n"
-                f"-------------------------------------------"
+                f"--------------------------------------"
             )
-    return ""
+
+    return ("\n\n" + "\n\n".join(sections)) if sections else ""
 
 
-def _discover_skills_index(workspace: Path) -> str:
-    """Discovers available skills via progressive disclosure (skills/ or .skills/)."""
-    skills_index: list[str] = []
-    for s_dir in [workspace / "skills", workspace / ".skills"]:
-        if s_dir.is_dir():
-            for entry in sorted(s_dir.iterdir()):
-                skill_doc = entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
-                if skill_doc and skill_doc.is_file() and entry.name != "README.md":
-                    lines = skill_doc.read_text(encoding="utf-8", errors="replace").splitlines()
-                    summary = next((line.strip().lstrip("#").strip() for line in lines if line.strip()), entry.stem)
-                    rel_path = skill_doc.relative_to(workspace)
-                    skills_index.append(f"- {entry.stem}: {summary} (read `{rel_path}` for full instructions)")
+def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
+    """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
+    # Key: skill_name -> (summary, path_str, scope)
+    skills: dict[str, tuple[str, str, str]] = {}
 
-    if skills_index:
-        return (
-            "--- Available Project Skills (Progressive Disclosure) ---\n"
-            + "\n".join(skills_index)
-            + "\nTip: Use the `read_file` tool to inspect a skill's full instructions only when needed.\n"
-            + "---------------------------------------------------------"
-        )
-    return ""
+    def scan_dir(s_dir: Path, scope: str, relative_base: Path | None) -> None:
+        if not s_dir.is_dir():
+            return
+        for entry in sorted(s_dir.iterdir()):
+            skill_doc = (
+                entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
+            )
+            if skill_doc and skill_doc.is_file() and entry.name != "README.md":
+                lines = skill_doc.read_text(encoding="utf-8", errors="replace").splitlines()
+                summary = next(
+                    (line.strip().lstrip("#").strip() for line in lines if line.strip()), entry.stem
+                )
+                if relative_base and skill_doc.is_relative_to(relative_base):
+                    path_str = str(skill_doc.relative_to(relative_base))
+                else:
+                    path_str = str(skill_doc)
+                skills[entry.stem] = (summary, path_str, scope)
+
+    # 1. Global skills first
+    if global_dir:
+        for gd in [global_dir / "skills", global_dir / ".skills"]:
+            scan_dir(gd, "global", relative_base=None)
+
+    # 2. Project skills second (shadows/overrides global skills with matching names)
+    for pd in [workspace / "skills", workspace / ".skills"]:
+        scan_dir(pd, "project", relative_base=workspace)
+
+    if not skills:
+        return ""
+
+    has_global = any(s[2] == "global" for s in skills.values())
+    lines: list[str] = []
+    for name, (summary, path_str, scope) in sorted(skills.items()):
+        badge = f"[{scope}] " if has_global else ""
+        lines.append(f"- {badge}{name}: {summary} (read `{path_str}` for full instructions)")
+
+    return (
+        "--- Available Skills (Progressive Disclosure) ---\n"
+        + "\n".join(lines)
+        + "\nTip: Use the `read_file` tool to inspect a skill's full instructions only when needed.\n"
+        + "------------------------------------------------"
+    )
 
 
 class Harness:
@@ -59,17 +102,21 @@ class Harness:
     def __init__(
         self,
         model: Model,
-        workspace_dir: Optional[Path | str] = None,
+        workspace_dir: Path | str | None = None,
+        global_dir: Path | str | None = None,
         sandbox: bool = False,
-        tools: Optional[list[Tool]] = None,
-        evaluator: Optional[Evaluator] = None,
-        runs_dir: Optional[Path | str] = None,
+        tools: list[Tool] | None = None,
+        evaluator: Evaluator | None = None,
+        runs_dir: Path | str | None = None,
         max_tool_chars: int = 2000,
         max_context_chars: int = 8000,
         verbose: bool = True,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
+        self.global_dir = (
+            Path(global_dir).resolve() if global_dir is not None else DEFAULT_GLOBAL_DIR
+        )
         self.sandbox = sandbox
         self.custom_tools = tools
         self.evaluator = evaluator
@@ -100,7 +147,13 @@ class Harness:
         else:
             workspace = self.explicit_workspace_dir
 
-        env = Environment(workspace_dir=workspace, logs_dir=logs_dir, cleanup_on_teardown=False)
+        allowed_reads = [self.global_dir] if self.global_dir else []
+        env = Environment(
+            workspace_dir=workspace,
+            logs_dir=logs_dir,
+            allowed_read_dirs=allowed_reads,
+            cleanup_on_teardown=False,
+        )
         if initial_files:
             env.populate_files(initial_files)
 
@@ -121,12 +174,12 @@ class Harness:
             )
 
         # 1. Project steering instructions (AGENTS.md)
-        agents_instructions = _load_agents_instructions(workspace)
+        agents_instructions = _load_agents_instructions(workspace, self.global_dir)
         if agents_instructions:
             active_system_prompt += f"\n\n{agents_instructions}"
 
         # 2. Progressive skills index (skills/ or .skills/)
-        skills_index = _discover_skills_index(workspace)
+        skills_index = _discover_skills_index(workspace, self.global_dir)
         if skills_index:
             active_system_prompt += f"\n\n{skills_index}"
 
@@ -187,14 +240,16 @@ class Harness:
         total_duration = time.time() - run_start
         total_steps = len(tracer.steps)
 
-        eval_result: Optional[EvalResult] = None
+        eval_result: EvalResult | None = None
         if self.evaluator:
             if self.verbose:
-                print(f"\n{'='*20} Running Evaluation {'='*20}")
+                print(f"\n{'=' * 20} Running Evaluation {'=' * 20}")
             eval_result = self.evaluator.evaluate(env, tracer.steps)
             if self.verbose:
                 status_emoji = "✅" if eval_result.passed else "❌"
-                print(f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})")
+                print(
+                    f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})"
+                )
                 print(f"Feedback: {eval_result.feedback.strip()}")
 
         json_trace_path, md_trace_path = tracer.finalize(
@@ -218,7 +273,7 @@ class Harness:
 
     def run_interactive(
         self,
-        initial_instruction: Optional[str] = None,
+        initial_instruction: str | None = None,
         task_id: str = "interactive_session",
     ) -> None:
         """Interactive multi-turn session with slash commands and context usage tracking."""
@@ -234,12 +289,14 @@ class Harness:
             initial_files={},
         )
 
-        print(f"\n🚀 Interactive Session Started")
+        print("\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
-        print("💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /exit\n")
+        print(
+            "💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /exit\n"
+        )
 
         step_idx = 1
-        current_instruction: Optional[str] = first_instruction
+        current_instruction: str | None = first_instruction
 
         while True:
             # If we have an active instruction to execute, run the agent loop
@@ -261,7 +318,9 @@ class Harness:
 
             # Render minimal context usage footer
             stats = memory.stats()
-            print(f"─── 📊 Context: {stats['total_chars']} / {stats['max_context_chars']} chars ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───")
+            print(
+                f"─── 📊 Context: {stats['total_chars']} / {stats['max_context_chars']} chars ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+            )
 
             try:
                 user_input = input("👤 You: ").strip()
@@ -288,9 +347,13 @@ class Harness:
 
             elif cmd in ("/status", "/context", "status"):
                 s = memory.stats()
-                print(f"\n📊 Context Breakdown:")
-                print(f"  • Usage: {s['total_chars']} / {s['max_context_chars']} chars ({s['usage_pct']}%)")
-                print(f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, {s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n")
+                print("\n📊 Context Breakdown:")
+                print(
+                    f"  • Usage: {s['total_chars']} / {s['max_context_chars']} chars ({s['usage_pct']}%)"
+                )
+                print(
+                    f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, {s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n"
+                )
                 continue
 
             elif cmd in ("/compact", "compact"):
@@ -298,7 +361,9 @@ class Harness:
                 did_compact = memory.compact_if_needed(force=True)
                 new_chars = memory.total_chars()
                 if did_compact:
-                    print(f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n")
+                    print(
+                        f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
+                    )
                 else:
                     print("\nℹ️ No older observations eligible for compaction at this time.\n")
                 continue

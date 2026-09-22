@@ -94,7 +94,9 @@ class TestTools(unittest.TestCase):
                 raise ZeroDivisionError("Simulated internal tool crash")
 
         self.registry.register(CrashingTool())
-        res = self.registry.dispatch(ToolCall(id="c1", name="crash_tool", arguments={}), step_index=1)
+        res = self.registry.dispatch(
+            ToolCall(id="c1", name="crash_tool", arguments={}), step_index=1
+        )
         self.assertEqual(res.exit_code, 1)
         self.assertIn("Simulated internal tool crash", res.output)
 

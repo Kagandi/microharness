@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from core.environment import Environment
 from core.types import ToolCall, ToolResult
@@ -82,7 +81,9 @@ class BashTool:
 
 class ReadFileTool:
     name = "read_file"
-    description = "Read file content from the workspace with line numbers and optional line slicing."
+    description = (
+        "Read file content from the workspace with line numbers and optional line slicing."
+    )
     parameters = {
         "type": "object",
         "properties": {

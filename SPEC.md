@@ -12,7 +12,7 @@
 4. **Resilience & Pragmatism**:
    * Massive command outputs are head/tail truncated and spilled to disk.
    * Context memory is compacted across multiple turns.
-   * Project conventions (`AGENTS.md`) and on-demand skills (`skills/`) are automatically discovered.
+   * Global baseline (`~/.mini-harness/AGENTS.md`) and project conventions (`AGENTS.md`), as well as on-demand skills (`skills/`) with project shadowing, are automatically discovered.
 5. **Dual Mode Operation**:
    * **In-Place Project Mode** (default): Operates directly in an existing project directory (`.` or `-d`), seeing all files, git history, and resuming work across interactive turns.
    * **Sandboxed Benchmark Mode** (`--sandbox` / `--demo`): Runs in a disposable, isolated directory for reproducible evaluations.
@@ -65,12 +65,14 @@ class ToolCall:
     name: str
     arguments: dict[str, Any]
 
+
 @dataclass
 class Message:
     role: str  # "system" | "user" | "assistant" | "tool"
     content: str
     tool_call_id: Optional[str] = None
     tool_calls: Optional[list[ToolCall]] = None
+
 
 @dataclass
 class ToolResult:
@@ -79,6 +81,7 @@ class ToolResult:
     exit_code: int = 0
     was_truncated: bool = False
     raw_log_path: Optional[str] = None
+
 
 @dataclass
 class Task:
@@ -89,6 +92,7 @@ class Task:
     max_steps: int = 15
     timeout_seconds: float = 60.0
 
+
 @dataclass
 class StepTrace:
     step_index: int
@@ -98,11 +102,13 @@ class StepTrace:
     compaction_applied: bool = False
     duration_s: float = 0.0
 
+
 @dataclass
 class EvalResult:
     passed: bool
     score: float
     feedback: str
+
 
 @dataclass
 class RunResult:
@@ -123,8 +129,9 @@ class RunResult:
 * **Workspace Resolution**:
   * In-place mode targets the specified project directory (`workspace_dir` or `.`).
   * Sandbox mode creates a disposable directory in `.runs/<task_id>_<timestamp>/workspace`.
-* **Path Traversal Security**:
-  * `resolve_path(rel_path)` ensures all file read/write operations cannot escape above `workspace_dir` (raises `PermissionError` on `../../` or absolute `/etc/passwd`).
+* **Path Traversal Security & Read Permissions**:
+  * `resolve_path(rel_path)` ensures all file write operations strictly remain within `workspace_dir` (raises `PermissionError` on `../../`, sibling directory prefix spoofing, or paths outside the workspace).
+  * `resolve_read_path(path_str)` permits reading files inside `workspace_dir` as well as authorized external configuration directories (`allowed_read_dirs`, e.g. `~/.mini-harness`), enabling global skill inspection while keeping mutations sandboxed.
 * **Clean Log Isolation**:
   * Raw spillover logs are routed to `run_dir/logs/` rather than polluting the user's project root with `.logs/` folders.
 * **Bash Subprocess Execution**:
@@ -177,18 +184,23 @@ class Model(Protocol):
 
 ---
 
-### 3.6 Project Steering & Progressive Skills (`core/harness.py`)
-The harness automatically discovers project context during run setup:
-1. **`AGENTS.md`**: If present in the workspace root, its contents are appended to the system prompt as repository guidelines.
-2. **Progressive Skills Disclosure (`skills/` or `.skills/`)**:
-   * Discovers subdirectories containing `SKILL.md`.
-   * Extracts a 1-line summary and indexes the skill in the prompt:
+### 3.6 Steering & Progressive Skills (`core/harness.py`)
+The harness discovers steering context and reusable skills across global and project-level scopes during run setup:
+1. **Cascading Instructions (`AGENTS.md`)**:
+   * **Global Baseline**: `~/.mini-harness/AGENTS.md` provides user-level baseline rules across all projects.
+   * **Project Conventions**: `./AGENTS.md` in the project root specializes or overrides guidelines for the specific repository.
+   * Both are merged in cascading order (Global baseline first, Project local second) into the system prompt.
+2. **Progressive Skills Disclosure (`skills/` or `.skills/`) & Shadowing**:
+   * Scans both global directories (`~/.mini-harness/skills/`, `~/.mini-harness/.skills/`) and project directories (`./skills/`, `./.skills/`).
+   * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project-local skill cleanly shadows/replaces the global one.
+   * Extracts a 1-line summary and indexes the available skills in the prompt:
      ```text
-     --- Available Project Skills (Progressive Disclosure) ---
-     - run-tests: Test Execution & Verification (read `skills/run-tests/SKILL.md` for full instructions)
+     --- Available Skills (Progressive Disclosure) ---
+     - [project] run-tests: Test Execution & Verification (read `skills/run-tests/SKILL.md` for full instructions)
+     - [global] deploy: Cloud Deployment Guide (read `/Users/.../.mini-harness/skills/deploy/SKILL.md` for full instructions)
      Tip: Use the `read_file` tool to inspect a skill's full instructions only when needed.
      ```
-   * **Context Efficiency**: Full skill instructions are lazy-loaded by the agent on demand using `read_file`.
+   * **Context Efficiency & Security**: Full skill instructions are lazy-loaded on demand using `read_file`. Global skill files are authorized via `allowed_read_dirs`, while write permissions remain strictly scoped to `workspace_dir`.
 
 ---
 
@@ -226,9 +238,9 @@ while not done:
 
 ## 4. Verification & Testing Standards
 All features are tested against rigorous, non-tautological standards in `tests/`:
-* `test_environment.py`: Directory traversal attacks (relative and absolute), missing files, bash exit codes.
+* `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
 * `test_tools.py`: Tool dispatching, exact head/tail boundary slice preservation, negative path write errors.
 * `test_memory.py`: Invariants when under budget, immutability of system prompts, stats calculation, forced compaction.
 * `test_model.py`: URL normalization, OpenRouter headers, mock sequencing.
 * `test_evaluator.py`: Strict equality assertions, missing target files, forbidden string rejection.
-* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, and `AGENTS.md`/skills progressive disclosure.
+* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, and global-vs-project cascading and skill shadowing.

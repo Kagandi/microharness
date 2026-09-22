@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
@@ -96,21 +95,52 @@ def build_mock_agent_script() -> MockModel:
         "    if b == 0:\n        raise ValueError('Cannot divide by zero')\n    return a / b\n"
     )
     script = [
-        ("I will first run the tests to inspect what fails.", [
-            ToolCall(id="c1", name="bash", arguments={"command": "python -m unittest test_calculator.py"})
-        ]),
-        ("Let me print a verbose diagnostic report to see system details.", [
-            ToolCall(id="c2", name="bash", arguments={"command": "python -c \"for i in range(120): print(f'DEBUG Log {i}')\""})
-        ]),
-        ("Now let's inspect the calculator implementation.", [
-            ToolCall(id="c3", name="read_file", arguments={"path": "calculator.py"})
-        ]),
-        ("Fixing calculator.py now.", [
-            ToolCall(id="c4", name="write_file", arguments={"path": "calculator.py", "content": fixed_code})
-        ]),
-        ("Re-running unit tests.", [
-            ToolCall(id="c5", name="bash", arguments={"command": "python -m unittest test_calculator.py"})
-        ]),
+        (
+            "I will first run the tests to inspect what fails.",
+            [
+                ToolCall(
+                    id="c1",
+                    name="bash",
+                    arguments={"command": "python -m unittest test_calculator.py"},
+                )
+            ],
+        ),
+        (
+            "Let me print a verbose diagnostic report to see system details.",
+            [
+                ToolCall(
+                    id="c2",
+                    name="bash",
+                    arguments={
+                        "command": "python -c \"for i in range(120): print(f'DEBUG Log {i}')\""
+                    },
+                )
+            ],
+        ),
+        (
+            "Now let's inspect the calculator implementation.",
+            [ToolCall(id="c3", name="read_file", arguments={"path": "calculator.py"})],
+        ),
+        (
+            "Fixing calculator.py now.",
+            [
+                ToolCall(
+                    id="c4",
+                    name="write_file",
+                    arguments={"path": "calculator.py", "content": fixed_code},
+                )
+            ],
+        ),
+        (
+            "Re-running unit tests.",
+            [
+                ToolCall(
+                    id="c5",
+                    name="bash",
+                    arguments={"command": "python -m unittest test_calculator.py"},
+                )
+            ],
+        ),
         ("The tests now pass completely.", []),
     ]
     return MockModel(script=script)
@@ -130,7 +160,8 @@ def main():
         help="Instruction for the agent (e.g. 'Fix the bug in auth.py', 'Add tests')",
     )
     parser.add_argument(
-        "-d", "--dir",
+        "-d",
+        "--dir",
         default=".",
         help="Target project directory where the agent operates (default: current directory '.')",
     )
@@ -138,6 +169,11 @@ def main():
         "--sandbox",
         action="store_true",
         help="Run in an isolated disposable scratch directory instead of your real project directory",
+    )
+    parser.add_argument(
+        "--global-dir",
+        default=None,
+        help="Global configuration and skills directory (default: ~/.mini-harness)",
     )
     parser.add_argument(
         "--batch",
@@ -183,8 +219,16 @@ def main():
 
     # 2. If --demo is passed, run Benchmark Mode (isolated sandbox with evaluator)
     if args.demo:
-        task, evaluator = create_calculator_demo() if args.demo == "calculator" else create_greeting_demo()
-        harness = Harness(model=model, sandbox=True, evaluator=evaluator, verbose=True)
+        task, evaluator = (
+            create_calculator_demo() if args.demo == "calculator" else create_greeting_demo()
+        )
+        harness = Harness(
+            model=model,
+            global_dir=args.global_dir,
+            sandbox=True,
+            evaluator=evaluator,
+            verbose=True,
+        )
         result = harness.run(task)
         print("=" * 60)
         print(f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})")
@@ -199,6 +243,7 @@ def main():
     harness = Harness(
         model=model,
         workspace_dir=target_dir,
+        global_dir=args.global_dir,
         sandbox=args.sandbox,
         verbose=True,
     )

@@ -15,26 +15,26 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 🧭 Project Steering & Skills
+## 🧭 Steering & Skills (Cascading & Shadowing)
 
-### 1. Project Conventions (`AGENTS.md`)
-Place an [`AGENTS.md`](file:///Users/dimakagan/Projects/mini-harness/AGENTS.md) in your project root. The harness automatically discovers and injects it into the agent's system prompt:
-```markdown
-# AGENTS.md
-- Always run tests with `uv run pytest`
-- Zero runtime dependencies: standard library only
-- Use strict equality in test assertions
-```
+`mini-harness` supports cascading configuration at two distinct scopes:
+1. **Global User Baseline** (`~/.mini-harness/` or `--global-dir`)
+2. **Project-Local Scope** (`./` in current workspace root)
 
-### 2. Progressive Skills Disclosure (`skills/`)
-Define reusable instructions in `skills/<skill_name>/SKILL.md` (or `.skills/`):
-```
-skills/
-└── run-tests/
-    └── SKILL.md
-```
-* **Context Efficient**: The harness does **not** dump all skill files into the prompt. Instead, it injects a 1-line index summary.
-* **Lazy Loading**: The agent uses its built-in `read_file` tool to load the full skill instructions only when relevant to your request.
+### 1. Cascading Instructions (`AGENTS.md`)
+You can provide personal agent preferences globally, while projects can specialize or override them:
+* **Global Baseline**: `~/.mini-harness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
+* **Project Conventions**: `./AGENTS.md` in the repo root (e.g., repo-specific test commands, architecture rules).
+
+The harness loads both in cascading order (Global baseline first, Project local second) into the system prompt.
+
+### 2. Progressive Skills Disclosure (`skills/` & Shadowing)
+Define reusable task workflows in `skills/<skill_name>/SKILL.md` (or `.skills/`):
+* **Global Skills** (`~/.mini-harness/skills/`): Available across all projects on your machine.
+* **Project Skills** (`./skills/`): Project-specific tools and workflows.
+* **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project version cleanly overrides it.
+* **Progressive Disclosure**: Full skill files are never dumped into the prompt. Instead, the harness injects a 1-line index with scope badges (`[global]` or `[project]`).
+* **Lazy Loading & Security**: The agent reads full instructions on demand via `read_file`. Global skills are authorized for reading, while all file writes remain strictly sandboxed to the project directory.
 
 ---
 
@@ -93,7 +93,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 28 unit and integration tests run in ~0.4s)*
+*(All 33 unit and integration tests run in ~0.5s)*
 
 ### 3. Run Predefined Benchmark Demos
 ```bash
@@ -113,11 +113,12 @@ Because components follow minimal Python `Protocols`, you can plug in any Model,
 ```python
 from core.harness import Harness
 
-# In-place coding agent on your repo:
+# In-place coding agent on your repo with global and project steering:
 harness = Harness(
-    model=my_custom_model,      # Or HttpChatModel(endpoint, model, key)
-    workspace_dir=".",          # Works directly on your project
-    tools=[bash_tool, my_tool], # Custom tools
+    model=my_custom_model,  # Or HttpChatModel(endpoint, model, key)
+    workspace_dir=".",  # Works directly on your project
+    global_dir="~/.mini-harness",  # Global instructions & skills
+    tools=[bash_tool, my_tool],  # Custom tools
 )
 harness.run_interactive("Help me refactor the database layer")
 ```
@@ -129,12 +130,13 @@ harness.run_interactive("Help me refactor the database layer")
 1. **In-Place Project Operation vs. Sandboxing (`core/environment.py`)**
    - By default, operates directly on existing project files.
    - Optional `--sandbox` creates an isolated scratchpad in `.runs/`.
-   - Prevents path traversal outside the project boundaries.
+   - Prevents path traversal outside project boundaries while permitting read access to authorized global directories (`allowed_read_dirs`).
    - Executes bash with timeouts and combined stdout/stderr.
 
-2. **Project Steering & Progressive Disclosure (`core/harness.py`)**
-   - Automatically injects repo-specific `AGENTS.md` guidelines.
-   - Discovers `skills/` and indexes them lazily to conserve context tokens.
+2. **Cascading Steering & Progressive Skills (`core/harness.py`)**
+   - Injects global user instructions (`~/.mini-harness/AGENTS.md`) and project instructions (`./AGENTS.md`) in cascading order.
+   - Discovers `skills/` globally and locally; project skills cleanly shadow global skills of the same name.
+   - Indexes skills lazily with scope badges to conserve context tokens.
 
 3. **Large Log Handling & Spillover (`core/tools.py`)**
    - Massive command outputs are head + tail truncated.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -15,8 +15,8 @@ class ToolCall:
 class Message:
     role: str  # "system" | "user" | "assistant" | "tool"
     content: str
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[list[ToolCall]] = None
+    tool_call_id: str | None = None
+    tool_calls: list[ToolCall] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role, "content": self.content}
@@ -43,14 +43,14 @@ class ToolResult:
     output: str
     exit_code: int = 0
     was_truncated: bool = False
-    raw_log_path: Optional[str] = None
+    raw_log_path: str | None = None
 
 
 @dataclass
 class Task:
     id: str
     instruction: str
-    system_prompt: Optional[str] = None
+    system_prompt: str | None = None
     initial_files: dict[str, str] = field(default_factory=dict)
     max_steps: int = 15
     timeout_seconds: float = 60.0
@@ -83,4 +83,4 @@ class RunResult:
     finish_reason: str  # "completed" | "max_steps_exceeded" | "timeout" | "error"
     trace_path: str
     workspace_path: str
-    eval_result: Optional[EvalResult] = None
+    eval_result: EvalResult | None = None

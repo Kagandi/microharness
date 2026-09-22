@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from core.types import Message, ToolCall, ToolResult
 
@@ -27,7 +27,7 @@ class Memory:
         if user_prompt:
             self.messages.append(Message(role="user", content=user_prompt))
 
-    def add_assistant(self, content: str, tool_calls: Optional[list[ToolCall]] = None) -> None:
+    def add_assistant(self, content: str, tool_calls: list[ToolCall] | None = None) -> None:
         self.messages.append(
             Message(
                 role="assistant",

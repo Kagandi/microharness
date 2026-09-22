@@ -34,7 +34,9 @@ class TestEvaluator(unittest.TestCase):
         self.assertIn("missing required string", res_missing.feedback)
 
         # 3. Strict Negative: Forbidden string present
-        failing_forbidden = FileContentEvaluator(file_path="result.txt", must_not_contain=["SUCCESS"])
+        failing_forbidden = FileContentEvaluator(
+            file_path="result.txt", must_not_contain=["SUCCESS"]
+        )
         res_forbidden = failing_forbidden.evaluate(self.env, [])
         self.assertFalse(res_forbidden.passed)
         self.assertEqual(res_forbidden.score, 0.0)

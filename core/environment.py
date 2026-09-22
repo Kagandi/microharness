@@ -5,16 +5,16 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 
 class Environment:
-    """Provides workspace execution and sandboxing."""
+    """Provides workspace execution, security boundaries, and sandboxing."""
 
     def __init__(
         self,
-        workspace_dir: Optional[Path | str] = None,
-        logs_dir: Optional[Path | str] = None,
+        workspace_dir: Path | str | None = None,
+        logs_dir: Path | str | None = None,
+        allowed_read_dirs: list[Path | str] | None = None,
         cleanup_on_teardown: bool = False,
     ):
         if workspace_dir:
@@ -27,7 +27,12 @@ class Environment:
 
         self.cleanup_on_teardown = cleanup_on_teardown
 
-        # If logs_dir is provided, store logs there; otherwise default to workspace/.logs
+        # Read permissions: workspace_dir + any allowed read directories (e.g. global user config/skills)
+        self.allowed_read_dirs: list[Path] = [
+            Path(d).resolve() for d in (allowed_read_dirs or []) if d is not None
+        ]
+
+        # Logs directory
         if logs_dir:
             self.logs_dir = Path(logs_dir).resolve()
         else:
@@ -40,22 +45,49 @@ class Environment:
             self.write_file(rel_path, content)
 
     def resolve_path(self, rel_path: str) -> Path:
-        """Resolve a relative path securely within the workspace sandbox."""
-        target = (self.workspace_dir / rel_path).resolve()
-        # Security: Prevent path traversal outside the workspace
-        if not str(target).startswith(str(self.workspace_dir)):
+        """Resolve a path strictly inside workspace (used for write operations)."""
+        expanded = os.path.expanduser(rel_path)
+        target = Path(expanded)
+        if not target.is_absolute():
+            target = (self.workspace_dir / target).resolve()
+        else:
+            target = target.resolve()
+
+        if not target.is_relative_to(self.workspace_dir):
             raise PermissionError(
                 f"Access denied: path '{rel_path}' resolves outside workspace sandbox."
             )
         return target
 
-    def read_file(self, rel_path: str, start_line: int = 1, end_line: int = -1) -> str:
+    def resolve_read_path(self, path_str: str) -> Path:
+        """Resolve a path for reading, permitting workspace and authorized global directories."""
+        expanded = os.path.expanduser(path_str)
+        target = Path(expanded)
+        if not target.is_absolute():
+            target = (self.workspace_dir / target).resolve()
+        else:
+            target = target.resolve()
+
+        # Check workspace
+        if target.is_relative_to(self.workspace_dir):
+            return target
+
+        # Check allowed external read directories (e.g. ~/.mini-harness/)
+        for allowed in self.allowed_read_dirs:
+            if target.is_relative_to(allowed):
+                return target
+
+        raise PermissionError(
+            f"Access denied: path '{path_str}' resolves outside workspace and allowed read directories."
+        )
+
+    def read_file(self, path_str: str, start_line: int = 1, end_line: int = -1) -> str:
         """Read file contents with optional line slice (1-indexed, inclusive)."""
-        path = self.resolve_path(rel_path)
+        path = self.resolve_read_path(path_str)
         if not path.exists():
-            raise FileNotFoundError(f"File not found: {rel_path}")
+            raise FileNotFoundError(f"File not found: {path_str}")
         if not path.is_file():
-            raise IsADirectoryError(f"Path is a directory: {rel_path}")
+            raise IsADirectoryError(f"Path is a directory: {path_str}")
 
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         total_lines = len(lines)
@@ -71,7 +103,7 @@ class Environment:
         return "".join(numbered)
 
     def write_file(self, rel_path: str, content: str) -> None:
-        """Write or overwrite a file within the workspace."""
+        """Write or overwrite a file within the workspace (strictly workspace-scoped)."""
         path = self.resolve_path(rel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")

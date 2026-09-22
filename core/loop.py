@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
 
 from core.memory import Memory
 from core.model import Model
@@ -70,9 +69,7 @@ class AgentLoop:
             prompt_messages=prompt_snapshot,
             model_response={
                 "content": content,
-                "tool_calls": [
-                    {"name": tc.name, "arguments": tc.arguments} for tc in tool_calls
-                ],
+                "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
             },
             tool_results=[
                 {
