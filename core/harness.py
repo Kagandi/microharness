@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
@@ -384,6 +384,61 @@ class Harness:
 
         return env, tool_registry, memory, tracer, loop, run_dir
 
+    def _execute_steps(
+        self,
+        loop: AgentLoop,
+        tracer: Tracer,
+        start_step: int,
+        max_steps: int,
+        deadline: float | None = None,
+        on_finish: Callable[[str], None] | None = None,
+    ) -> tuple[bool, str, int]:
+        """Drives the agent loop for up to max_steps with retries.
+
+        Returns:
+            (is_finished, finish_reason, next_step_index)
+        """
+        step_idx = start_step
+        step_attempts = 0
+        finish_reason = "max_steps_exceeded"
+
+        while (step_idx - start_step) < max_steps:
+            if deadline and time.time() > deadline:
+                tracer.log("\n⚠️ Task reached maximum allowed timeout.")
+                return False, "timeout", step_idx
+
+            try:
+                is_finished, step_trace = loop.step(step_index=step_idx)
+                tracer.record_step(step_trace)
+                step_attempts = 0
+                step_idx += 1
+
+                if is_finished:
+                    if on_finish:
+                        on_finish(step_trace.model_response.get("content", ""))
+                    return True, "completed", step_idx
+
+            except KeyboardInterrupt:
+                tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
+                return False, "interrupted", step_idx
+
+            except Exception as exc:
+                step_attempts += 1
+                if step_attempts <= self.max_step_retries:
+                    sleep_s = self.step_retry_delay * step_attempts
+                    tracer.log(
+                        f"\n⚠️ Step {step_idx} encountered an error: {exc}\n"
+                        f"⏳ Sleeping {sleep_s:.1f}s and retrying step ({step_attempts}/{self.max_step_retries})..."
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                tracer.log(
+                    f"\n❌ Step {step_idx} failed after {self.max_step_retries} retries: {exc}"
+                )
+                return False, "error", step_idx
+
+        return False, finish_reason, step_idx
+
     def run(self, task: Task) -> RunResult:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
         run_start = time.time()
@@ -409,45 +464,14 @@ class Harness:
                 print(f"🐳 Docker Sandbox: ACTIVE ({active_image})")
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
-        finish_reason = "max_steps_exceeded"
-        step_idx = 1
-        step_attempts = 0
-
         try:
-            while step_idx <= task.max_steps:
-                elapsed = time.time() - run_start
-                if elapsed > task.timeout_seconds:
-                    finish_reason = "timeout"
-                    tracer.log(
-                        f"\n⚠️ Task reached maximum allowed timeout ({task.timeout_seconds}s)."
-                    )
-                    break
-
-                try:
-                    is_finished, step_trace = loop.step(step_index=step_idx)
-                    tracer.record_step(step_trace)
-                    step_attempts = 0  # reset on successful step
-
-                    if is_finished:
-                        finish_reason = "completed"
-                        break
-                except Exception as exc:
-                    step_attempts += 1
-                    if step_attempts <= self.max_step_retries:
-                        sleep_s = self.step_retry_delay * step_attempts
-                        tracer.log(
-                            f"\n⚠️ Step {step_idx} encountered an error: {exc}\n"
-                            f"⏳ Sleeping {sleep_s:.1f}s and retrying step ({step_attempts}/{self.max_step_retries})..."
-                        )
-                        time.sleep(sleep_s)
-                        continue
-                    finish_reason = "error"
-                    tracer.log(
-                        f"\n❌ Step {step_idx} failed after {self.max_step_retries} retries: {exc}"
-                    )
-                    break
-
-                step_idx += 1
+            is_finished, finish_reason, _ = self._execute_steps(
+                loop=loop,
+                tracer=tracer,
+                start_step=1,
+                max_steps=task.max_steps,
+                deadline=run_start + task.timeout_seconds,
+            )
 
             total_duration = time.time() - run_start
             total_steps = len(tracer.steps)
@@ -531,36 +555,14 @@ class Harness:
             while True:
                 # If we have an active instruction to execute, run the agent loop
                 if has_pending_turn:
-                    turn_steps = 0
-                    turn_retries = 0
-                    max_turn_retries = 2
-                    while turn_steps < max_steps_per_turn:
-                        try:
-                            is_finished, step_trace = loop.step(step_index=step_idx)
-                            tracer.record_step(step_trace)
-                            step_idx += 1
-                            turn_steps += 1
-                            turn_retries = 0  # reset on success
-
-                            if is_finished:
-                                agent_reply = step_trace.model_response.get("content", "")
-                                print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
-                                break
-                        except KeyboardInterrupt:
-                            print("\n⚠️ Step interrupted by user (Ctrl+C). Returning to prompt.\n")
-                            break
-                        except Exception as exc:
-                            turn_retries += 1
-                            if turn_retries <= max_turn_retries:
-                                delay = 4.0 * turn_retries
-                                print(
-                                    f"\n⚠️ Step error: {exc}. Retrying turn in {delay:.1f}s ({turn_retries}/{max_turn_retries})..."
-                                )
-                                time.sleep(delay)
-                                continue
-                            print(f"\n❌ Error during turn after {max_turn_retries} retries: {exc}")
-                            break
-                    else:
+                    is_finished, reason, step_idx = self._execute_steps(
+                        loop=loop,
+                        tracer=tracer,
+                        start_step=step_idx,
+                        max_steps=max_steps_per_turn,
+                        on_finish=lambda reply: print(f"\n🤖 Agent:\n{reply.strip()}\n"),
+                    )
+                    if not is_finished and reason == "max_steps_exceeded":
                         print(
                             f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
                         )
