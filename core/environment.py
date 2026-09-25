@@ -261,7 +261,11 @@ class DockerEnvironment(Environment):
         self.docker_args = docker_args or []
         self.init_workdir = init_workdir
         self._container_started = False
-        self._start_container()
+        try:
+            self._start_container()
+        except Exception:
+            self.teardown()
+            raise
 
     def _start_container(self) -> None:
         """Starts a persistent background container mounting workspace at /workspace."""

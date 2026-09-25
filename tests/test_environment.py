@@ -245,6 +245,27 @@ class TestEnvironment(unittest.TestCase):
         d_env._container_started = True
         self.assertTrue(d_env.is_running)
 
+    def test_docker_env_teardown_on_start_failure(self):
+        from unittest.mock import patch
+
+        temp_ws = tempfile.mkdtemp()
+        temp_logs = tempfile.mkdtemp()
+        self.assertTrue(Path(temp_ws).exists())
+
+        with patch.object(
+            DockerEnvironment,
+            "_start_container",
+            side_effect=RuntimeError("Container startup error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                DockerEnvironment(
+                    workspace_dir=temp_ws,
+                    logs_dir=temp_logs,
+                    cleanup_on_teardown=True,
+                )
+        # Verify teardown cleaned up the directory
+        self.assertFalse(Path(temp_ws).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

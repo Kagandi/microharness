@@ -20,8 +20,8 @@ from typing import Any
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import (
-    DEFAULT_GLOBAL_DIR,
     Harness,
+    get_default_global_dir,
     load_global_config,
     load_project_config,
 )
@@ -374,13 +374,15 @@ def _dispatch_benchmark(
             print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
             return True
 
+        active_docker = True if use_docker is None else use_docker
         run_benchmark_suite(
             harness_factory=lambda ev: Harness(
                 model=model,
                 global_dir=global_dir,
                 runs_dir=runs_dir,
                 sandbox=True,
-                docker=True,
+                docker=active_docker,
+                docker_image=docker_image,
                 evaluator=ev,
                 cache_ttl=cache_ttl,
                 verbose=True,
@@ -421,7 +423,7 @@ def main():
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
     target_dir = Path(args.dir).resolve()
-    global_dir = Path(args.global_dir).resolve() if args.global_dir else DEFAULT_GLOBAL_DIR
+    global_dir = Path(args.global_dir).resolve() if args.global_dir else get_default_global_dir()
     global_config = load_global_config(global_dir)
     project_config = load_project_config(target_dir)
     config = {**global_config, **project_config}

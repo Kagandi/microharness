@@ -12,7 +12,15 @@ from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import Model, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
-from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
+from core.tools import (
+    DEFAULT_MAX_TOOL_CHARS,
+    BashTool,
+    EditFileTool,
+    ReadFileTool,
+    Tool,
+    ToolRegistry,
+    WriteFileTool,
+)
 from core.tracer import Tracer
 from core.types import EvalResult, RunResult, Task
 
@@ -80,35 +88,51 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
 
 
 def _extract_skill_summary(content: str, default: str) -> str:
-    """Extracts a 1-line summary from a SKILL.md document, supporting YAML frontmatter."""
-    lines = [line.strip() for line in content.splitlines()]
-    non_empty = [line for line in lines if line]
+    """Extracts a 1-line summary from a SKILL.md document, supporting YAML frontmatter and block scalars."""
+    raw_lines = content.splitlines()
+    non_empty = [line for line in raw_lines if line.strip()]
     if not non_empty:
         return default
 
-    if non_empty[0] == "---":
+    if non_empty[0].strip() == "---":
         in_frontmatter = True
-        desc_line = None
+        desc_parts: list[str] = []
+        capturing_scalar = False
         after_frontmatter: list[str] = []
-        for line in non_empty[1:]:
-            if line == "---":
-                in_frontmatter = False
-                continue
+
+        for line in raw_lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                if in_frontmatter:
+                    in_frontmatter = False
+                    continue
             if in_frontmatter:
-                if line.startswith("description:"):
-                    _, _, val = line.partition(":")
+                if capturing_scalar:
+                    if line.startswith(("  ", "\t")):
+                        if stripped:
+                            desc_parts.append(stripped)
+                        continue
+                    else:
+                        capturing_scalar = False
+
+                if stripped.startswith("description:"):
+                    _, _, val = stripped.partition(":")
                     val = val.strip().strip("\"'")
-                    if val:
-                        desc_line = val
+                    if val in (">", "|", ">-", "|-"):
+                        capturing_scalar = True
+                    elif val:
+                        return val
             else:
-                after_frontmatter.append(line)
-        if desc_line:
-            return desc_line
+                if stripped:
+                    after_frontmatter.append(stripped)
+
+        if desc_parts:
+            return " ".join(desc_parts)
         if after_frontmatter:
             return after_frontmatter[0].lstrip("#").strip() or default
         return default
 
-    return non_empty[0].lstrip("#").strip() or default
+    return non_empty[0].strip().lstrip("#").strip() or default
 
 
 def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
@@ -262,7 +286,7 @@ class Harness:
         self.max_tool_chars = (
             max_tool_chars
             if max_tool_chars is not None
-            else int(self.merged_config.get("max_tool_chars", 2000))
+            else int(self.merged_config.get("max_tool_chars", DEFAULT_MAX_TOOL_CHARS))
         )
         self.max_context_chars = (
             max_context_chars
@@ -314,7 +338,7 @@ class Harness:
         init_workdir: str | None,
         initial_files: dict[str, str],
     ) -> Environment:
-        allowed_reads: list[Path] = [logs_dir, self.runs_dir]
+        allowed_reads: list[Path] = [logs_dir]
         if self.global_dir:
             for sub in ["skills", ".skills", "commands", ".commands"]:
                 sub_path = self.global_dir / sub
@@ -390,6 +414,9 @@ class Harness:
         docker_image: str | None = None,
         init_workdir: str | None = None,
     ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
+        if hasattr(self.model, "reset"):
+            self.model.reset()
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self.runs_dir / f"{task_id}_{timestamp}"
         run_dir.mkdir(parents=True, exist_ok=True)

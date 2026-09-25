@@ -19,13 +19,16 @@ class Tool(Protocol):
         ...
 
 
+DEFAULT_MAX_TOOL_CHARS = 2500
+
+
 def format_tool_output(
     output: str,
     call_id: str,
     tool_name: str,
     step_index: int,
     logs_dir: Path,
-    max_chars: int = 3000,
+    max_chars: int = DEFAULT_MAX_TOOL_CHARS,
 ) -> tuple[str, bool, str | None]:
     """Applies head + tail truncation and spills full raw output to disk if too long.
 
@@ -195,7 +198,7 @@ class EditFileTool:
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
-    def __init__(self, env: Environment, max_tool_chars: int = 3000):
+    def __init__(self, env: Environment, max_tool_chars: int = DEFAULT_MAX_TOOL_CHARS):
         self.env = env
         self.max_tool_chars = max_tool_chars
         self._tools: dict[str, Tool] = {}

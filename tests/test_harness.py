@@ -1127,13 +1127,11 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertGreater(len(log_files), 0)
         spill_file = log_files[0]
 
-        # Verify Environment allows reading the spilled log file
-        env, _, _, _, _, _ = harness._setup_run(
-            task_id="check_read",
-            system_prompt="",
-            initial_instruction="test",
-            initial_files={},
-            force_sandbox=True,
+        # Verify Environment with logs_dir in allowed_read_dirs permits reading the spilled log file
+        env = Environment(
+            workspace_dir=spill_file.parent.parent / "workspace",
+            logs_dir=spill_file.parent,
+            allowed_read_dirs=[spill_file.parent],
         )
         content = env.read_file(str(spill_file))
         self.assertIn("AAAA", content)
@@ -1179,6 +1177,75 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(len(step0_calls), 1)
         self.assertEqual(step0_calls[0]["id"], "call_abc_123")
         self.assertEqual(step0_calls[0]["name"], "bash")
+
+    def test_skills_frontmatter_block_scalar_summary(self):
+        from core.harness import _extract_skill_summary
+
+        # Test folded scalar (>)
+        content_folded = (
+            "---\n"
+            "name: my-skill\n"
+            "description: >\n"
+            "  This is a multiline\n"
+            "  description folded into\n"
+            "  one line summary.\n"
+            "---\n"
+            "# My Skill\n"
+        )
+        summary_folded = _extract_skill_summary(content_folded, default="fallback")
+        self.assertEqual(
+            summary_folded,
+            "This is a multiline description folded into one line summary.",
+        )
+
+        # Test literal scalar (|)
+        content_literal = (
+            "---\n"
+            "name: my-skill-2\n"
+            "description: |\n"
+            "  First line of description.\n"
+            "  Second line of description.\n"
+            "---\n"
+            "# My Skill 2\n"
+        )
+        summary_literal = _extract_skill_summary(content_literal, default="fallback")
+        self.assertEqual(
+            summary_literal,
+            "First line of description. Second line of description.",
+        )
+
+    def test_action_formatter_custom_registration(self):
+        from core.tracer import _format_action_summary, register_action_formatter
+
+        register_action_formatter(
+            "custom_query",
+            lambda args: f"Query({args.get('target', '')})",
+        )
+        formatted = _format_action_summary(
+            "custom_query",
+            {"target": "users_table"},
+            color=False,
+        )
+        self.assertEqual(formatted, "Query(users_table)")
+
+    def test_mock_model_reset_multi_task(self):
+        script = [
+            ("Step 1 response", []),
+            ("Step 2 response", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
+
+        task1 = Task(id="t1", instruction="do 1", max_steps=1)
+        res1 = harness.run(task1)
+        self.assertEqual(res1.finish_reason, "completed")
+        self.assertEqual(res1.total_steps, 1)
+
+        task2 = Task(id="t2", instruction="do 2", max_steps=1)
+        res2 = harness.run(task2)
+        # Because harness._setup_run resets the mock model, task2 starts at step 0 rather than step 1
+        self.assertEqual(res2.finish_reason, "completed")
+        self.assertEqual(res2.total_steps, 1)
 
 
 if __name__ == "__main__":

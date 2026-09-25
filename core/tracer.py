@@ -4,7 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.types import EvalResult, StepTrace, Task
 
@@ -27,36 +27,60 @@ def _red(text: str) -> str:
     return f"\033[31m{text}\033[0m" if _supports_color() else text
 
 
+ActionFormatter = Callable[[dict[str, Any]], str]
+_ACTION_FORMATTERS: dict[str, ActionFormatter] = {}
+
+
+def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> None:
+    """Registers a custom action summary formatter for a tool."""
+    _ACTION_FORMATTERS[tool_name] = formatter
+
+
+def _format_bash_action(args: dict[str, Any]) -> str:
+    cmd = str(args.get("command", "")).strip()
+    return f"$ {cmd}"
+
+
+def _format_read_file_action(args: dict[str, Any]) -> str:
+    path = args.get("path", "")
+    start = args.get("start_line")
+    end = args.get("end_line")
+    lines_info = f" (lines {start}-{end})" if start and end else ""
+    return f"● Read {path}{lines_info}"
+
+
+def _format_write_file_action(args: dict[str, Any]) -> str:
+    path = args.get("path", "")
+    content = args.get("content", "")
+    lines = len(content.splitlines()) if isinstance(content, str) else 0
+    return f"● Write {path} ({lines} lines)"
+
+
+def _format_edit_file_action(args: dict[str, Any]) -> str:
+    path = args.get("path", "")
+    return f"● Edit {path}"
+
+
+register_action_formatter("bash", _format_bash_action)
+register_action_formatter("read_file", _format_read_file_action)
+register_action_formatter("write_file", _format_write_file_action)
+register_action_formatter("edit_file", _format_edit_file_action)
+
+
 def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
-    """Formats a tool call concisely in modern developer CLI style."""
+    """Formats a tool call concisely using registered formatters or a generic fallback."""
     if not isinstance(args, dict):
         text = f"$ {args}" if name == "bash" else f"● {name}({args})"
         return _bold(text) if color else text
 
-    if name == "bash":
-        cmd = args.get("command", "").strip()
-        return _bold(f"$ {cmd}") if color else f"$ {cmd}"
-    elif name == "read_file":
-        path = args.get("path", "")
-        start = args.get("start_line")
-        end = args.get("end_line")
-        lines_info = f" (lines {start}-{end})" if start and end else ""
-        text = f"● Read {path}{lines_info}"
-        return _bold(text) if color else text
-    elif name == "write_file":
-        path = args.get("path", "")
-        content = args.get("content", "")
-        lines = len(content.splitlines()) if isinstance(content, str) else 0
-        text = f"● Write {path} ({lines} lines)"
-        return _bold(text) if color else text
-    elif name == "edit_file":
-        path = args.get("path", "")
-        text = f"● Edit {path}"
-        return _bold(text) if color else text
+    formatter = _ACTION_FORMATTERS.get(name)
+    if formatter:
+        text = formatter(args)
     else:
         args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         text = f"● {name}({args_str})"
-        return _bold(text) if color else text
+
+    return _bold(text) if color else text
 
 
 class Tracer:

@@ -266,6 +266,10 @@ class MockModel:
         self.total_completion_tokens = 0
         self.total_cached_tokens = 0
 
+    def reset(self) -> None:
+        """Resets the script execution index for subsequent task runs."""
+        self.step_idx = 0
+
     def set_cache_ttl(self, ttl: str | None) -> str | None:
         """Dynamically switches prompt caching duration on the fly."""
         self.cache_ttl = normalize_cache_ttl(ttl)

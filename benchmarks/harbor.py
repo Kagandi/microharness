@@ -12,7 +12,6 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
 from core.environment import DockerEnvironment, Environment
-from core.evaluator import Evaluator
 from core.types import EvalResult, StepTrace, Task
 
 DEEPSWE_MINI_TASKS: list[str] = [
@@ -47,7 +46,7 @@ class HarborTaskDef:
     task_dir: Path
 
 
-class HarborEvaluator(Evaluator):
+class HarborEvaluator:
     """Evaluates Harbor and DeepSWE tasks inside an isolated Docker sandbox."""
 
     def __init__(
