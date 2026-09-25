@@ -28,9 +28,12 @@ microharness/
 ├── SPEC.md                     # This specification
 ├── README.md                   # Quickstart and overview documentation
 ├── AGENTS.md                   # Repository steering instructions for agents
-├── skills/                     # Progressive disclosure skills
-│   └── run-tests/
-│       └── SKILL.md            # Skill instructions
+├── .microharness/              # Clean project-level configuration namespace
+│   ├── skills/                 # Progressive disclosure skills
+│   │   └── run-tests/
+│   │       └── SKILL.md        # Skill instructions
+│   └── commands/               # Custom slash commands
+│       └── review.md
 ├── .env.example                # Configuration template
 ├── main.py                     # Runnable CLI entrypoint (interactive, batch & benchmarks)
 ├── benchmarks/                 # Pure-Python Mini-SWE benchmark suite
@@ -196,28 +199,29 @@ class Model(Protocol):
 ---
 
 ### 3.6 Configuration, Steering & Progressive Skills (`core/harness.py`)
-The harness discovers global machine configuration, steering guidelines, skills, and custom commands:
-1. **Global Configuration File (`~/.microharness/config.json`)**:
-   * Machine-level defaults for `endpoint`, `model`, `api_key`, `max_context_chars`, `trigger_ratio`, `max_tool_chars`, and `sandbox`.
-   * **Cascading Precedence**: CLI Arguments > Environment Variables / Local `.env` > `config.json` > Built-in defaults.
-   * Enables seamless in-place execution in any repository on the developer machine without duplicating `.env` files.
+The harness discovers global machine configuration, steering guidelines, skills, and custom commands across global and project scopes:
+1. **Configuration Files (`config.json`)**:
+   * Global machine-level defaults in `~/.microharness/config.json`.
+   * Project-level overrides in `.microharness/config.json`.
+   * **Cascading Precedence**: CLI Arguments > Environment Variables / Local `.env` > Project `.microharness/config.json` > Global `~/.microharness/config.json` > Built-in defaults.
+   * Enables seamless execution in any repository on the developer machine without duplicating `.env` files.
 2. **Cascading Instructions (`AGENTS.md`)**:
    * **Global Baseline**: `~/.microharness/AGENTS.md` provides user-level baseline rules across all projects.
-   * **Project Conventions**: `./AGENTS.md` in the project root specializes or overrides guidelines for the specific repository.
+   * **Project Conventions**: `.microharness/AGENTS.md` or `./AGENTS.md` in the project root specializes or overrides guidelines for the specific repository.
    * Both are merged in cascading order (Global baseline first, Project local second) into the system prompt.
-3. **Progressive Skills Disclosure (`skills/` or `.skills/`) & Shadowing**:
-   * Scans both global directories (`~/.microharness/skills/`, `~/.microharness/.skills/`) and project directories (`./skills/`, `./.skills/`).
+3. **Progressive Skills Disclosure (`.microharness/skills/` & Shadowing)**:
+   * Scans both global directories (`~/.microharness/skills/`, `~/.microharness/.skills/`) and project directories (`.microharness/skills/`, `./skills/`, `./.skills/`).
    * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project-local skill cleanly shadows/replaces the global one.
    * Extracts a 1-line summary and indexes the available skills in the prompt:
      ```text
      --- Available Skills (Progressive Disclosure) ---
-     - [project] run-tests: Test Execution & Verification (read `skills/run-tests/SKILL.md` for full instructions)
+     - [project] run-tests: Test Execution & Verification (read `.microharness/skills/run-tests/SKILL.md` for full instructions)
      - [global] deploy: Cloud Deployment Guide (read `/Users/.../.microharness/skills/deploy/SKILL.md` for full instructions)
      Tip: Use the `read_file` tool to inspect a skill's full instructions only when needed.
      ```
    * **Context Efficiency & Security**: Full skill instructions are lazy-loaded on demand using `read_file`. Global skill files are authorized via `allowed_read_dirs`, while write permissions remain strictly scoped to `workspace_dir`.
-4. **Custom Slash Commands (`commands/*.md` or `.commands/`) — User-Facing**:
-   * Scans global (`~/.microharness/commands/`) and project (`./commands/`) directories for prompt templates.
+4. **Custom Slash Commands (`.microharness/commands/*.md`) — User-Facing**:
+   * Scans global (`~/.microharness/commands/`) and project (`.microharness/commands/`, `./commands/`) directories for prompt templates.
    * Project commands shadow global commands of the same name.
    * Automatically replaces `$ARGUMENTS` or `{args}` with trailing input, or appends input as context.
    * Expands commands in both batch instructions (`microharness "/review src/auth.py"`) and interactive chat (`👤 You: /review src/auth.py`).

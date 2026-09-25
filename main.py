@@ -18,7 +18,12 @@ import os
 from pathlib import Path
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
-from core.harness import DEFAULT_GLOBAL_DIR, Harness, load_global_config
+from core.harness import (
+    DEFAULT_GLOBAL_DIR,
+    Harness,
+    load_global_config,
+    load_project_config,
+)
 from core.model import HttpChatModel, MockModel, Model
 from core.types import Task, ToolCall
 
@@ -214,23 +219,26 @@ def main():
     )
     args = parser.parse_args()
 
-    # Resolve global config (~/.microharness/config.json)
+    # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
+    target_dir = Path(args.dir).resolve()
     global_dir = Path(args.global_dir).resolve() if args.global_dir else DEFAULT_GLOBAL_DIR
     global_config = load_global_config(global_dir)
+    project_config = load_project_config(target_dir)
+    config = {**global_config, **project_config}
 
-    # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > global config.json > Fallback)
-    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or global_config.get("endpoint")
+    # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > project config.json > global config.json > Fallback)
+    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
     model_name = (
         args.model
         or os.getenv("MODEL_NAME")
-        or global_config.get("model")
+        or config.get("model")
         or "cohere/north-mini-code:free"
     )
     api_key = (
         args.api_key
         or os.getenv("MODEL_API_KEY")
         or os.getenv("OPENROUTER_API_KEY")
-        or global_config.get("api_key")
+        or config.get("api_key")
     )
 
     if endpoint:
@@ -301,9 +309,8 @@ def main():
             print("=" * 60)
             return
 
-    # 3. Resolve Target Workspace and Sandbox Flag
-    target_dir = Path(args.dir).resolve()
-    sandbox = args.sandbox or bool(global_config.get("sandbox", False))
+    # 3. Resolve Sandbox Flag and Instantiate Harness
+    sandbox = args.sandbox or bool(config.get("sandbox", False))
     harness = Harness(
         model=model,
         workspace_dir=target_dir,

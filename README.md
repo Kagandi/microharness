@@ -19,10 +19,12 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 `microharness` supports cascading configuration at two distinct scopes:
 1. **Global User Baseline** (`~/.microharness/` or `--global-dir`)
-2. **Project-Local Scope** (`./` in current workspace root)
+2. **Project-Local Scope** (`.microharness/` in current workspace root)
 
-### 1. Global Configuration File (`~/.microharness/config.json`)
-Configure your baseline model, endpoint, API key, and limits once on your machine so you can run `microharness` from any repository without copying `.env` files:
+### 1. Configuration Files (`config.json`)
+Configure your baseline model, endpoint, API key, and limits globally or override them per project:
+* **Global Baseline**: `~/.microharness/config.json`
+* **Project Override**: `.microharness/config.json`
 
 ```json
 {
@@ -39,26 +41,27 @@ Configure your baseline model, endpoint, API key, and limits once on your machin
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)
-3. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
-4. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+3. **Project Config** (`.microharness/config.json`) — *Project overrides*
+4. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
+5. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
 
 ### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:
 * **Global Baseline**: `~/.microharness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
-* **Project Conventions**: `./AGENTS.md` in the repo root (e.g., repo-specific test commands, architecture rules).
+* **Project Conventions**: `.microharness/AGENTS.md` or `./AGENTS.md` in the repo root (e.g., repo-specific test commands, architecture rules).
 
 The harness loads both in cascading order (Global baseline first, Project local second) into the system prompt.
 
-### 3. Progressive Skills Disclosure (`skills/` & Shadowing) — Agent-Facing
-Define reusable task workflows for the **agent** in `skills/<skill_name>/SKILL.md` (or `.skills/`):
+### 3. Progressive Skills Disclosure (`.microharness/skills/` & Shadowing) — Agent-Facing
+Define reusable task workflows for the **agent** in `.microharness/skills/<skill_name>/SKILL.md`:
 * **Global Skills** (`~/.microharness/skills/`): Available across all projects on your machine.
-* **Project Skills** (`./skills/`): Project-specific tools and workflows.
+* **Project Skills** (`.microharness/skills/`): Project-specific tools and workflows (namespaced cleanly without polluting the project root).
 * **Skill Shadowing**: If a project defines a skill with the same name as a global skill, the project version cleanly overrides it.
 * **Progressive Disclosure**: Full skill files are never dumped into the prompt. Instead, the harness injects a 1-line index with scope badges (`[global]` or `[project]`).
 * **Lazy Loading & Security**: The agent reads full instructions on demand via `read_file`. Global skills are authorized for reading, while all file writes remain strictly sandboxed to the project directory.
 
-### 4. Custom Slash Commands (`commands/*.md`) — User-Facing
-Define reusable prompt templates and macros for the **user** in `commands/<name>.md` (or `.commands/`, globally in `~/.microharness/commands/`):
+### 4. Custom Slash Commands (`.microharness/commands/*.md`) — User-Facing
+Define reusable prompt templates and macros for the **user** in `.microharness/commands/<name>.md`:
 ```markdown
 # Review code changes
 Review the git diff or specified files: $ARGUMENTS.
@@ -233,11 +236,12 @@ microharness/
 ├── SPEC.md             # Detailed specification & design rationale
 ├── README.md           # Quickstart and overview
 ├── AGENTS.md           # Project conventions for agents
-├── skills/             # On-demand skills (progressive disclosure)
-│   └── run-tests/
-│       └── SKILL.md
-├── commands/           # Custom slash commands (user prompt shortcuts)
-│   └── review.md
+├── .microharness/      # Clean project-level configuration namespace
+│   ├── skills/         # Progressive disclosure skills
+│   │   └── run-tests/
+│   │       └── SKILL.md
+│   └── commands/       # Custom slash commands (user prompt shortcuts)
+│       └── review.md
 ├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration & CLI entrypoint
 ├── benchmarks/         # Pure-Python Mini-SWE benchmark suite

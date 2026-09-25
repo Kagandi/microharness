@@ -37,6 +37,20 @@ def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
         return {}
 
 
+def load_project_config(workspace: Path | None = None) -> dict[str, Any]:
+    """Loads optional project-level configuration from .microharness/config.json."""
+    if not workspace:
+        return {}
+    config_file = workspace / ".microharness" / "config.json"
+    if not config_file.is_file():
+        return {}
+    try:
+        data = json.loads(config_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
     """Loads global and project-level steering guidelines in cascading order."""
     sections: list[str] = []
@@ -53,16 +67,17 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
                     f"----------------------------------------------------------"
                 )
 
-    # 2. Project-level instructions (./AGENTS.md, takes precedence/specializes)
-    local_file = workspace / "AGENTS.md"
-    if local_file.is_file():
-        content = local_file.read_text(encoding="utf-8", errors="replace").strip()
-        if content:
-            sections.append(
-                f"--- Project Instructions (AGENTS.md) ---\n"
-                f"{content}\n"
-                f"--------------------------------------"
-            )
+    # 2. Project-level instructions (./.microharness/AGENTS.md or ./AGENTS.md, takes precedence/specializes)
+    for candidate in [workspace / ".microharness" / "AGENTS.md", workspace / "AGENTS.md"]:
+        if candidate.is_file():
+            content = candidate.read_text(encoding="utf-8", errors="replace").strip()
+            if content:
+                sections.append(
+                    f"--- Project Instructions ({candidate.name}) ---\n"
+                    f"{content}\n"
+                    f"--------------------------------------"
+                )
+                break
 
     return ("\n\n" + "\n\n".join(sections)) if sections else ""
 
@@ -90,13 +105,14 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
                     path_str = str(skill_doc)
                 skills[entry.stem] = (summary, path_str, scope)
 
-    # 1. Global skills first
+    # 1. Global skills first (~/.microharness/skills/ or ~/.microharness/.skills/)
     if global_dir:
         for gd in [global_dir / "skills", global_dir / ".skills"]:
             scan_dir(gd, "global", relative_base=None)
 
     # 2. Project skills second (shadows/overrides global skills with matching names)
-    for pd in [workspace / "skills", workspace / ".skills"]:
+    # Order: legacy folders first, then .microharness/skills so .microharness takes priority
+    for pd in [workspace / "skills", workspace / ".skills", workspace / ".microharness" / "skills"]:
         scan_dir(pd, "project", relative_base=workspace)
 
     if not skills:
@@ -119,7 +135,7 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
 def _discover_commands(
     workspace: Path, global_dir: Path | None = None
 ) -> dict[str, tuple[str, str, str]]:
-    """Discovers custom slash commands from global and project commands/ directories.
+    """Discovers custom slash commands from global and project commands directories.
 
     Returns dict mapping: command_name -> (description, template, scope)
     where scope is 'global' or 'project'. Project commands cleanly shadow global ones.
@@ -144,8 +160,13 @@ def _discover_commands(
         for gd in [global_dir / "commands", global_dir / ".commands"]:
             scan_dir(gd, "global")
 
-    # 2. Project commands (./commands/ or ./.commands/, shadows global)
-    for pd in [workspace / "commands", workspace / ".commands"]:
+    # 2. Project commands (shadows global commands)
+    # Order: legacy folders first, then .microharness/commands so .microharness takes priority
+    for pd in [
+        workspace / "commands",
+        workspace / ".commands",
+        workspace / ".microharness" / "commands",
+    ]:
         scan_dir(pd, "project")
 
     return commands
@@ -187,9 +208,11 @@ class Harness:
             Path(global_dir).resolve() if global_dir is not None else DEFAULT_GLOBAL_DIR
         )
         self.global_config = load_global_config(self.global_dir)
+        self.project_config = load_project_config(self.explicit_workspace_dir)
+        self.merged_config = {**self.global_config, **self.project_config}
 
         self.sandbox = (
-            sandbox if sandbox is not None else bool(self.global_config.get("sandbox", False))
+            sandbox if sandbox is not None else bool(self.merged_config.get("sandbox", False))
         )
         self.custom_tools = tools
         self.evaluator = evaluator
@@ -197,17 +220,17 @@ class Harness:
         self.max_tool_chars = (
             max_tool_chars
             if max_tool_chars is not None
-            else int(self.global_config.get("max_tool_chars", 2000))
+            else int(self.merged_config.get("max_tool_chars", 2000))
         )
         self.max_context_chars = (
             max_context_chars
             if max_context_chars is not None
-            else int(self.global_config.get("max_context_chars", 8000))
+            else int(self.merged_config.get("max_context_chars", 8000))
         )
         self.trigger_ratio = (
             trigger_ratio
             if trigger_ratio is not None
-            else float(self.global_config.get("trigger_ratio", 0.80))
+            else float(self.merged_config.get("trigger_ratio", 0.80))
         )
         self.verbose = verbose
 

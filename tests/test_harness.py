@@ -8,7 +8,13 @@ from unittest.mock import patch
 
 from core.environment import Environment
 from core.evaluator import FileContentEvaluator
-from core.harness import Harness, _discover_commands, _expand_command, load_global_config
+from core.harness import (
+    Harness,
+    _discover_commands,
+    _expand_command,
+    load_global_config,
+    load_project_config,
+)
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import MockModel
@@ -845,6 +851,92 @@ class TestHarnessIntegration(unittest.TestCase):
         # Step 4: final answer -> finishes
         finished, trace4 = loop.step(4)
         self.assertTrue(finished)
+
+    def test_dot_microharness_full_project_namespace(self):
+        """Invariant: .microharness/ provides a unified project namespace for config, agents, skills, and commands."""
+        project_dir = Path(tempfile.mkdtemp(prefix="project_dot_mh_")).resolve()
+        dot_mh = project_dir / ".microharness"
+        dot_mh.mkdir(parents=True)
+
+        # 1. Project config (.microharness/config.json)
+        (dot_mh / "config.json").write_text(
+            json.dumps({"max_context_chars": 12345, "trigger_ratio": 0.75, "sandbox": False}),
+            encoding="utf-8",
+        )
+        loaded_cfg = load_project_config(project_dir)
+        self.assertEqual(loaded_cfg["max_context_chars"], 12345)
+        self.assertEqual(loaded_cfg["trigger_ratio"], 0.75)
+
+        # 2. Project instructions (.microharness/AGENTS.md)
+        (dot_mh / "AGENTS.md").write_text(
+            "Project rule: Use strictly typed dataclasses only.\n", encoding="utf-8"
+        )
+
+        # 3. Project skill (.microharness/skills/lint/SKILL.md)
+        skill_dir = dot_mh / "skills" / "lint-check"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "# Automated Lint Checker\nRun ruff and check all types.\n", encoding="utf-8"
+        )
+
+        # 4. Project command (.microharness/commands/test.md)
+        cmd_dir = dot_mh / "commands"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "test.md").write_text(
+            "# Run Tests Fast\npytest -k $ARGUMENTS\n", encoding="utf-8"
+        )
+
+        # Model captures the prompt and reads the skill via read_file
+        captured_prompts: list[list[Message]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(list(messages))
+                if len(captured_prompts) == 1:
+                    return "Checking lint skill", [
+                        ToolCall(
+                            id="s1",
+                            name="read_file",
+                            arguments={"path": ".microharness/skills/lint-check/SKILL.md"},
+                        )
+                    ]
+                return "All good", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=project_dir,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+
+        # Verify harness merged config
+        self.assertEqual(harness.max_context_chars, 12345)
+        self.assertEqual(harness.trigger_ratio, 0.75)
+
+        # Run task
+        task = Task(id="test_dot_mh", instruction="Check code quality")
+        result = harness.run(task)
+        self.assertTrue(result.passed)
+
+        # Invariants:
+        # Prompt contains .microharness/AGENTS.md rule
+        system_prompt = captured_prompts[0][0].content
+        self.assertIn("Project rule: Use strictly typed dataclasses only.", system_prompt)
+
+        # Prompt indexes .microharness/skills/lint-check/SKILL.md
+        self.assertIn("lint-check: Automated Lint Checker", system_prompt)
+        self.assertIn("read `.microharness/skills/lint-check/SKILL.md`", system_prompt)
+
+        # Agent read the skill file without permission error
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        skill_content = trace_data["steps"][0]["tool_results"][0]["output"]
+        self.assertIn("Run ruff and check all types.", skill_content)
+
+        # Verify commands discovery includes .microharness/commands
+        cmds = _discover_commands(workspace=project_dir)
+        self.assertIn("test", cmds)
+        self.assertEqual(cmds["test"][0], "Run Tests Fast")
+        self.assertEqual(cmds["test"][2], "project")
 
 
 if __name__ == "__main__":
