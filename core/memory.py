@@ -83,6 +83,59 @@ class Memory:
             },
         }
 
+    def _prune_reasoning_blocks(self, msg: Message) -> bool:
+        """Strips historical reasoning blocks from older assistant turns."""
+        if msg.role != "assistant" or (
+            "<think>" not in msg.content and "<thinking>" not in msg.content
+        ):
+            return False
+        cleaned = re.sub(r"<(think|thinking)>.*?</\1>\s*", "", msg.content, flags=re.DOTALL).strip()
+        if cleaned != msg.content.strip():
+            msg.content = (
+                cleaned if cleaned else "[Reasoning stream collapsed to conserve context window]"
+            )
+            return True
+        return False
+
+    def _collapse_tool_output(self, msg: Message, min_chars: int = 120) -> bool:
+        """Replaces large historical tool observations with a tombstone pointing to disk logs."""
+        if (
+            msg.role != "tool"
+            or len(msg.content) <= min_chars
+            or msg.content.startswith("[Tool output collapsed")
+        ):
+            return False
+        original_len = len(msg.content)
+        if msg.raw_log_path:
+            msg.content = (
+                f"[Tool output collapsed ({original_len} chars). "
+                f"Full log: `{msg.raw_log_path}`. Use `read_file` to inspect if needed.]"
+            )
+        else:
+            msg.content = (
+                f"[Tool output collapsed ({original_len} chars) to conserve context window]"
+            )
+        return True
+
+    def _sync_files_ledger(
+        self, safe_prefix_count: int, ledger_index: int | None, pruned_any: bool
+    ) -> bool:
+        """Maintains an active files-modified ledger in context when compaction occurs."""
+        if not self.modified_files or (not pruned_any and ledger_index is None):
+            return False
+        files_list = ", ".join(sorted(self.modified_files))
+        ledger_content = f"[Session Files Modified: {files_list}]"
+        if ledger_index is not None:
+            if self.messages[ledger_index].content != ledger_content:
+                self.messages[ledger_index].content = ledger_content
+                return True
+        else:
+            self.messages.insert(
+                safe_prefix_count,
+                Message(role="system", content=ledger_content),
+            )
+        return False
+
     def compact_if_needed(self, force: bool = False) -> bool:
         """Prunes older observations & thinking streams if context exceeds budget or force=True.
 
@@ -116,53 +169,11 @@ class Memory:
         middle_end_index = len(self.messages) - self.keep_recent_turns
         for i in range(safe_prefix_count, middle_end_index):
             msg = self.messages[i]
-
-            # 1. Prune historical reasoning / thinking blocks from older assistant turns
-            if msg.role == "assistant" and (
-                "<think>" in msg.content or "<thinking>" in msg.content
-            ):
-                cleaned = re.sub(
-                    r"<(think|thinking)>.*?</\1>\s*", "", msg.content, flags=re.DOTALL
-                ).strip()
-                if cleaned != msg.content.strip():
-                    msg.content = (
-                        cleaned
-                        if cleaned
-                        else "[Reasoning stream collapsed to conserve context window]"
-                    )
-                    pruned_any = True
-
-            # 2. Prune large tool outputs and inject raw log file pointer for recovery
-            elif (
-                msg.role == "tool"
-                and len(msg.content) > 120
-                and not msg.content.startswith("[Tool output collapsed")
-            ):
-                original_len = len(msg.content)
-                if msg.raw_log_path:
-                    msg.content = (
-                        f"[Tool output collapsed ({original_len} chars). "
-                        f"Full log: `{msg.raw_log_path}`. Use `read_file` to inspect if needed.]"
-                    )
-                else:
-                    msg.content = (
-                        f"[Tool output collapsed ({original_len} chars) to conserve context window]"
-                    )
+            if self._prune_reasoning_blocks(msg) or self._collapse_tool_output(msg):
                 pruned_any = True
 
-        # 3. If files were modified, maintain an active files ledger at the safe prefix
-        if self.modified_files and (pruned_any or ledger_index is not None):
-            files_list = ", ".join(sorted(self.modified_files))
-            ledger_content = f"[Session Files Modified: {files_list}]"
-            if ledger_index is not None:
-                if self.messages[ledger_index].content != ledger_content:
-                    self.messages[ledger_index].content = ledger_content
-                    pruned_any = True
-            else:
-                self.messages.insert(
-                    safe_prefix_count,
-                    Message(role="system", content=ledger_content),
-                )
+        if self._sync_files_ledger(safe_prefix_count, ledger_index, pruned_any):
+            pruned_any = True
 
         return pruned_any
 
