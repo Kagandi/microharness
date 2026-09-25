@@ -129,16 +129,37 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 62 unit and integration tests run in ~0.9s)*
+*(All 71 unit and integration tests run in ~2.8s)*
 
-### 3. Run Predefined Benchmark Demos
+### 3. Run the Mini-SWE Benchmark Suite
+Run the full 5-task SWE benchmark suite or focus on a single task:
 ```bash
-# Calculator SWE bug-fix benchmark with automated grading:
-uv run microharness --demo calculator
+# Run the entire Mini-SWE benchmark suite:
+uv run microharness --benchmark mini-swe
 
-# Lightweight greeting benchmark:
+# Filter to a specific challenge (e.g. rate_limiter or query_builder):
+uv run microharness --benchmark mini-swe --task rate_limiter
+
+# Built-in demo tasks:
+uv run microharness --demo calculator
 uv run microharness --demo greeting
 ```
+
+---
+
+## 🏆 Mini-SWE Benchmark Suite
+
+`microharness` includes **Mini-SWE**, a fast, lightweight, pure-Python software engineering benchmark designed to evaluate agents on real codebases with zero Docker overhead:
+
+* **Pure Python & Zero Docker**: Operates entirely with Python's standard library. No multi-gigabyte container downloads, instant startup.
+* **Anti-Cheating Evaluator (`PristineTestEvaluator`)**: Evaluators restore pristine test files prior to running verification. An agent cannot bypass tests by deleting or rewriting assertions in the test suite.
+* **5 Realistic Engineering Challenges**:
+  1. `rate_limiter`: Token Bucket rate limiter losing fractional refills under rapid polling.
+  2. `circular_serializer`: Circular JSON serializer cycle detection & ISO-8601 formatting.
+  3. `auth_middleware`: HTTP auth middleware case-insensitive headers & whitespace tolerance.
+  4. `lru_ttl_cache`: LRU cache with TTL updating existing keys & refreshing MRU order.
+  5. `query_builder`: SQL query builder AST precedence grouping & single-quote escaping.
+* **Automated Scorecard & JSON Telemetry**: Generates a formatted summary table in the terminal and exports comprehensive JSON results to `.runs/benchmark_report.json`.
 
 ---
 
@@ -219,6 +240,9 @@ microharness/
 │   └── review.md
 ├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration & CLI entrypoint
+├── benchmarks/         # Pure-Python Mini-SWE benchmark suite
+│   ├── mini_swe.py     # 5 real-world SWE tasks & PristineTestEvaluator
+│   └── runner.py       # Benchmark orchestrator, scorecard table & JSON export
 ├── core/
 │   ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
 │   ├── prompts.py      # System prompt templates
@@ -231,6 +255,7 @@ microharness/
 │   ├── tracer.py       # Telemetry collector & trace exporter
 │   └── harness.py      # Harness orchestrator with global config & commands support
 └── tests/
+    ├── test_benchmarks.py  # Mini-SWE baseline failure, anti-cheating & reference tests
     ├── test_environment.py # Path sandboxing & bash timeout tests
     ├── test_tools.py       # Tools, truncation & disk spillover tests
     ├── test_memory.py      # Conversation history, stats & 80% compaction tests

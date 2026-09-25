@@ -181,6 +181,17 @@ def main():
         help="Run single one-shot task and exit immediately without entering interactive chat",
     )
     parser.add_argument(
+        "--benchmark",
+        choices=["mini-swe", "calculator", "all"],
+        default=None,
+        help="Run a benchmark suite (e.g. 'mini-swe')",
+    )
+    parser.add_argument(
+        "--task",
+        default=None,
+        help="Filter to a specific task ID in the benchmark suite (e.g. 'rate_limiter')",
+    )
+    parser.add_argument(
         "--demo",
         choices=["calculator", "greeting"],
         default=None,
@@ -236,28 +247,59 @@ def main():
         )
         model = build_mock_agent_script()
 
-    # 2. If --demo is passed, run Benchmark Mode (isolated sandbox with evaluator)
-    if args.demo:
-        task, evaluator = (
-            create_calculator_demo() if args.demo == "calculator" else create_greeting_demo()
-        )
-        harness = Harness(
-            model=model,
-            global_dir=global_dir,
-            sandbox=True,
-            evaluator=evaluator,
-            verbose=True,
-        )
-        result = harness.run(task)
-        print("=" * 60)
-        print(f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})")
-        print(f"Total Steps: {result.total_steps}")
-        print(f"Workspace: {result.workspace_path}")
-        print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
-        if result.patch_path:
-            print(f"Patch: {result.patch_path}")
-        print("=" * 60)
-        return
+    # 2. Benchmark Suite Mode (e.g. --benchmark mini-swe or --demo calculator)
+    if args.benchmark or args.demo:
+        bench_choice = args.benchmark or args.demo
+        if bench_choice in ("mini-swe", "all"):
+            from benchmarks.mini_swe import get_mini_swe_suite
+            from benchmarks.runner import run_benchmark_suite
+
+            suite = get_mini_swe_suite(task_filter=args.task)
+            if not suite:
+                print(f"❌ No benchmark tasks found matching filter: '{args.task}'")
+                return
+
+            def harness_factory(evaluator: Evaluator) -> Harness:
+                return Harness(
+                    model=model,
+                    global_dir=global_dir,
+                    sandbox=True,
+                    evaluator=evaluator,
+                    verbose=True,
+                )
+
+            run_benchmark_suite(
+                harness_factory=harness_factory,
+                tasks=suite,
+                suite_name="Mini-SWE",
+                output_dir=".runs",
+                verbose=True,
+            )
+            return
+
+        elif bench_choice in ("calculator", "greeting"):
+            task, evaluator = (
+                create_calculator_demo() if bench_choice == "calculator" else create_greeting_demo()
+            )
+            harness = Harness(
+                model=model,
+                global_dir=global_dir,
+                sandbox=True,
+                evaluator=evaluator,
+                verbose=True,
+            )
+            result = harness.run(task)
+            print("=" * 60)
+            print(
+                f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})"
+            )
+            print(f"Total Steps: {result.total_steps}")
+            print(f"Workspace: {result.workspace_path}")
+            print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+            if result.patch_path:
+                print(f"Patch: {result.patch_path}")
+            print("=" * 60)
+            return
 
     # 3. Resolve Target Workspace and Sandbox Flag
     target_dir = Path(args.dir).resolve()

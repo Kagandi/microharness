@@ -32,7 +32,10 @@ microharness/
 │   └── run-tests/
 │       └── SKILL.md            # Skill instructions
 ├── .env.example                # Configuration template
-├── main.py                     # Runnable CLI entrypoint (interactive & batch)
+├── main.py                     # Runnable CLI entrypoint (interactive, batch & benchmarks)
+├── benchmarks/                 # Pure-Python Mini-SWE benchmark suite
+│   ├── mini_swe.py             # 5 real-world SWE tasks & PristineTestEvaluator
+│   └── runner.py               # Benchmark orchestrator, scorecard table & JSON export
 ├── core/
 │   ├── types.py                # Data contracts (Message, ToolCall, Task, Trajectory, RunResult)
 │   ├── prompts.py              # System prompt templates
@@ -45,6 +48,7 @@ microharness/
 │   ├── tracer.py               # Telemetry collector & trace exporter
 │   └── harness.py              # Harness orchestrator (batch and interactive chat)
 └── tests/
+    ├── test_benchmarks.py      # Mini-SWE baseline failure, anti-cheating & reference tests
     ├── test_environment.py     # Path sandboxing, traversal rejection & bash timeout tests
     ├── test_tools.py           # Tools, exact truncation boundaries & disk spillover tests
     ├── test_memory.py          # Conversation history, stats, immutability & compaction tests
@@ -255,8 +259,27 @@ while not done:
 
 ---
 
+### 3.9 Mini-SWE Benchmark Suite & Anti-Cheating Invariants (`benchmarks/`)
+* **Zero-Docker Pure Python Standard**: Full SWE-style benchmark runs entirely in standard Python without container virtualization or dependency bloat.
+* **Anti-Cheating `PristineTestEvaluator`**:
+  * Restores pristine, untouched unit test files into the sandbox immediately prior to verification.
+  * Ensures agents cannot achieve false positives by modifying, stubbing, or deleting test files.
+* **5 Canonical Real-World Tasks**:
+  1. `rate_limiter`: Continuous float token bucket refill under rapid polling loops.
+  2. `circular_serializer`: Cyclic reference detection (`$ref: #`) and ISO-8601 datetime serialization.
+  3. `auth_middleware`: Case-insensitive HTTP header resolution and whitespace resilience.
+  4. `lru_ttl_cache`: LRU eviction order and TTL expiration refresh upon updating existing cache keys.
+  5. `query_builder`: SQL AST condition precedence grouping with parentheses and quote escaping.
+* **Benchmark Runner (`benchmarks/runner.py`)**:
+  * Orchestrates multi-task execution across isolated sandboxes.
+  * Formats a clean CLI scorecard table with status, steps, duration, and score.
+  * Exports machine-readable `benchmark_report.json` with aggregate metrics (pass rate, mean score, total duration).
+
+---
+
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (58 passing tests in ~0.9s):
+All features are tested against rigorous, non-tautological standards in `tests/` (71 passing tests in ~2.8s):
+* `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner and task filtering.
 * `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
 * `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors.
 * `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
