@@ -239,6 +239,18 @@ def main():
         default=None,
         help="Docker image for container sandboxing (default: python:3.11 or from config)",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Maximum steps/actions the agent can take for a task (e.g. 50, 100, 500)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for task execution (e.g. 3600, 7200)",
+    )
     args = parser.parse_args()
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
@@ -314,6 +326,13 @@ def main():
                     verbose=True,
                 )
 
+            if args.max_steps or args.timeout:
+                for t, _ in suite:
+                    if args.max_steps:
+                        t.max_steps = args.max_steps
+                    if args.timeout:
+                        t.timeout_seconds = args.timeout
+
             run_benchmark_suite(
                 harness_factory=harness_factory,
                 tasks=suite,
@@ -338,7 +357,15 @@ def main():
                 )
                 return
 
-            suite = get_deepswe_mini_suite(dataset_dir=dataset_dir, task_filter=args.task)
+            max_steps = args.max_steps or int(config.get("max_steps", 30))
+            timeout_seconds = args.timeout or (max_steps * 30.0 if max_steps > 30 else 900.0)
+
+            suite = get_deepswe_mini_suite(
+                dataset_dir=dataset_dir,
+                task_filter=args.task,
+                max_steps=max_steps,
+                timeout_seconds=timeout_seconds,
+            )
             if not suite:
                 print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
                 return
@@ -408,7 +435,12 @@ def main():
 
     # 4. Batch Mode vs Interactive Mode
     if args.batch and args.instruction:
-        task = Task(id="user_task", instruction=args.instruction.strip())
+        task = Task(
+            id="user_task",
+            instruction=args.instruction.strip(),
+            max_steps=args.max_steps or 15,
+            timeout_seconds=args.timeout or 60.0,
+        )
         result = harness.run(task)
         print("=" * 60)
         print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
