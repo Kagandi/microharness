@@ -6,7 +6,7 @@
 ### Guiding Principles
 1. **Zero External Runtime Dependencies**: The core harness relies strictly on Python's standard library (`dataclasses`, `typing.Protocol`, `subprocess`, `urllib.request`, `pathlib`, `json`).
 2. **Strict Separation of Concerns**:
-   * The **Agent Loop** (`core/loop.py`, ~40 LOC) is purely the thought-action-observation engine. It knows nothing of filesystems, benchmarks, or models.
+   * The **Agent Loop** (`core/loop.py`, ~40 LOC) is purely the tool-calling execution engine. It knows nothing of filesystems, benchmarks, or models.
    * The **Harness** (`core/harness.py`) is the chassis providing workspace management, guardrails/budgets, memory compaction, telemetry/tracing, project steering, and evaluation.
 3. **True Pluggability**: Models, Tools, Evaluators, and Compaction strategies implement clean interfaces. Any custom model or tool can be plugged in from the outside without modifying harness code or writing provider-specific subclasses.
 4. **Resilience & Pragmatism**:
@@ -46,7 +46,7 @@ microharness/
 │   ├── tools.py                # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py               # Context manager, stats & compaction policies
 │   ├── model.py                # Pluggable Model protocol, generic HttpChatModel & MockModel
-│   ├── loop.py                 # Pure ReAct loop (~40 lines)
+│   ├── loop.py                 # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py            # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py               # Telemetry collector & trace exporter
 │   └── harness.py              # Harness orchestrator (batch and interactive chat)
@@ -230,7 +230,7 @@ The harness discovers global machine configuration, steering guidelines, skills,
 ---
 
 ### 3.7 The Agent Loop (`core/loop.py`)
-The loop is intentionally pure (~40 lines). It accepts `model`, `memory`, and `tools`, executing:
+The native tool-calling loop is intentionally pure (~40 lines). It accepts `model`, `memory`, and `tools`, executing:
 ```python
 while not done:
     prompt_snapshot = memory.get_messages()

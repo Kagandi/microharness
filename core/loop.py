@@ -9,10 +9,10 @@ from core.types import StepTrace, ToolResult
 
 
 class AgentLoop:
-    """The pure ReAct execution engine (~30 LOC).
+    """The native tool-calling agent loop (~30 LOC).
 
     Agnostic to sandboxing, benchmarks, and evaluation.
-    Only manages the Thought -> Action -> Observation cycle.
+    Drives the structured LLM generation -> tool dispatch -> observation cycle.
     """
 
     def __init__(self, model: Model, memory: Memory, tools: ToolRegistry):
@@ -21,7 +21,7 @@ class AgentLoop:
         self.tools = tools
 
     def step(self, step_index: int) -> tuple[bool, StepTrace]:
-        """Executes a single ReAct turn.
+        """Executes a single tool-calling turn.
 
         Returns:
             (is_finished, step_trace)

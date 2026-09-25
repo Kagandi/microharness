@@ -254,7 +254,7 @@ microharness/
 │   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py       # Context manager & 80% high-water mark compaction
 │   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
-│   ├── loop.py         # Pure ReAct loop (~40 lines)
+│   ├── loop.py         # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py       # Telemetry collector & trace exporter
 │   └── harness.py      # Harness orchestrator with global config & commands support
