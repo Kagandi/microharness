@@ -519,6 +519,138 @@ class Harness:
         finally:
             env.teardown()
 
+    def _print_interactive_help(self, custom_commands: dict[str, tuple[str, str, str]]) -> None:
+        print("\nAvailable commands:")
+        print("  /cache [5m|1h|off] - View or switch prompt caching duration on the fly")
+        print("  /status            - Show context window size, message breakdown, and budget")
+        print("  /compact           - Manually collapse older observations to free context")
+        print("  /new               - Clear conversation history while keeping workspace files")
+        print("  /exit              - Save session trace and exit")
+        if custom_commands:
+            print("\nCustom slash commands (from commands/):")
+            for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
+                print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
+        print()
+
+    def _print_context_status(self, memory: Memory) -> None:
+        s = memory.stats()
+        print("\n📊 Context Breakdown:")
+        print(
+            f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
+            f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
+        )
+        print(
+            f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
+            f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
+        )
+        c_stats = self.get_cache_stats()
+        ttl_val = c_stats.get("cache_ttl")
+        print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
+        if c_stats.get("total_prompt_tokens"):
+            cached = c_stats.get("total_cached_tokens", 0)
+            total = c_stats.get("total_prompt_tokens", 0)
+            rate = c_stats.get("cache_hit_rate_pct", 0.0)
+            print(f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n")
+        else:
+            print()
+
+    def _handle_cache_command(self, user_input: str) -> None:
+        parts = user_input.strip().split()
+        if len(parts) == 1:
+            stats = self.get_cache_stats()
+            curr_ttl = stats.get("cache_ttl")
+            if curr_ttl:
+                desc = (
+                    "5 minutes (Standard Ephemeral)"
+                    if curr_ttl == "5m"
+                    else "1 hour (Extended Beta)"
+                )
+                print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
+            else:
+                print("\n⚡ Prompt Caching: DISABLED (off)")
+            if stats.get("total_prompt_tokens"):
+                cached = stats.get("total_cached_tokens", 0)
+                total = stats.get("total_prompt_tokens", 0)
+                rate = stats.get("cache_hit_rate_pct", 0.0)
+                print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
+            print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
+            return
+
+        target_ttl = parts[1].lower().strip()
+        try:
+            new_ttl = self.set_cache_ttl(target_ttl)
+            if new_ttl:
+                desc = "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
+                print(
+                    f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
+                )
+            else:
+                print("\n⚡ Prompt caching disabled for subsequent turns.\n")
+        except ValueError as exc:
+            print(f"\n❌ {exc}\n")
+
+    def _dispatch_interactive_input(
+        self,
+        user_input: str,
+        memory: Memory,
+        custom_commands: dict[str, tuple[str, str, str]],
+    ) -> str:
+        """Processes an interactive user input line.
+
+        Returns:
+            "exit" to terminate session,
+            "turn" if an agent turn should be executed,
+            "skip" if command was handled internally without calling the model.
+        """
+        cmd = user_input.lower().strip()
+        if cmd in ("/exit", "exit", "/quit", "quit"):
+            print("Ending session.")
+            return "exit"
+
+        if cmd in ("/help", "help"):
+            self._print_interactive_help(custom_commands)
+            return "skip"
+
+        if cmd in ("/status", "/context", "status", "context"):
+            self._print_context_status(memory)
+            return "skip"
+
+        if cmd.startswith("/cache") or cmd == "cache":
+            self._handle_cache_command(user_input)
+            return "skip"
+
+        if cmd in ("/compact", "compact"):
+            old_chars = memory.total_chars()
+            did_compact = memory.compact_if_needed(force=True)
+            new_chars = memory.total_chars()
+            if did_compact:
+                print(
+                    f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
+                )
+            else:
+                print("\nℹ️ No older observations eligible for compaction at this time.\n")
+            return "skip"
+
+        if cmd in ("/new", "/reset", "new", "reset"):
+            memory.reset()
+            print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
+            return "skip"
+
+        if user_input.startswith("/"):
+            cmd_part, _, args_part = user_input[1:].partition(" ")
+            cmd_key = cmd_part.lower().strip()
+            if cmd_key in custom_commands:
+                _, template, scope = custom_commands[cmd_key]
+                expanded_prompt = _expand_command(template, args_part)
+                print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                memory.add_user(expanded_prompt)
+                return "turn"
+            print(f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n")
+            return "skip"
+
+        memory.add_user(user_input)
+        return "turn"
+
     def run_interactive(
         self,
         initial_instruction: str | None = None,
@@ -584,136 +716,11 @@ class Harness:
                 if not user_input:
                     continue
 
-                # Handle Meta / Slash Commands without calling the model
-                cmd = user_input.lower().strip()
-                if cmd in ("/exit", "exit", "/quit", "quit"):
-                    print("Ending session.")
+                action = self._dispatch_interactive_input(user_input, memory, custom_commands)
+                if action == "exit":
                     break
-
-                elif cmd in ("/help", "help"):
-                    print("\nAvailable commands:")
-                    print(
-                        "  /cache [5m|1h|off] - View or switch prompt caching duration on the fly"
-                    )
-                    print(
-                        "  /status            - Show context window size, message breakdown, and budget"
-                    )
-                    print(
-                        "  /compact           - Manually collapse older observations to free context"
-                    )
-                    print(
-                        "  /new               - Clear conversation history while keeping workspace files"
-                    )
-                    print("  /exit              - Save session trace and exit")
-                    if custom_commands:
-                        print("\nCustom slash commands (from commands/):")
-                        for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
-                            print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
-                    print()
-                    continue
-
-                elif cmd in ("/status", "/context", "status", "context"):
-                    s = memory.stats()
-                    print("\n📊 Context Breakdown:")
-                    print(
-                        f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
-                        f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
-                    )
-                    print(
-                        f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
-                        f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
-                    )
-                    c_stats = self.get_cache_stats()
-                    ttl_val = c_stats.get("cache_ttl")
-                    print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
-                    if c_stats.get("total_prompt_tokens"):
-                        cached = c_stats.get("total_cached_tokens", 0)
-                        total = c_stats.get("total_prompt_tokens", 0)
-                        rate = c_stats.get("cache_hit_rate_pct", 0.0)
-                        print(
-                            f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n"
-                        )
-                    else:
-                        print()
-                    continue
-
-                elif cmd.startswith("/cache") or cmd == "cache":
-                    parts = user_input.strip().split()
-                    if len(parts) == 1:
-                        stats = self.get_cache_stats()
-                        curr_ttl = stats.get("cache_ttl")
-                        if curr_ttl:
-                            desc = (
-                                "5 minutes (Standard Ephemeral)"
-                                if curr_ttl == "5m"
-                                else "1 hour (Extended Beta)"
-                            )
-                            print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
-                        else:
-                            print("\n⚡ Prompt Caching: DISABLED (off)")
-                        if stats.get("total_prompt_tokens"):
-                            cached = stats.get("total_cached_tokens", 0)
-                            total = stats.get("total_prompt_tokens", 0)
-                            rate = stats.get("cache_hit_rate_pct", 0.0)
-                            print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
-                        print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
-                        continue
-
-                    target_ttl = parts[1].lower().strip()
-                    try:
-                        new_ttl = self.set_cache_ttl(target_ttl)
-                        if new_ttl:
-                            desc = (
-                                "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
-                            )
-                            print(
-                                f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
-                            )
-                        else:
-                            print("\n⚡ Prompt caching disabled for subsequent turns.\n")
-                    except ValueError as exc:
-                        print(f"\n❌ {exc}\n")
-                    continue
-
-                elif cmd in ("/compact", "compact"):
-                    old_chars = memory.total_chars()
-                    did_compact = memory.compact_if_needed(force=True)
-                    new_chars = memory.total_chars()
-                    if did_compact:
-                        print(
-                            f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
-                        )
-                    else:
-                        print("\nℹ️ No older observations eligible for compaction at this time.\n")
-                    continue
-
-                elif cmd in ("/new", "/reset", "new", "reset"):
-                    memory.reset()
-                    print(
-                        "\n✨ Started a fresh conversation context (workspace files preserved).\n"
-                    )
-                    continue
-
-                # Check for custom slash commands
-                elif user_input.startswith("/"):
-                    cmd_part, _, args_part = user_input[1:].partition(" ")
-                    cmd_key = cmd_part.lower().strip()
-                    if cmd_key in custom_commands:
-                        _, template, scope = custom_commands[cmd_key]
-                        expanded_prompt = _expand_command(template, args_part)
-                        print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
-                        memory.add_user(expanded_prompt)
-                        has_pending_turn = True
-                        continue
-                    else:
-                        print(
-                            f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n"
-                        )
-                        continue
-
-                # Normal user message: feed into memory and execute
-                memory.add_user(user_input)
-                has_pending_turn = True
+                elif action == "turn":
+                    has_pending_turn = True
 
             patch_diff = env.get_git_patch()
             if patch_diff:
