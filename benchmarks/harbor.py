@@ -63,7 +63,7 @@ class HarborEvaluator(Evaluator):
         self.timeout = timeout
 
     def evaluate(self, env: Environment, steps: list[StepTrace]) -> EvalResult:
-        if not isinstance(env, DockerEnvironment) or not env._container_started:
+        if not isinstance(env, DockerEnvironment) or not env.is_running:
             return EvalResult(
                 passed=False,
                 score=0.0,

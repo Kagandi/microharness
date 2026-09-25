@@ -35,10 +35,16 @@ def format_tool_output(
     if len(output) <= max_chars:
         return output, False, None
 
-    # Spill raw output to disk
+    # Spill raw output to disk safely
+    raw_log_path: str | None = None
     log_filename = f"step_{step_index:02d}_{tool_name}_{call_id[:6]}.log"
     log_path = logs_dir / log_filename
-    log_path.write_text(output, encoding="utf-8")
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output, encoding="utf-8")
+        raw_log_path = str(log_path)
+    except OSError:
+        raw_log_path = None
 
     # Compute head and tail bounds
     head_size = max_chars // 3
@@ -47,14 +53,17 @@ def format_tool_output(
     tail = output[-tail_size:]
     truncated_count = len(output) - (head_size + tail_size)
 
-    marker = (
-        f"\n\n[... Truncated {truncated_count} characters ({output.count(chr(10))} total lines). "
-        f"Full raw output saved to {log_filename} ...]\n"
-        f"[Tip: You can use `grep` or `read_file` to inspect the full log file if needed]\n\n"
-    )
+    if raw_log_path:
+        marker = (
+            f"\n\n[... Truncated {truncated_count} characters ({output.count(chr(10))} total lines). "
+            f"Full raw output saved to {log_filename} ...]\n"
+            f"[Tip: You can use `grep` or `read_file` to inspect the full log file if needed]\n\n"
+        )
+    else:
+        marker = f"\n\n[... Truncated {truncated_count} characters ({output.count(chr(10))} total lines) ...]\n\n"
 
     truncated_output = head + marker + tail
-    return truncated_output, True, str(log_path)
+    return truncated_output, True, raw_log_path
 
 
 class BashTool:
@@ -118,6 +127,7 @@ class ReadFileTool:
 
 class WriteFileTool:
     name = "write_file"
+    modifies_files = True
     description = "Create or overwrite a file inside the workspace with given content."
     parameters = {
         "type": "object",
@@ -147,6 +157,7 @@ class WriteFileTool:
 
 class EditFileTool:
     name = "edit_file"
+    modifies_files = True
     description = (
         "Replaces an exact, unique occurrence of old_str with new_str in a file. "
         "The old_str must match exactly (including whitespace/indentation) and be unique."
@@ -191,6 +202,11 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
+
+    def modifies_files(self, tool_name: str) -> bool:
+        """Checks if a registered tool is marked as modifying workspace files."""
+        tool = self._tools.get(tool_name)
+        return bool(getattr(tool, "modifies_files", False))
 
     def to_system_prompt_snippet(self) -> str:
         """Generates dynamic documentation for all registered tools."""
@@ -244,14 +260,19 @@ class ToolRegistry:
 
         raw_output_str = str(raw_output) if raw_output is not None else ""
 
-        formatted_output, was_truncated, raw_log_path = format_tool_output(
-            output=raw_output_str,
-            call_id=tool_call.id,
-            tool_name=tool_call.name,
-            step_index=step_index,
-            logs_dir=self.env.logs_dir,
-            max_chars=self.max_tool_chars,
-        )
+        try:
+            formatted_output, was_truncated, raw_log_path = format_tool_output(
+                output=raw_output_str,
+                call_id=tool_call.id,
+                tool_name=tool_call.name,
+                step_index=step_index,
+                logs_dir=self.env.logs_dir,
+                max_chars=self.max_tool_chars,
+            )
+        except Exception:
+            formatted_output = raw_output_str[: self.max_tool_chars]
+            was_truncated = len(raw_output_str) > self.max_tool_chars
+            raw_log_path = None
 
         return ToolResult(
             call_id=tool_call.id,

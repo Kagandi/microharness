@@ -16,11 +16,16 @@ from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry,
 from core.tracer import Tracer
 from core.types import EvalResult, RunResult, Task
 
-DEFAULT_GLOBAL_DIR = (
-    Path.home() / ".microharness"
-    if (Path.home() / ".microharness").exists() or not (Path.home() / ".mini-harness").exists()
-    else Path.home() / ".mini-harness"
-)
+
+def get_default_global_dir() -> Path:
+    """Returns the default global directory, evaluating Path.home() at call time."""
+    home = Path.home()
+    if (home / ".microharness").exists() or not (home / ".mini-harness").exists():
+        return home / ".microharness"
+    return home / ".mini-harness"
+
+
+DEFAULT_GLOBAL_DIR = get_default_global_dir()
 
 
 def _load_json_config(config_file: Path | None) -> dict[str, Any]:
@@ -74,6 +79,38 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
     return ("\n\n" + "\n\n".join(sections)) if sections else ""
 
 
+def _extract_skill_summary(content: str, default: str) -> str:
+    """Extracts a 1-line summary from a SKILL.md document, supporting YAML frontmatter."""
+    lines = [line.strip() for line in content.splitlines()]
+    non_empty = [line for line in lines if line]
+    if not non_empty:
+        return default
+
+    if non_empty[0] == "---":
+        in_frontmatter = True
+        desc_line = None
+        after_frontmatter: list[str] = []
+        for line in non_empty[1:]:
+            if line == "---":
+                in_frontmatter = False
+                continue
+            if in_frontmatter:
+                if line.startswith("description:"):
+                    _, _, val = line.partition(":")
+                    val = val.strip().strip("\"'")
+                    if val:
+                        desc_line = val
+            else:
+                after_frontmatter.append(line)
+        if desc_line:
+            return desc_line
+        if after_frontmatter:
+            return after_frontmatter[0].lstrip("#").strip() or default
+        return default
+
+    return non_empty[0].lstrip("#").strip() or default
+
+
 def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
     """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
     # Key: skill_name -> (summary, path_str, scope)
@@ -87,10 +124,8 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
                 entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
             )
             if skill_doc and skill_doc.is_file() and entry.name != "README.md":
-                lines = skill_doc.read_text(encoding="utf-8", errors="replace").splitlines()
-                summary = next(
-                    (line.strip().lstrip("#").strip() for line in lines if line.strip()), entry.stem
-                )
+                content = skill_doc.read_text(encoding="utf-8", errors="replace")
+                summary = _extract_skill_summary(content, entry.stem)
                 if relative_base and skill_doc.is_relative_to(relative_base):
                     path_str = str(skill_doc.relative_to(relative_base))
                 else:
@@ -202,7 +237,7 @@ class Harness:
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
         self.global_dir = (
-            Path(global_dir).resolve() if global_dir is not None else DEFAULT_GLOBAL_DIR
+            Path(global_dir).resolve() if global_dir is not None else get_default_global_dir()
         )
         self.global_config = load_global_config(self.global_dir)
         self.project_config = load_project_config(self.explicit_workspace_dir)
@@ -279,7 +314,12 @@ class Harness:
         init_workdir: str | None,
         initial_files: dict[str, str],
     ) -> Environment:
-        allowed_reads = [self.global_dir] if self.global_dir else []
+        allowed_reads: list[Path] = [logs_dir, self.runs_dir]
+        if self.global_dir:
+            for sub in ["skills", ".skills", "commands", ".commands"]:
+                sub_path = self.global_dir / sub
+                allowed_reads.append(sub_path)
+            allowed_reads.append(self.global_dir / "AGENTS.md")
         if active_docker:
             env: Environment = DockerEnvironment(
                 image=active_image,

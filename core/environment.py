@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -147,17 +148,38 @@ class Environment:
         path.write_text(updated_content, encoding="utf-8")
         return occurrences, f"Successfully replaced 1 occurrence in '{rel_path}'."
 
+    @property
+    def is_running(self) -> bool:
+        """Returns True if the environment is ready for command execution."""
+        return True
+
     def get_git_patch(self) -> str | None:
-        """Captures git diff of the workspace if it is a git repository."""
+        """Captures git diff of the workspace if it is a git repository.
+
+        Safely represents untracked files using intent-to-add without destroying
+        pre-existing staged changes.
+        """
         code, _ = self.execute_bash("git rev-parse --is-inside-work-tree")
         if code != 0:
             return None
-        # Add intent-to-add so untracked files are represented in diff
-        self.execute_bash("git add -N .")
+
+        # Find untracked files to add with intent-to-add
+        code, untracked_out = self.execute_bash("git ls-files --others --exclude-standard")
+        untracked = [line.strip() for line in untracked_out.splitlines() if line.strip()]
+
+        if untracked:
+            quoted_untracked = " ".join(shlex.quote(f) for f in untracked)
+            self.execute_bash(f"git add -N -- {quoted_untracked}")
+
         code, diff_out = self.execute_bash("git diff HEAD")
         if code != 0 or not diff_out.strip():
             code, diff_out = self.execute_bash("git diff")
-        self.execute_bash("git reset")
+
+        # Only reset the specific untracked files we added with intent-to-add
+        if untracked:
+            quoted_untracked = " ".join(shlex.quote(f) for f in untracked)
+            self.execute_bash(f"git reset -q -- {quoted_untracked}")
+
         return diff_out.strip() if diff_out.strip() else None
 
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
@@ -288,6 +310,7 @@ class DockerEnvironment(Environment):
             )
             if cp_res.returncode == 0:
                 # Symlink internal workdir to /workspace inside container so paths match
+                quoted_workdir = shlex.quote(self.init_workdir)
                 subprocess.run(
                     [
                         "docker",
@@ -295,12 +318,17 @@ class DockerEnvironment(Environment):
                         self.container_name,
                         "bash",
                         "-c",
-                        f"rm -rf {self.init_workdir} && ln -s /workspace {self.init_workdir}",
+                        f"rm -rf {quoted_workdir} && ln -s /workspace {quoted_workdir}",
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
+
+    @property
+    def is_running(self) -> bool:
+        """Returns True if the Docker container is currently active."""
+        return self._container_started
 
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the Docker container at /workspace."""
@@ -327,9 +355,9 @@ class DockerEnvironment(Environment):
                 encoding="utf-8",
                 errors="replace",
             )
-            # If bash doesn't exist in the target image (e.g. alpine), fall back to sh
+            # If bash doesn't exist in the target image (e.g. alpine), fall back to sh (index 5)
             if process.returncode == 127 and "bash: not found" in (process.stdout or ""):
-                cmd[4] = "/bin/sh"
+                cmd[5] = "/bin/sh"
                 process = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,

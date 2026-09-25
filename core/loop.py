@@ -60,7 +60,7 @@ class AgentLoop:
         tool_results: list[ToolResult] = []
         for call in tool_calls:
             result = self.tools.dispatch(call, step_index=step_index)
-            if result.exit_code == 0 and call.name in ("write_file", "edit_file"):
+            if result.exit_code == 0 and self.tools.modifies_files(call.name):
                 target_path = call.arguments.get("path")
                 if target_path:
                     self.memory.record_modified_file(str(target_path))
@@ -73,7 +73,9 @@ class AgentLoop:
             prompt_messages=prompt_snapshot,
             model_response={
                 "content": content,
-                "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
+                ],
             },
             tool_results=[tr.to_dict() for tr in tool_results],
             compaction_applied=compaction_applied,

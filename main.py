@@ -469,7 +469,9 @@ def main():
     )
 
     # 4. Batch Mode vs Interactive Mode
-    if args.batch and args.instruction:
+    if args.batch:
+        if not args.instruction:
+            parser.error("--batch requires an instruction argument.")
         task = Task(
             id="user_task",
             instruction=args.instruction.strip(),

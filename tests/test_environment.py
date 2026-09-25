@@ -191,6 +191,60 @@ class TestEnvironment(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(out.strip(), "CTX_TEST")
 
+    def test_get_git_patch_preserves_staged_changes(self):
+        # Initialize real git repository
+        self.env.execute_bash("git init")
+        self.env.execute_bash("git config user.name 'Test'")
+        self.env.execute_bash("git config user.email 'test@test.com'")
+        self.env.write_file("committed.txt", "v1\n")
+        self.env.execute_bash("git add committed.txt && git commit -m 'init'")
+
+        # 1. User pre-stages staged.txt
+        self.env.write_file("staged.txt", "staged_content\n")
+        self.env.execute_bash("git add staged.txt")
+
+        # 2. Untracked file
+        self.env.write_file("untracked.txt", "untracked_content\n")
+
+        # 3. Capture patch
+        patch = self.env.get_git_patch()
+        self.assertIsNotNone(patch)
+        self.assertIn("staged_content", patch)
+        self.assertIn("untracked_content", patch)
+
+        # 4. CRITICAL: staged.txt must STILL be staged in git index
+        _, status_out = self.env.execute_bash("git status --porcelain")
+        status_lines = [line.strip() for line in status_out.splitlines()]
+        self.assertIn("A  staged.txt", status_lines)
+        self.assertIn("?? untracked.txt", status_lines)
+
+    def test_docker_sh_fallback_argv_index(self):
+        from unittest.mock import MagicMock, patch
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "test_container_xyz"
+        d_env._container_started = True
+
+        first_res = MagicMock(returncode=127, stdout="bash: not found")
+        second_res = MagicMock(returncode=0, stdout="success")
+
+        with patch("subprocess.run", side_effect=[first_res, second_res]) as mock_run:
+            code, out = d_env.execute_bash("echo hi")
+            self.assertEqual(code, 0)
+            self.assertEqual(mock_run.call_count, 2)
+            # The second call must have container_name at index 4 and /bin/sh at index 5
+            second_cmd = mock_run.call_args_list[1][0][0]
+            self.assertEqual(second_cmd[4], "test_container_xyz")
+            self.assertEqual(second_cmd[5], "/bin/sh")
+
+    def test_is_running_property(self):
+        self.assertTrue(self.env.is_running)
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env._container_started = False
+        self.assertFalse(d_env.is_running)
+        d_env._container_started = True
+        self.assertTrue(d_env.is_running)
+
 
 if __name__ == "__main__":
     unittest.main()

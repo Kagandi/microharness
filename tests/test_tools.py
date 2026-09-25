@@ -146,6 +146,30 @@ class TestTools(unittest.TestCase):
         self.assertEqual(res.exit_code, 1)
         self.assertIn("must be a dictionary/object", res.output)
 
+    def test_format_tool_output_handles_oserror(self):
+        from unittest.mock import patch
+
+        from core.tools import format_tool_output
+
+        with patch.object(Path, "write_text", side_effect=OSError("Disk full")):
+            formatted, was_truncated, raw_log_path = format_tool_output(
+                output="x" * 5000,
+                call_id="call_test",
+                tool_name="bash",
+                step_index=1,
+                logs_dir=self.env.logs_dir,
+                max_chars=1000,
+            )
+            self.assertTrue(was_truncated)
+            self.assertIsNone(raw_log_path)
+            self.assertIn("Truncated", formatted)
+
+    def test_tool_registry_modifies_files(self):
+        self.assertTrue(self.registry.modifies_files("write_file"))
+        self.assertTrue(self.registry.modifies_files("edit_file"))
+        self.assertFalse(self.registry.modifies_files("read_file"))
+        self.assertFalse(self.registry.modifies_files("bash"))
+
 
 if __name__ == "__main__":
     unittest.main()

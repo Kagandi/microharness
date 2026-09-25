@@ -1077,6 +1077,109 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.score, 1.0)
 
+    def test_skills_frontmatter_description_summary(self):
+        from core.harness import _discover_skills_index
+
+        workspace = Path(tempfile.mkdtemp(prefix="ws_frontmatter_"))
+        skill_dir = workspace / ".microharness" / "skills" / "my-linter"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: my-linter\ndescription: Comprehensive code style checks\n---\n# Linter\nDetails...",
+            encoding="utf-8",
+        )
+
+        index = _discover_skills_index(workspace, global_dir=None)
+        self.assertIn("Comprehensive code style checks", index)
+        self.assertNotIn(": --- (read", index)
+
+    def test_log_spill_readable_with_custom_runs_dir(self):
+        custom_runs = Path(tempfile.mkdtemp(prefix="custom_runs_"))
+        script = [
+            (
+                "Generate large output",
+                [
+                    ToolCall(
+                        id="c1",
+                        name="bash",
+                        arguments={"command": "python3 -c 'print(\"A\" * 5000)'"},
+                    )
+                ],
+            ),
+            (
+                "Read spilled log",
+                [],  # We will test read_file via env directly to confirm permission
+            ),
+        ]
+        model = MockModel(script)
+        harness = Harness(
+            model=model,
+            sandbox=True,
+            runs_dir=custom_runs,
+            max_tool_chars=500,
+            verbose=False,
+        )
+        task = Task(id="spill_task", instruction="Run big command", max_steps=2)
+        result = harness.run(task)
+        self.assertEqual(result.finish_reason, "completed")
+
+        # Find the spilled log file in custom_runs
+        log_files = list(custom_runs.glob("**/*.log"))
+        self.assertGreater(len(log_files), 0)
+        spill_file = log_files[0]
+
+        # Verify Environment allows reading the spilled log file
+        env, _, _, _, _, _ = harness._setup_run(
+            task_id="check_read",
+            system_prompt="",
+            initial_instruction="test",
+            initial_files={},
+            force_sandbox=True,
+        )
+        content = env.read_file(str(spill_file))
+        self.assertIn("AAAA", content)
+
+    def test_global_config_json_not_readable_by_agent(self):
+        global_d = Path(tempfile.mkdtemp(prefix="secret_global_"))
+        (global_d / "config.json").write_text('{"api_key": "sk-secret-12345"}', encoding="utf-8")
+
+        harness = Harness(
+            model=MockModel([("Done", [])]),
+            global_dir=global_d,
+            sandbox=True,
+            runs_dir=self.runs_dir,
+            verbose=False,
+        )
+        env, _, _, _, _, _ = harness._setup_run(
+            task_id="leak_test",
+            system_prompt="",
+            initial_instruction="test",
+            initial_files={},
+            force_sandbox=True,
+        )
+
+        with self.assertRaises(PermissionError):
+            env.read_file(str(global_d / "config.json"))
+
+    def test_step_trace_tool_call_id_preserved(self):
+        script = [
+            (
+                "Calling tool",
+                [ToolCall(id="call_abc_123", name="bash", arguments={"command": "echo hi"})],
+            ),
+            ("Done", []),
+        ]
+        model = MockModel(script)
+        harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
+        result = harness.run(Task(id="trace_test", instruction="test", max_steps=2))
+        self.assertEqual(result.finish_reason, "completed")
+
+        # Read trace.json
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        step0_calls = trace_data["steps"][0]["model_response"]["tool_calls"]
+        self.assertEqual(len(step0_calls), 1)
+        self.assertEqual(step0_calls[0]["id"], "call_abc_123")
+        self.assertEqual(step0_calls[0]["name"], "bash")
+
 
 if __name__ == "__main__":
     unittest.main()
