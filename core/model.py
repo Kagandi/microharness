@@ -28,6 +28,15 @@ class ResettableModel(Model, Protocol):
     def reset(self) -> None: ...
 
 
+@runtime_checkable
+class CacheAwareModel(Model, Protocol):
+    """Protocol for models that support dynamic prompt cache TTL and telemetry."""
+
+    def set_cache_ttl(self, ttl: str | None) -> str | None: ...
+
+    def get_cache_stats(self) -> dict[str, Any]: ...
+
+
 def normalize_cache_ttl(ttl: str | None) -> str | None:
     """Normalizes cache TTL setting ('5m', '1h', or None for disabled).
 

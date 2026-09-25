@@ -11,7 +11,7 @@ from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import Model, normalize_cache_ttl
+from core.model import CacheAwareModel, Model, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
     DEFAULT_MAX_TOOL_CHARS,
@@ -302,7 +302,7 @@ class Harness:
 
         configured_cache_ttl = _cfg("cache_ttl", cache_ttl, str, "5m")
         self.cache_ttl = normalize_cache_ttl(configured_cache_ttl)
-        if hasattr(self.model, "set_cache_ttl"):
+        if isinstance(self.model, CacheAwareModel):
             self.model.set_cache_ttl(self.cache_ttl)
 
         self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
@@ -312,13 +312,13 @@ class Harness:
     def set_cache_ttl(self, ttl: str | None) -> str | None:
         """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
         self.cache_ttl = normalize_cache_ttl(ttl)
-        if hasattr(self.model, "set_cache_ttl"):
+        if isinstance(self.model, CacheAwareModel):
             return self.model.set_cache_ttl(self.cache_ttl)
         return self.cache_ttl
 
     def get_cache_stats(self) -> dict[str, Any]:
         """Returns prompt cache TTL and token performance metrics."""
-        if hasattr(self.model, "get_cache_stats"):
+        if isinstance(self.model, CacheAwareModel):
             return self.model.get_cache_stats()
         return {"cache_ttl": self.cache_ttl}
 
@@ -728,15 +728,10 @@ class Harness:
         task_id: str = "interactive_session",
     ) -> None:
         """Interactive multi-turn session with slash commands and context usage tracking."""
-        first_instruction = initial_instruction or input("👤 You: ").strip()
-        if not first_instruction:
-            print("No instruction provided. Exiting.")
-            return
-
         env, _, memory, tracer, loop, run_dir = self._setup_run(
             task_id=task_id,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
-            initial_instruction=first_instruction,
+            initial_instruction="",
             initial_files={},
         )
 
@@ -751,8 +746,18 @@ class Harness:
         print("💡 Commands: /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n")
 
         step_idx = 1
-        has_pending_turn = True
+        has_pending_turn = False
         max_steps_per_turn = 30
+
+        if initial_instruction and initial_instruction.strip():
+            action = self._dispatch_interactive_input(
+                initial_instruction.strip(), memory, custom_commands
+            )
+            if action == "turn":
+                has_pending_turn = True
+            elif action == "exit":
+                env.teardown()
+                return
 
         try:
             while True:

@@ -1413,6 +1413,72 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(harness_explicit.runs_dir, (global_dir / "runs").resolve())
         self.assertEqual(harness_explicit.docker_image, "python:3.11")
 
+    def test_interactive_dispatcher_slash_commands(self):
+        """Invariant: Interactive dispatcher handles slash commands without adding them to memory or invoking model."""
+        from core.memory import Memory
+
+        harness = Harness(model=MockModel([("Done", [])]), verbose=False)
+        memory = Memory(system_prompt="sys", user_prompt="")
+
+        custom_commands = {"review": ("Review PR", "git diff HEAD~1", "project")}
+
+        # 1. /status does not add to memory, returns skip
+        action = harness._dispatch_interactive_input("/status", memory, custom_commands)
+        self.assertEqual(action, "skip")
+        self.assertEqual(len(memory.messages), 1)  # only system prompt
+
+        # 2. /help returns skip
+        action = harness._dispatch_interactive_input("/help", memory, custom_commands)
+        self.assertEqual(action, "skip")
+
+        # 3. /exit returns exit
+        action = harness._dispatch_interactive_input("/exit", memory, custom_commands)
+        self.assertEqual(action, "exit")
+
+        # 4. /review expands custom command and returns turn
+        action = harness._dispatch_interactive_input("/review", memory, custom_commands)
+        self.assertEqual(action, "turn")
+        self.assertEqual(len(memory.messages), 2)
+        self.assertEqual(memory.messages[-1].content, "git diff HEAD~1")
+
+        # 5. Regular input adds user message and returns turn
+        action = harness._dispatch_interactive_input("Run the tests", memory, custom_commands)
+        self.assertEqual(action, "turn")
+        self.assertEqual(len(memory.messages), 3)
+        self.assertEqual(memory.messages[-1].content, "Run the tests")
+
+    def test_run_interactive_slash_command_initial_instruction(self):
+        """Invariant: An initial instruction with a slash command (like /status) is dispatched, not fed as model turn."""
+        from unittest.mock import patch
+
+        harness = Harness(model=MockModel([("Done", [])]), verbose=False)
+
+        # Calling run_interactive with initial_instruction="/status" and input="/exit"
+        with patch("builtins.input", return_value="/exit"):
+            harness.run_interactive(initial_instruction="/status")
+
+    def test_cache_aware_model_protocol_compliance(self):
+        """Invariant: Models implementing cache methods satisfy CacheAwareModel protocol."""
+        from core.model import CacheAwareModel, HttpChatModel
+
+        mock_model = MockModel([("Hi", [])])
+        http_model = HttpChatModel(base_url="http://localhost:8000/v1", model="test")
+
+        self.assertIsInstance(mock_model, CacheAwareModel)
+        self.assertIsInstance(http_model, CacheAwareModel)
+
+        # Minimal model with only generate does not satisfy CacheAwareModel
+        class BareModel:
+            def generate(self, messages, tools):
+                return "bare", []
+
+        bare_model = BareModel()
+        self.assertNotIsInstance(bare_model, CacheAwareModel)
+
+        # Harness with BareModel safely defaults cache methods without error
+        harness = Harness(model=bare_model, verbose=False)
+        self.assertEqual(harness.get_cache_stats(), {"cache_ttl": "5m"})
+
 
 if __name__ == "__main__":
     unittest.main()

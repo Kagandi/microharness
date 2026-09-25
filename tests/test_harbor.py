@@ -95,6 +95,43 @@ class TestHarborBenchmark(unittest.TestCase):
         self.assertEqual(task.init_workdir, "/app")
         self.assertIn("aiomonitor", evaluator.task_dir.name)
 
+    def test_harbor_evaluator_partial_score(self):
+        """Invariant: When reward=0 but partial score is supplied, HarborEvaluator captures the partial score."""
+        import json
+        from unittest.mock import MagicMock
+
+        from core.environment import DockerEnvironment
+
+        mock_docker_env = MagicMock(spec=DockerEnvironment)
+        mock_docker_env.is_running = True
+        mock_docker_env.container_name = "test_container"
+        mock_docker_env.execute_bash.side_effect = [
+            (0, "patch applied"),
+            (1, "1 test failed, 3 tests passed"),
+            (
+                0,
+                json.dumps(
+                    {
+                        "reward": 0,
+                        "partial": 0.75,
+                        "f2p_passed": 3,
+                        "f2p_total": 4,
+                        "p2p_passed": 5,
+                        "p2p_total": 5,
+                    }
+                ),
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evaluator = HarborEvaluator(task_dir=Path(tmpdir), base_commit="HEAD")
+            res = evaluator.evaluate(mock_docker_env, steps=[])
+
+            self.assertFalse(res.passed)
+            self.assertEqual(res.score, 0.75)
+            self.assertIn("Partial: 0.75", res.feedback)
+            self.assertIn("F2P: 3/4", res.feedback)
+
 
 if __name__ == "__main__":
     unittest.main()

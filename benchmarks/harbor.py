@@ -111,17 +111,18 @@ class HarborEvaluator:
 
         reward = reward_data.get("reward", 0)
         passed = reward == 1
-        score = float(reward)
+        partial = reward_data.get("partial")
+        score = float(partial) if partial is not None else float(reward)
         f2p = reward_data.get("f2p_passed", 0)
         f2p_tot = reward_data.get("f2p_total", 0)
         p2p = reward_data.get("p2p_passed", 0)
         p2p_tot = reward_data.get("p2p_total", 0)
-        partial = reward_data.get("partial", 0.0)
+        partial_val = float(partial) if partial is not None else float(reward)
 
         output_preview = test_output.strip()[-2000:] if test_output.strip() else "(no output)"
         feedback = (
             f"Harbor/DeepSWE Verification {'PASSED ✅' if passed else 'FAILED ❌'} (exit {exit_code})\n"
-            f"Score: {score:.2f} | Partial: {partial:.2f} | F2P: {f2p}/{f2p_tot} | P2P: {p2p}/{p2p_tot}\n"
+            f"Score: {score:.2f} | Partial: {partial_val:.2f} | F2P: {f2p}/{f2p_tot} | P2P: {p2p}/{p2p_tot}\n"
             f"Verifier Output:\n{output_preview}"
         )
         return EvalResult(passed=passed, score=score, feedback=feedback)
