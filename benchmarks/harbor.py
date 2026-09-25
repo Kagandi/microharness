@@ -83,10 +83,17 @@ class HarborEvaluator(Evaluator):
             )
 
         # 2. Collect patch against base_commit so both staged & unstaged changes are preserved
+        collect_core = self.collect_cmd or (
+            f"git diff --binary {self.base_commit} HEAD > /logs/artifacts/model.patch"
+        )
         collect_script = (
             "mkdir -p /logs/artifacts /logs/verifier && cd /app && "
             "git config --global --add safe.directory /app >/dev/null 2>&1 || true && "
-            f"git diff --binary {self.base_commit} > /logs/artifacts/model.patch"
+            "git add -A >/dev/null 2>&1 || true && "
+            "git -c user.name='Verifier' -c user.email='verifier@eval' commit -m 'eval_staging' >/dev/null 2>&1 || true && "
+            f"{collect_core} && "
+            f"git checkout -f {self.base_commit} >/dev/null 2>&1 || true && "
+            "git clean -fd >/dev/null 2>&1 || true"
         )
         env.execute_bash(collect_script, timeout=60.0)
 
@@ -148,6 +155,11 @@ def load_harbor_task(
 
     instruction = instruction_file.read_text(encoding="utf-8", errors="replace").strip()
 
+    collect_cmd = None
+    collect_list = cfg.get("verifier", {}).get("collect", [])
+    if isinstance(collect_list, list) and len(collect_list) > 0:
+        collect_cmd = collect_list[0].get("command")
+
     task = Task(
         id=task_id,
         instruction=instruction,
@@ -156,7 +168,7 @@ def load_harbor_task(
         docker_image=docker_image,
         init_workdir="/app",
     )
-    evaluator = HarborEvaluator(task_dir=path, base_commit=base_commit)
+    evaluator = HarborEvaluator(task_dir=path, base_commit=base_commit, collect_cmd=collect_cmd)
     return task, evaluator
 
 
