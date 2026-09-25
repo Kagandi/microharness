@@ -203,6 +203,8 @@ class Harness:
         max_context_chars: int | None = None,
         trigger_ratio: float | None = None,
         cache_ttl: str | None = None,
+        max_step_retries: int | None = None,
+        step_retry_delay: float | None = None,
         verbose: bool = True,
     ):
         self.model = model
@@ -251,6 +253,16 @@ class Harness:
         self.cache_ttl = normalize_cache_ttl(configured_cache_ttl)
         if hasattr(self.model, "set_cache_ttl"):
             self.model.set_cache_ttl(self.cache_ttl)
+        self.max_step_retries = (
+            max_step_retries
+            if max_step_retries is not None
+            else int(self.merged_config.get("max_step_retries", 3))
+        )
+        self.step_retry_delay = (
+            step_retry_delay
+            if step_retry_delay is not None
+            else float(self.merged_config.get("step_retry_delay", 5.0))
+        )
         self.verbose = verbose
 
     def set_cache_ttl(self, ttl: str | None) -> str | None:
@@ -399,6 +411,7 @@ class Harness:
 
         finish_reason = "max_steps_exceeded"
         step_idx = 1
+        step_attempts = 0
 
         try:
             while step_idx <= task.max_steps:
@@ -413,13 +426,25 @@ class Harness:
                 try:
                     is_finished, step_trace = loop.step(step_index=step_idx)
                     tracer.record_step(step_trace)
+                    step_attempts = 0  # reset on successful step
 
                     if is_finished:
                         finish_reason = "completed"
                         break
                 except Exception as exc:
+                    step_attempts += 1
+                    if step_attempts <= self.max_step_retries:
+                        sleep_s = self.step_retry_delay * step_attempts
+                        tracer.log(
+                            f"\n⚠️ Step {step_idx} encountered an error: {exc}\n"
+                            f"⏳ Sleeping {sleep_s:.1f}s and retrying step ({step_attempts}/{self.max_step_retries})..."
+                        )
+                        time.sleep(sleep_s)
+                        continue
                     finish_reason = "error"
-                    tracer.log(f"\n❌ Exception occurred during step {step_idx}: {exc}")
+                    tracer.log(
+                        f"\n❌ Step {step_idx} failed after {self.max_step_retries} retries: {exc}"
+                    )
                     break
 
                 step_idx += 1
@@ -507,12 +532,15 @@ class Harness:
                 # If we have an active instruction to execute, run the agent loop
                 if has_pending_turn:
                     turn_steps = 0
+                    turn_retries = 0
+                    max_turn_retries = 2
                     while turn_steps < max_steps_per_turn:
                         try:
                             is_finished, step_trace = loop.step(step_index=step_idx)
                             tracer.record_step(step_trace)
                             step_idx += 1
                             turn_steps += 1
+                            turn_retries = 0  # reset on success
 
                             if is_finished:
                                 agent_reply = step_trace.model_response.get("content", "")
@@ -522,7 +550,15 @@ class Harness:
                             print("\n⚠️ Step interrupted by user (Ctrl+C). Returning to prompt.\n")
                             break
                         except Exception as exc:
-                            print(f"\n❌ Error during turn: {exc}")
+                            turn_retries += 1
+                            if turn_retries <= max_turn_retries:
+                                delay = 4.0 * turn_retries
+                                print(
+                                    f"\n⚠️ Step error: {exc}. Retrying turn in {delay:.1f}s ({turn_retries}/{max_turn_retries})..."
+                                )
+                                time.sleep(delay)
+                                continue
+                            print(f"\n❌ Error during turn after {max_turn_retries} retries: {exc}")
                             break
                     else:
                         print(

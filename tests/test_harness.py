@@ -134,7 +134,13 @@ class TestHarnessIntegration(unittest.TestCase):
             def generate(self, messages, tools):
                 raise ConnectionResetError("Remote model socket terminated abruptly")
 
-        harness = Harness(model=ExplodingModel(), runs_dir=self.runs_dir, verbose=False)
+        harness = Harness(
+            model=ExplodingModel(),
+            runs_dir=self.runs_dir,
+            verbose=False,
+            max_step_retries=1,
+            step_retry_delay=0.001,
+        )
         task = Task(id="crash_task", instruction="Will crash", max_steps=5)
 
         # Invariant: Harness does not raise unhandled exception; records error cleanly
@@ -142,6 +148,31 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.finish_reason, "error")
         self.assertFalse(result.passed)
         self.assertTrue(Path(result.trace_path).exists())
+
+    def test_transient_step_error_retries_and_succeeds(self):
+        class TransientFailModel:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, messages, tools):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionResetError("Transient network glitch")
+                return "Successfully recovered after retry.", []
+
+        model = TransientFailModel()
+        harness = Harness(
+            model=model,
+            runs_dir=self.runs_dir,
+            verbose=False,
+            max_step_retries=2,
+            step_retry_delay=0.001,
+        )
+        task = Task(id="retry_task", instruction="Fix network", max_steps=5)
+
+        result = harness.run(task)
+        self.assertEqual(result.finish_reason, "completed")
+        self.assertEqual(model.calls, 2)
 
     def test_interactive_multi_turn_session(self):
         # Scripted model that handles 2 interactive turns:
