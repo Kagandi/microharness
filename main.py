@@ -228,6 +228,17 @@ def main():
         default=None,
         help="Prompt cache duration: 5m (default ephemeral), 1h (extended beta), or off (env: CACHE_TTL or config.json)",
     )
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        default=None,
+        help="Execute actions inside an isolated Docker container sandbox (e.g. via OrbStack)",
+    )
+    parser.add_argument(
+        "--docker-image",
+        default=None,
+        help="Docker image for container sandboxing (default: python:3.11 or from config)",
+    )
     args = parser.parse_args()
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
@@ -244,6 +255,8 @@ def main():
         else (global_dir / "runs").resolve()
     )
     cache_ttl = args.cache_ttl or os.getenv("CACHE_TTL") or config.get("cache_ttl", "5m")
+    use_docker = args.docker if args.docker is not None else bool(config.get("docker", False))
+    docker_image = args.docker_image or config.get("docker_image", "python:3.11")
 
     # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > project config.json > global config.json > Fallback)
     endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
@@ -294,6 +307,8 @@ def main():
                     global_dir=global_dir,
                     runs_dir=runs_dir,
                     sandbox=True,
+                    docker=use_docker,
+                    docker_image=docker_image,
                     evaluator=evaluator,
                     cache_ttl=cache_ttl,
                     verbose=True,
@@ -317,6 +332,8 @@ def main():
                 global_dir=global_dir,
                 runs_dir=runs_dir,
                 sandbox=True,
+                docker=use_docker,
+                docker_image=docker_image,
                 evaluator=evaluator,
                 cache_ttl=cache_ttl,
                 verbose=True,
@@ -342,6 +359,8 @@ def main():
         global_dir=global_dir,
         runs_dir=runs_dir,
         sandbox=sandbox,
+        docker=use_docker,
+        docker_image=docker_image,
         cache_ttl=cache_ttl,
         verbose=True,
     )

@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.environment import Environment
+from core.environment import DockerEnvironment, Environment, is_docker_available
 
 
 class TestEnvironment(unittest.TestCase):
@@ -140,6 +140,56 @@ class TestEnvironment(unittest.TestCase):
         (Path(self.temp_dir) / "somedir").mkdir()
         with self.assertRaises(IsADirectoryError):
             self.env.write_file("somedir", "data")
+
+    def test_is_docker_available(self):
+        result = is_docker_available()
+        self.assertIsInstance(result, bool)
+
+    def test_docker_environment_lifecycle_and_execution(self):
+        if not is_docker_available():
+            self.skipTest("Docker is not available on this host.")
+
+        temp_workspace = tempfile.mkdtemp(prefix="test_docker_ws_")
+        docker_env = DockerEnvironment(
+            image="python:3.11",
+            workspace_dir=temp_workspace,
+            cleanup_on_teardown=True,
+        )
+
+        try:
+            # 1. Write file on host, execute in container
+            docker_env.write_file("script.py", "import sys\nprint('HELLO_DOCKER')\n")
+            code, out = docker_env.execute_bash("python3 script.py")
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "HELLO_DOCKER")
+
+            # 2. Strict OS isolation check: Host is Darwin (macOS), container must be Linux
+            code_os, out_os = docker_env.execute_bash("uname -s")
+            self.assertEqual(code_os, 0)
+            self.assertEqual(out_os.strip(), "Linux")
+
+            # 3. Container writes file in /workspace, host sees it
+            code_write, _ = docker_env.execute_bash("echo 'FROM_CONTAINER' > out.txt")
+            self.assertEqual(code_write, 0)
+            content = docker_env.read_file("out.txt")
+            self.assertIn("FROM_CONTAINER", content)
+
+            # 4. Timeout handling in container
+            code_t, out_t = docker_env.execute_bash("sleep 5", timeout=0.5)
+            self.assertEqual(code_t, 124)
+            self.assertIn("timed out", out_t)
+        finally:
+            docker_env.teardown()
+
+    def test_docker_environment_context_manager(self):
+        if not is_docker_available():
+            self.skipTest("Docker is not available on this host.")
+
+        temp_workspace = tempfile.mkdtemp(prefix="test_docker_ctx_")
+        with DockerEnvironment(image="python:3.11", workspace_dir=temp_workspace) as d_env:
+            code, out = d_env.execute_bash("echo 'CTX_TEST'")
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "CTX_TEST")
 
 
 if __name__ == "__main__":

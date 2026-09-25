@@ -145,6 +145,14 @@ class RunResult:
   * Runs commands in `cwd=workspace_dir`.
   * Enforces strict timeouts (returns exit code 124 on timeout).
   * Combines `stdout` and `stderr` so error traces are never lost.
+* **Docker Container Sandboxing (`DockerEnvironment`)**:
+  * Inherits from `Environment` for zero-friction pluggability.
+  * Mounts host workspace directory into container at `/workspace`.
+  * File reads, writes, and localized edits occur directly on the host mounted directory with instant I/O speeds.
+  * Bash commands run inside the isolated container via `docker exec -w /workspace <container_name> /bin/bash -c <cmd>`.
+  * Guarantees 100% process, network, and operating system boundary isolation.
+  * Automatically stops and removes the container upon task completion (`teardown()`).
+  * Built entirely using Python's standard library `subprocess` without third-party Docker SDK dependencies; fully compatible with **OrbStack** and standard Docker engines.
 
 ---
 

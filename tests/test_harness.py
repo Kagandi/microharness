@@ -1010,6 +1010,42 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(h2.cache_ttl, "1h")
         self.assertEqual(m2.cache_ttl, "1h")
 
+    def test_harness_docker_sandboxing_integration(self):
+        from core.environment import is_docker_available
+
+        if not is_docker_available():
+            self.skipTest("Docker is not available.")
+
+        script = [
+            (
+                "Running in container",
+                [
+                    ToolCall(
+                        id="c1",
+                        name="bash",
+                        arguments={"command": "uname -s > os_info.txt"},
+                    )
+                ],
+            ),
+            ("Done", []),
+        ]
+        model = MockModel(script)
+        evaluator = FileContentEvaluator(file_path="os_info.txt", must_contain=["Linux"])
+
+        harness = Harness(
+            model=model,
+            evaluator=evaluator,
+            runs_dir=self.runs_dir,
+            docker=True,
+            docker_image="python:3.11",
+            verbose=False,
+        )
+
+        task = Task(id="docker_task", instruction="Record OS name to os_info.txt", max_steps=5)
+        result = harness.run(task)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.score, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

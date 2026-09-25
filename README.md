@@ -94,6 +94,22 @@ If you ever want an isolated disposable scratchpad (e.g. for testing without tou
 uv run microharness --sandbox "Experiment with writing a new scraper"
 ```
 
+### 🐳 Docker Sandboxing (via OrbStack or Docker Desktop)
+For 100% containerized process, operating system, and filesystem isolation (e.g. running untrusted code, heavy test suites, or SWE benchmarks), pass `--docker`:
+```bash
+# Run educational demo inside an isolated Linux Docker container
+uv run microharness --demo calculator --docker
+
+# Run the Mini-SWE benchmark suite inside Docker
+uv run microharness --benchmark mini-swe --docker
+
+# Specify a custom Docker image (default: python:3.11)
+uv run microharness --docker --docker-image python:3.11 "Run pytest and fix bugs"
+```
+* **Instant Hybrid I/O**: The workspace directory is mounted at `/workspace`. File reading, writing, and editing occur on the host filesystem with zero container latency, while all bash commands execute inside the isolated Docker Linux container via `docker exec`.
+* **Zero Runtime Dependencies**: Operates entirely via Python's standard library `subprocess` without third-party Docker SDKs. Works out of the box with **OrbStack** or standard Docker Desktop.
+* **Automatic Teardown**: Containers are automatically stopped and removed upon task completion with zero orphaned background containers.
+
 If you prefer a one-and-done batch run (e.g. for CI), pass `--batch`:
 ```bash
 uv run microharness "Run pytest and fix any failures" --batch

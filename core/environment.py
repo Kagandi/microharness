@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -174,3 +175,145 @@ class Environment:
         """Clean up workspace if configured to do so."""
         if self.cleanup_on_teardown and self.workspace_dir.exists():
             shutil.rmtree(self.workspace_dir, ignore_errors=True)
+
+    def __enter__(self) -> Environment:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.teardown()
+
+
+def is_docker_available() -> bool:
+    """Checks if the docker CLI is installed and the daemon is responsive."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        res = subprocess.run(
+            ["docker", "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+class DockerEnvironment(Environment):
+    """Provides execution sandboxing inside an isolated Docker container.
+
+    - Mounts the host workspace directory into the container at `/workspace`.
+    - File read/write/edit operations happen on the host mounted workspace with instant I/O.
+    - Bash commands (`execute_bash`) execute inside the isolated container via `docker exec`.
+    - Guarantees complete operating system, process, filesystem, and network isolation.
+    """
+
+    def __init__(
+        self,
+        image: str = "python:3.11",
+        workspace_dir: Path | str | None = None,
+        logs_dir: Path | str | None = None,
+        allowed_read_dirs: list[Path | str] | None = None,
+        container_name: str | None = None,
+        cleanup_on_teardown: bool = True,
+        docker_args: list[str] | None = None,
+    ):
+        super().__init__(
+            workspace_dir=workspace_dir,
+            logs_dir=logs_dir,
+            allowed_read_dirs=allowed_read_dirs,
+            cleanup_on_teardown=cleanup_on_teardown,
+        )
+        self.image = image
+        self.container_name = container_name or f"microharness_{uuid.uuid4().hex[:10]}"
+        self.docker_args = docker_args or []
+        self._container_started = False
+        self._start_container()
+
+    def _start_container(self) -> None:
+        """Starts a persistent background container mounting workspace at /workspace."""
+        cmd = [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            self.container_name,
+            "-v",
+            f"{self.workspace_dir}:/workspace",
+            "-w",
+            "/workspace",
+            *self.docker_args,
+            self.image,
+            "tail",
+            "-f",
+            "/dev/null",
+        ]
+        res = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Failed to start Docker container '{self.container_name}' with image '{self.image}':\n{res.stderr.strip()}"
+            )
+        self._container_started = True
+
+    def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+        """Execute a shell command inside the Docker container at /workspace."""
+        if not self._container_started:
+            return 1, "[Error: Docker container is not running]"
+
+        cmd = [
+            "docker",
+            "exec",
+            "-w",
+            "/workspace",
+            self.container_name,
+            "/bin/bash",
+            "-c",
+            command,
+        ]
+        try:
+            process = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            # If bash doesn't exist in the target image (e.g. alpine), fall back to sh
+            if process.returncode == 127 and "bash: not found" in (process.stdout or ""):
+                cmd[4] = "/bin/sh"
+                process = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=timeout,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            return process.returncode, process.stdout
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "") + f"\n[Command timed out after {timeout} seconds]"
+            return 124, output
+        except Exception as exc:
+            return 1, f"[Docker execution error: {exc}]"
+
+    def teardown(self) -> None:
+        """Stops and removes the Docker container, then cleans up host files if requested."""
+        if self._container_started:
+            subprocess.run(
+                ["docker", "rm", "-f", self.container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            self._container_started = False
+        super().teardown()

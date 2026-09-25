@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.environment import Environment
+from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
@@ -194,6 +194,8 @@ class Harness:
         workspace_dir: Path | str | None = None,
         global_dir: Path | str | None = None,
         sandbox: bool | None = None,
+        docker: bool | None = None,
+        docker_image: str | None = None,
         tools: list[Tool] | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
@@ -215,6 +217,10 @@ class Harness:
         self.sandbox = (
             sandbox if sandbox is not None else bool(self.merged_config.get("sandbox", False))
         )
+        self.docker = (
+            docker if docker is not None else bool(self.merged_config.get("docker", False))
+        )
+        self.docker_image = docker_image or self.merged_config.get("docker_image", "python:3.11")
         self.custom_tools = tools
         self.evaluator = evaluator
         configured_runs_dir = self.merged_config.get("runs_dir")
@@ -283,12 +289,21 @@ class Harness:
             workspace = self.explicit_workspace_dir
 
         allowed_reads = [self.global_dir] if self.global_dir else []
-        env = Environment(
-            workspace_dir=workspace,
-            logs_dir=logs_dir,
-            allowed_read_dirs=allowed_reads,
-            cleanup_on_teardown=False,
-        )
+        if self.docker:
+            env: Environment = DockerEnvironment(
+                image=self.docker_image,
+                workspace_dir=workspace,
+                logs_dir=logs_dir,
+                allowed_read_dirs=allowed_reads,
+                cleanup_on_teardown=True,
+            )
+        else:
+            env = Environment(
+                workspace_dir=workspace,
+                logs_dir=logs_dir,
+                allowed_read_dirs=allowed_reads,
+                cleanup_on_teardown=False,
+            )
         if initial_files:
             env.populate_files(initial_files)
 
@@ -368,75 +383,82 @@ class Harness:
         if self.verbose:
             print(f"\n🚀 Starting Harness for Task: {task.id}")
             print(f"📁 Workspace: {env.workspace_dir}")
+            if self.docker:
+                print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
         finish_reason = "max_steps_exceeded"
         step_idx = 1
 
-        while step_idx <= task.max_steps:
-            elapsed = time.time() - run_start
-            if elapsed > task.timeout_seconds:
-                finish_reason = "timeout"
-                tracer.log(f"\n⚠️ Task reached maximum allowed timeout ({task.timeout_seconds}s).")
-                break
-
-            try:
-                is_finished, step_trace = loop.step(step_index=step_idx)
-                tracer.record_step(step_trace)
-
-                if is_finished:
-                    finish_reason = "completed"
+        try:
+            while step_idx <= task.max_steps:
+                elapsed = time.time() - run_start
+                if elapsed > task.timeout_seconds:
+                    finish_reason = "timeout"
+                    tracer.log(
+                        f"\n⚠️ Task reached maximum allowed timeout ({task.timeout_seconds}s)."
+                    )
                     break
-            except Exception as exc:
-                finish_reason = "error"
-                tracer.log(f"\n❌ Exception occurred during step {step_idx}: {exc}")
-                break
 
-            step_idx += 1
+                try:
+                    is_finished, step_trace = loop.step(step_index=step_idx)
+                    tracer.record_step(step_trace)
 
-        total_duration = time.time() - run_start
-        total_steps = len(tracer.steps)
+                    if is_finished:
+                        finish_reason = "completed"
+                        break
+                except Exception as exc:
+                    finish_reason = "error"
+                    tracer.log(f"\n❌ Exception occurred during step {step_idx}: {exc}")
+                    break
 
-        eval_result: EvalResult | None = None
-        if self.evaluator:
-            if self.verbose:
-                print(f"\n{'=' * 20} Running Evaluation {'=' * 20}")
-            eval_result = self.evaluator.evaluate(env, tracer.steps)
-            if self.verbose:
-                status_emoji = "✅" if eval_result.passed else "❌"
-                print(
-                    f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})"
-                )
-                print(f"Feedback: {eval_result.feedback.strip()}")
+                step_idx += 1
 
-        patch_diff = env.get_git_patch()
-        patch_path: str | None = None
-        if patch_diff:
-            patch_file = run_dir / "patch.diff"
-            patch_file.write_text(patch_diff, encoding="utf-8")
-            patch_path = str(patch_file)
-            if self.verbose:
-                print(f"📦 Git patch saved to: {patch_file}")
+            total_duration = time.time() - run_start
+            total_steps = len(tracer.steps)
 
-        json_trace_path, md_trace_path = tracer.finalize(
-            finish_reason=finish_reason, eval_result=eval_result, patch_diff=patch_diff
-        )
+            eval_result: EvalResult | None = None
+            if self.evaluator:
+                if self.verbose:
+                    print(f"\n{'=' * 20} Running Evaluation {'=' * 20}")
+                eval_result = self.evaluator.evaluate(env, tracer.steps)
+                if self.verbose:
+                    status_emoji = "✅" if eval_result.passed else "❌"
+                    print(
+                        f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})"
+                    )
+                    print(f"Feedback: {eval_result.feedback.strip()}")
 
-        passed = eval_result.passed if eval_result else (finish_reason == "completed")
-        score = eval_result.score if eval_result else (1.0 if passed else 0.0)
+            patch_diff = env.get_git_patch()
+            patch_path: str | None = None
+            if patch_diff:
+                patch_file = run_dir / "patch.diff"
+                patch_file.write_text(patch_diff, encoding="utf-8")
+                patch_path = str(patch_file)
+                if self.verbose:
+                    print(f"📦 Git patch saved to: {patch_file}")
 
-        return RunResult(
-            task_id=task.id,
-            passed=passed,
-            score=score,
-            total_steps=total_steps,
-            duration_s=total_duration,
-            finish_reason=finish_reason,
-            trace_path=str(json_trace_path),
-            workspace_path=str(env.workspace_dir),
-            eval_result=eval_result,
-            patch_path=patch_path,
-        )
+            json_trace_path, md_trace_path = tracer.finalize(
+                finish_reason=finish_reason, eval_result=eval_result, patch_diff=patch_diff
+            )
+
+            passed = eval_result.passed if eval_result else (finish_reason == "completed")
+            score = eval_result.score if eval_result else (1.0 if passed else 0.0)
+
+            return RunResult(
+                task_id=task.id,
+                passed=passed,
+                score=score,
+                total_steps=total_steps,
+                duration_s=total_duration,
+                finish_reason=finish_reason,
+                trace_path=str(json_trace_path),
+                workspace_path=str(env.workspace_dir),
+                eval_result=eval_result,
+                patch_path=patch_path,
+            )
+        finally:
+            env.teardown()
 
     def run_interactive(
         self,
@@ -460,6 +482,8 @@ class Harness:
 
         print("\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
+        if self.docker:
+            print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
         cache_label = self.cache_ttl.upper() if self.cache_ttl else "OFF"
         print(f"⚡ Prompt Caching: {cache_label}")
         print("💡 Commands: /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n")
@@ -468,177 +492,190 @@ class Harness:
         has_pending_turn = True
         max_steps_per_turn = 30
 
-        while True:
-            # If we have an active instruction to execute, run the agent loop
-            if has_pending_turn:
-                turn_steps = 0
-                while turn_steps < max_steps_per_turn:
-                    try:
-                        is_finished, step_trace = loop.step(step_index=step_idx)
-                        tracer.record_step(step_trace)
-                        step_idx += 1
-                        turn_steps += 1
+        try:
+            while True:
+                # If we have an active instruction to execute, run the agent loop
+                if has_pending_turn:
+                    turn_steps = 0
+                    while turn_steps < max_steps_per_turn:
+                        try:
+                            is_finished, step_trace = loop.step(step_index=step_idx)
+                            tracer.record_step(step_trace)
+                            step_idx += 1
+                            turn_steps += 1
 
-                        if is_finished:
-                            agent_reply = step_trace.model_response.get("content", "")
-                            print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
+                            if is_finished:
+                                agent_reply = step_trace.model_response.get("content", "")
+                                print(f"\n🤖 Agent:\n{agent_reply.strip()}\n")
+                                break
+                        except KeyboardInterrupt:
+                            print("\n⚠️ Step interrupted by user (Ctrl+C). Returning to prompt.\n")
                             break
-                    except KeyboardInterrupt:
-                        print("\n⚠️ Step interrupted by user (Ctrl+C). Returning to prompt.\n")
-                        break
-                    except Exception as exc:
-                        print(f"\n❌ Error during turn: {exc}")
-                        break
-                else:
-                    print(
-                        f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
-                    )
-                has_pending_turn = False
-
-            # Render minimal context usage footer
-            stats = memory.stats()
-            print(
-                f"─── 📊 Context: {stats['total_chars']:,} chars (~{stats['estimated_tokens']:,} tokens) / "
-                f"{stats['max_context_chars']:,} ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
-            )
-
-            try:
-                user_input = input("👤 You: ").strip()
-            except (KeyboardInterrupt, EOFError):
-                print("\nSession interrupted.")
-                break
-
-            if not user_input:
-                continue
-
-            # Handle Meta / Slash Commands without calling the model
-            cmd = user_input.lower().strip()
-            if cmd in ("/exit", "exit", "/quit", "quit"):
-                print("Ending session.")
-                break
-
-            elif cmd in ("/help", "help"):
-                print("\nAvailable commands:")
-                print("  /cache [5m|1h|off] - View or switch prompt caching duration on the fly")
-                print(
-                    "  /status            - Show context window size, message breakdown, and budget"
-                )
-                print("  /compact           - Manually collapse older observations to free context")
-                print(
-                    "  /new               - Clear conversation history while keeping workspace files"
-                )
-                print("  /exit              - Save session trace and exit")
-                if custom_commands:
-                    print("\nCustom slash commands (from commands/):")
-                    for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
-                        print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
-                print()
-                continue
-
-            elif cmd in ("/status", "/context", "status", "context"):
-                s = memory.stats()
-                print("\n📊 Context Breakdown:")
-                print(
-                    f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
-                    f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
-                )
-                print(
-                    f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
-                    f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
-                )
-                c_stats = self.get_cache_stats()
-                ttl_val = c_stats.get("cache_ttl")
-                print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
-                if c_stats.get("total_prompt_tokens"):
-                    cached = c_stats.get("total_cached_tokens", 0)
-                    total = c_stats.get("total_prompt_tokens", 0)
-                    rate = c_stats.get("cache_hit_rate_pct", 0.0)
-                    print(
-                        f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n"
-                    )
-                else:
-                    print()
-                continue
-
-            elif cmd.startswith("/cache") or cmd == "cache":
-                parts = user_input.strip().split()
-                if len(parts) == 1:
-                    stats = self.get_cache_stats()
-                    curr_ttl = stats.get("cache_ttl")
-                    if curr_ttl:
-                        desc = (
-                            "5 minutes (Standard Ephemeral)"
-                            if curr_ttl == "5m"
-                            else "1 hour (Extended Beta)"
-                        )
-                        print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
+                        except Exception as exc:
+                            print(f"\n❌ Error during turn: {exc}")
+                            break
                     else:
-                        print("\n⚡ Prompt Caching: DISABLED (off)")
-                    if stats.get("total_prompt_tokens"):
-                        cached = stats.get("total_cached_tokens", 0)
-                        total = stats.get("total_prompt_tokens", 0)
-                        rate = stats.get("cache_hit_rate_pct", 0.0)
-                        print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
-                    print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
-                    continue
-
-                target_ttl = parts[1].lower().strip()
-                try:
-                    new_ttl = self.set_cache_ttl(target_ttl)
-                    if new_ttl:
-                        desc = "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
                         print(
-                            f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
+                            f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
+                        )
+                    has_pending_turn = False
+
+                # Render minimal context usage footer
+                stats = memory.stats()
+                print(
+                    f"─── 📊 Context: {stats['total_chars']:,} chars (~{stats['estimated_tokens']:,} tokens) / "
+                    f"{stats['max_context_chars']:,} ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+                )
+
+                try:
+                    user_input = input("👤 You: ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\nSession interrupted.")
+                    break
+
+                if not user_input:
+                    continue
+
+                # Handle Meta / Slash Commands without calling the model
+                cmd = user_input.lower().strip()
+                if cmd in ("/exit", "exit", "/quit", "quit"):
+                    print("Ending session.")
+                    break
+
+                elif cmd in ("/help", "help"):
+                    print("\nAvailable commands:")
+                    print(
+                        "  /cache [5m|1h|off] - View or switch prompt caching duration on the fly"
+                    )
+                    print(
+                        "  /status            - Show context window size, message breakdown, and budget"
+                    )
+                    print(
+                        "  /compact           - Manually collapse older observations to free context"
+                    )
+                    print(
+                        "  /new               - Clear conversation history while keeping workspace files"
+                    )
+                    print("  /exit              - Save session trace and exit")
+                    if custom_commands:
+                        print("\nCustom slash commands (from commands/):")
+                        for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
+                            print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
+                    print()
+                    continue
+
+                elif cmd in ("/status", "/context", "status", "context"):
+                    s = memory.stats()
+                    print("\n📊 Context Breakdown:")
+                    print(
+                        f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
+                        f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
+                    )
+                    print(
+                        f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
+                        f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
+                    )
+                    c_stats = self.get_cache_stats()
+                    ttl_val = c_stats.get("cache_ttl")
+                    print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
+                    if c_stats.get("total_prompt_tokens"):
+                        cached = c_stats.get("total_cached_tokens", 0)
+                        total = c_stats.get("total_prompt_tokens", 0)
+                        rate = c_stats.get("cache_hit_rate_pct", 0.0)
+                        print(
+                            f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n"
                         )
                     else:
-                        print("\n⚡ Prompt caching disabled for subsequent turns.\n")
-                except ValueError as exc:
-                    print(f"\n❌ {exc}\n")
-                continue
-
-            elif cmd in ("/compact", "compact"):
-                old_chars = memory.total_chars()
-                did_compact = memory.compact_if_needed(force=True)
-                new_chars = memory.total_chars()
-                if did_compact:
-                    print(
-                        f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
-                    )
-                else:
-                    print("\nℹ️ No older observations eligible for compaction at this time.\n")
-                continue
-
-            elif cmd in ("/new", "/reset", "new", "reset"):
-                memory.reset()
-                print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
-                continue
-
-            # Check for custom slash commands
-            elif user_input.startswith("/"):
-                cmd_part, _, args_part = user_input[1:].partition(" ")
-                cmd_key = cmd_part.lower().strip()
-                if cmd_key in custom_commands:
-                    _, template, scope = custom_commands[cmd_key]
-                    expanded_prompt = _expand_command(template, args_part)
-                    print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
-                    memory.add_user(expanded_prompt)
-                    has_pending_turn = True
-                    continue
-                else:
-                    print(
-                        f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n"
-                    )
+                        print()
                     continue
 
-            # Normal user message: feed into memory and execute
-            memory.add_user(user_input)
-            has_pending_turn = True
+                elif cmd.startswith("/cache") or cmd == "cache":
+                    parts = user_input.strip().split()
+                    if len(parts) == 1:
+                        stats = self.get_cache_stats()
+                        curr_ttl = stats.get("cache_ttl")
+                        if curr_ttl:
+                            desc = (
+                                "5 minutes (Standard Ephemeral)"
+                                if curr_ttl == "5m"
+                                else "1 hour (Extended Beta)"
+                            )
+                            print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
+                        else:
+                            print("\n⚡ Prompt Caching: DISABLED (off)")
+                        if stats.get("total_prompt_tokens"):
+                            cached = stats.get("total_cached_tokens", 0)
+                            total = stats.get("total_prompt_tokens", 0)
+                            rate = stats.get("cache_hit_rate_pct", 0.0)
+                            print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
+                        print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
+                        continue
 
-        patch_diff = env.get_git_patch()
-        if patch_diff:
-            patch_file = run_dir / "patch.diff"
-            patch_file.write_text(patch_diff, encoding="utf-8")
-            print(f"📦 Git patch saved to: {patch_file}")
+                    target_ttl = parts[1].lower().strip()
+                    try:
+                        new_ttl = self.set_cache_ttl(target_ttl)
+                        if new_ttl:
+                            desc = (
+                                "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
+                            )
+                            print(
+                                f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
+                            )
+                        else:
+                            print("\n⚡ Prompt caching disabled for subsequent turns.\n")
+                    except ValueError as exc:
+                        print(f"\n❌ {exc}\n")
+                    continue
 
-        json_path, md_path = tracer.finalize(finish_reason="session_ended", patch_diff=patch_diff)
-        print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
+                elif cmd in ("/compact", "compact"):
+                    old_chars = memory.total_chars()
+                    did_compact = memory.compact_if_needed(force=True)
+                    new_chars = memory.total_chars()
+                    if did_compact:
+                        print(
+                            f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
+                        )
+                    else:
+                        print("\nℹ️ No older observations eligible for compaction at this time.\n")
+                    continue
+
+                elif cmd in ("/new", "/reset", "new", "reset"):
+                    memory.reset()
+                    print(
+                        "\n✨ Started a fresh conversation context (workspace files preserved).\n"
+                    )
+                    continue
+
+                # Check for custom slash commands
+                elif user_input.startswith("/"):
+                    cmd_part, _, args_part = user_input[1:].partition(" ")
+                    cmd_key = cmd_part.lower().strip()
+                    if cmd_key in custom_commands:
+                        _, template, scope = custom_commands[cmd_key]
+                        expanded_prompt = _expand_command(template, args_part)
+                        print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                        memory.add_user(expanded_prompt)
+                        has_pending_turn = True
+                        continue
+                    else:
+                        print(
+                            f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n"
+                        )
+                        continue
+
+                # Normal user message: feed into memory and execute
+                memory.add_user(user_input)
+                has_pending_turn = True
+
+            patch_diff = env.get_git_patch()
+            if patch_diff:
+                patch_file = run_dir / "patch.diff"
+                patch_file.write_text(patch_diff, encoding="utf-8")
+                print(f"📦 Git patch saved to: {patch_file}")
+
+            json_path, md_path = tracer.finalize(
+                finish_reason="session_ended", patch_diff=patch_diff
+            )
+            print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
+        finally:
+            env.teardown()
