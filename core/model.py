@@ -4,7 +4,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from core.types import Message, ToolCall
 
@@ -19,6 +19,13 @@ class Model(Protocol):
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]: ...
+
+
+@runtime_checkable
+class ResettableModel(Model, Protocol):
+    """Protocol for models that can be reset between benchmark tasks or test runs."""
+
+    def reset(self) -> None: ...
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:

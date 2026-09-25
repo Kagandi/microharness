@@ -19,7 +19,7 @@ class Tool(Protocol):
         ...
 
 
-DEFAULT_MAX_TOOL_CHARS = 2500
+DEFAULT_MAX_TOOL_CHARS = 2000
 
 
 def format_tool_output(

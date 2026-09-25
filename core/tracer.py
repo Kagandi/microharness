@@ -27,7 +27,7 @@ def _red(text: str) -> str:
     return f"\033[31m{text}\033[0m" if _supports_color() else text
 
 
-ActionFormatter = Callable[[dict[str, Any]], str]
+ActionFormatter = Callable[[Any], str]
 _ACTION_FORMATTERS: dict[str, ActionFormatter] = {}
 
 
@@ -36,12 +36,22 @@ def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> Non
     _ACTION_FORMATTERS[tool_name] = formatter
 
 
-def _format_bash_action(args: dict[str, Any]) -> str:
-    cmd = str(args.get("command", "")).strip()
+def unregister_action_formatter(tool_name: str) -> None:
+    """Unregisters an action summary formatter for a tool."""
+    _ACTION_FORMATTERS.pop(tool_name, None)
+
+
+def _format_bash_action(args: Any) -> str:
+    if isinstance(args, dict):
+        cmd = str(args.get("command", "")).strip()
+    else:
+        cmd = str(args).strip()
     return f"$ {cmd}"
 
 
-def _format_read_file_action(args: dict[str, Any]) -> str:
+def _format_read_file_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Read {args}"
     path = args.get("path", "")
     start = args.get("start_line")
     end = args.get("end_line")
@@ -49,14 +59,18 @@ def _format_read_file_action(args: dict[str, Any]) -> str:
     return f"● Read {path}{lines_info}"
 
 
-def _format_write_file_action(args: dict[str, Any]) -> str:
+def _format_write_file_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Write {args}"
     path = args.get("path", "")
     content = args.get("content", "")
     lines = len(content.splitlines()) if isinstance(content, str) else 0
     return f"● Write {path} ({lines} lines)"
 
 
-def _format_edit_file_action(args: dict[str, Any]) -> str:
+def _format_edit_file_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Edit {args}"
     path = args.get("path", "")
     return f"● Edit {path}"
 
@@ -69,16 +83,14 @@ register_action_formatter("edit_file", _format_edit_file_action)
 
 def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
     """Formats a tool call concisely using registered formatters or a generic fallback."""
-    if not isinstance(args, dict):
-        text = f"$ {args}" if name == "bash" else f"● {name}({args})"
-        return _bold(text) if color else text
-
     formatter = _ACTION_FORMATTERS.get(name)
     if formatter:
         text = formatter(args)
-    else:
+    elif isinstance(args, dict):
         args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         text = f"● {name}({args_str})"
+    else:
+        text = f"● {name}({args})"
 
     return _bold(text) if color else text
 

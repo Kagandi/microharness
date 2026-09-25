@@ -25,7 +25,7 @@ from core.harness import (
     load_global_config,
     load_project_config,
 )
-from core.model import HttpChatModel, MockModel, Model
+from core.model import HttpChatModel, MockModel, Model, ResettableModel
 from core.types import RunResult, Task, ToolCall
 
 
@@ -327,8 +327,10 @@ def _dispatch_benchmark(
                 if args.timeout:
                     t.timeout_seconds = args.timeout
 
-        run_benchmark_suite(
-            harness_factory=lambda ev: Harness(
+        def _create_mini_swe_harness(ev: Evaluator) -> Harness:
+            if isinstance(model, ResettableModel):
+                model.reset()
+            return Harness(
                 model=model,
                 global_dir=global_dir,
                 runs_dir=runs_dir,
@@ -338,7 +340,10 @@ def _dispatch_benchmark(
                 evaluator=ev,
                 cache_ttl=cache_ttl,
                 verbose=True,
-            ),
+            )
+
+        run_benchmark_suite(
+            harness_factory=_create_mini_swe_harness,
             tasks=suite,
             suite_name="Mini-SWE",
             output_dir=runs_dir,
@@ -374,19 +379,23 @@ def _dispatch_benchmark(
             print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
             return True
 
-        active_docker = True if use_docker is None else use_docker
-        run_benchmark_suite(
-            harness_factory=lambda ev: Harness(
+        def _create_deepswe_harness(ev: Evaluator) -> Harness:
+            if isinstance(model, ResettableModel):
+                model.reset()
+            return Harness(
                 model=model,
                 global_dir=global_dir,
                 runs_dir=runs_dir,
                 sandbox=True,
-                docker=active_docker,
+                docker=use_docker,
                 docker_image=docker_image,
                 evaluator=ev,
                 cache_ttl=cache_ttl,
                 verbose=True,
-            ),
+            )
+
+        run_benchmark_suite(
+            harness_factory=_create_deepswe_harness,
             tasks=suite,
             suite_name="DeepSWE-mini",
             output_dir=runs_dir,

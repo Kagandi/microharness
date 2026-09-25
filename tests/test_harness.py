@@ -1094,47 +1094,47 @@ class TestHarnessIntegration(unittest.TestCase):
 
     def test_log_spill_readable_with_custom_runs_dir(self):
         custom_runs = Path(tempfile.mkdtemp(prefix="custom_runs_"))
-        script = [
-            (
-                "Generate large output",
-                [
-                    ToolCall(
-                        id="c1",
-                        name="bash",
-                        arguments={"command": "python3 -c 'print(\"A\" * 5000)'"},
-                    )
-                ],
-            ),
-            (
-                "Read spilled log",
-                [],  # We will test read_file via env directly to confirm permission
-            ),
-        ]
-        model = MockModel(script)
         harness = Harness(
-            model=model,
+            model=MockModel([("Done", [])]),
             sandbox=True,
             runs_dir=custom_runs,
-            max_tool_chars=500,
             verbose=False,
         )
-        task = Task(id="spill_task", instruction="Run big command", max_steps=2)
-        result = harness.run(task)
-        self.assertEqual(result.finish_reason, "completed")
 
-        # Find the spilled log file in custom_runs
-        log_files = list(custom_runs.glob("**/*.log"))
-        self.assertGreater(len(log_files), 0)
-        spill_file = log_files[0]
-
-        # Verify Environment with logs_dir in allowed_read_dirs permits reading the spilled log file
-        env = Environment(
-            workspace_dir=spill_file.parent.parent / "workspace",
-            logs_dir=spill_file.parent,
-            allowed_read_dirs=[spill_file.parent],
+        # Exercise the real harness environment setup wiring
+        env, tool_registry, _, _, _, run_dir = harness._setup_run(
+            task_id="spill_wiring_test",
+            system_prompt="",
+            initial_instruction="test",
+            initial_files={},
+            force_sandbox=True,
         )
-        content = env.read_file(str(spill_file))
-        self.assertIn("AAAA", content)
+
+        # Create a simulated spilled log file in the harness-configured logs_dir
+        spill_file = env.logs_dir / "step_1_bash_call1.log"
+        spill_file.write_text("AAAA_TRUNCATED_LOG_OUTPUT", encoding="utf-8")
+
+        # 1. POSITIVE ASSERTION: read_file dispatch succeeds because logs_dir is in allowed_reads
+        read_call = ToolCall(
+            id="read_spill",
+            name="read_file",
+            arguments={"path": str(spill_file)},
+        )
+        res = tool_registry.dispatch(read_call, step_index=2)
+        self.assertEqual(res.exit_code, 0)
+        self.assertEqual(res.output, "   1 | AAAA_TRUNCATED_LOG_OUTPUT")
+
+        # 2. NEGATIVE ASSERTION: Attempting to read another file outside logs_dir in custom_runs fails
+        outside_file = custom_runs / "unauthorized.txt"
+        outside_file.write_text("SECRET_RUNS_DATA", encoding="utf-8")
+        unauth_call = ToolCall(
+            id="read_outside",
+            name="read_file",
+            arguments={"path": str(outside_file)},
+        )
+        unauth_res = tool_registry.dispatch(unauth_call, step_index=3)
+        self.assertEqual(unauth_res.exit_code, 1)
+        self.assertIn("Access denied", unauth_res.output)
 
     def test_global_config_json_not_readable_by_agent(self):
         global_d = Path(tempfile.mkdtemp(prefix="secret_global_"))
@@ -1214,38 +1214,124 @@ class TestHarnessIntegration(unittest.TestCase):
             "First line of description. Second line of description.",
         )
 
-    def test_action_formatter_custom_registration(self):
-        from core.tracer import _format_action_summary, register_action_formatter
+    def test_skills_frontmatter_leading_blank_lines(self):
+        from core.harness import _extract_skill_summary
 
-        register_action_formatter(
-            "custom_query",
-            lambda args: f"Query({args.get('target', '')})",
+        content_leading_blank = (
+            "\n"
+            "\n"
+            "---\n"
+            "name: test-skill\n"
+            "description: Summary should be extracted despite leading blanks\n"
+            "---\n"
+            "# Heading\n"
         )
-        formatted = _format_action_summary(
-            "custom_query",
-            {"target": "users_table"},
-            color=False,
+        summary = _extract_skill_summary(content_leading_blank, default="fallback")
+        self.assertEqual(summary, "Summary should be extracted despite leading blanks")
+        self.assertNotIn("description:", summary)
+        self.assertNotIn("---", summary)
+
+    def test_action_formatter_builtins_and_custom_registration(self):
+        from core.tracer import (
+            _format_action_summary,
+            register_action_formatter,
+            unregister_action_formatter,
         )
-        self.assertEqual(formatted, "Query(users_table)")
+
+        # 1. Test built-in tool formatters with strict equality
+        self.assertEqual(
+            _format_action_summary("bash", {"command": "echo hi"}, color=False),
+            "$ echo hi",
+        )
+        self.assertEqual(
+            _format_action_summary(
+                "read_file",
+                {"path": "foo.py", "start_line": 5, "end_line": 15},
+                color=False,
+            ),
+            "● Read foo.py (lines 5-15)",
+        )
+        self.assertEqual(
+            _format_action_summary(
+                "write_file",
+                {"path": "bar.txt", "content": "line1\nline2\nline3"},
+                color=False,
+            ),
+            "● Write bar.txt (3 lines)",
+        )
+        self.assertEqual(
+            _format_action_summary("edit_file", {"path": "baz.py"}, color=False),
+            "● Edit baz.py",
+        )
+
+        # 2. Test non-dict args with registered formatter
+        self.assertEqual(
+            _format_action_summary("bash", "echo string_cmd", color=False),
+            "$ echo string_cmd",
+        )
+
+        # 3. Test generic fallback for unregistered tools
+        self.assertEqual(
+            _format_action_summary("unknown_tool", {"k": "v"}, color=False),
+            "● unknown_tool(k='v')",
+        )
+
+        # 4. Test custom tool registration and ensure cleanup in finally block
+        try:
+            register_action_formatter(
+                "custom_query",
+                lambda args: f"Query({args.get('target', '') if isinstance(args, dict) else args})",
+            )
+            formatted = _format_action_summary(
+                "custom_query",
+                {"target": "users_table"},
+                color=False,
+            )
+            self.assertEqual(formatted, "Query(users_table)")
+        finally:
+            unregister_action_formatter("custom_query")
+
+        # Verify unregistration restored generic fallback
+        self.assertEqual(
+            _format_action_summary("custom_query", {"target": "users_table"}, color=False),
+            "● custom_query(target='users_table')",
+        )
 
     def test_mock_model_reset_multi_task(self):
+        # 1-entry script: executes write_file on step 0, exhausted on step 1
         script = [
-            ("Step 1 response", []),
-            ("Step 2 response", []),
+            (
+                "Write active flag",
+                [
+                    ToolCall(
+                        id="w1",
+                        name="write_file",
+                        arguments={"path": "flag.txt", "content": "active"},
+                    )
+                ],
+            )
         ]
         model = MockModel(script)
         harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
 
-        task1 = Task(id="t1", instruction="do 1", max_steps=1)
+        task1 = Task(id="t1", instruction="do 1", max_steps=2)
         res1 = harness.run(task1)
         self.assertEqual(res1.finish_reason, "completed")
-        self.assertEqual(res1.total_steps, 1)
+        self.assertTrue((Path(res1.workspace_path) / "flag.txt").exists())
+        self.assertEqual(
+            (Path(res1.workspace_path) / "flag.txt").read_text(encoding="utf-8"),
+            "active",
+        )
 
-        task2 = Task(id="t2", instruction="do 2", max_steps=1)
+        task2 = Task(id="t2", instruction="do 2", max_steps=2)
         res2 = harness.run(task2)
-        # Because harness._setup_run resets the mock model, task2 starts at step 0 rather than step 1
         self.assertEqual(res2.finish_reason, "completed")
-        self.assertEqual(res2.total_steps, 1)
+        # If reset() did NOT run, task 2 starts with exhausted script, writes no flag, and fails this assertion!
+        self.assertTrue((Path(res2.workspace_path) / "flag.txt").exists())
+        self.assertEqual(
+            (Path(res2.workspace_path) / "flag.txt").read_text(encoding="utf-8"),
+            "active",
+        )
 
 
 if __name__ == "__main__":

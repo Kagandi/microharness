@@ -10,7 +10,7 @@ from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import Model, normalize_cache_ttl
+from core.model import Model, ResettableModel, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
     DEFAULT_MAX_TOOL_CHARS,
@@ -90,17 +90,20 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
 def _extract_skill_summary(content: str, default: str) -> str:
     """Extracts a 1-line summary from a SKILL.md document, supporting YAML frontmatter and block scalars."""
     raw_lines = content.splitlines()
-    non_empty = [line for line in raw_lines if line.strip()]
-    if not non_empty:
+    non_empty_indices = [i for i, line in enumerate(raw_lines) if line.strip()]
+    if not non_empty_indices:
         return default
 
-    if non_empty[0].strip() == "---":
+    first_idx = non_empty_indices[0]
+    first_line = raw_lines[first_idx].strip()
+
+    if first_line == "---":
         in_frontmatter = True
         desc_parts: list[str] = []
         capturing_scalar = False
         after_frontmatter: list[str] = []
 
-        for line in raw_lines[1:]:
+        for line in raw_lines[first_idx + 1 :]:
             stripped = line.strip()
             if stripped == "---":
                 if in_frontmatter:
@@ -132,7 +135,7 @@ def _extract_skill_summary(content: str, default: str) -> str:
             return after_frontmatter[0].lstrip("#").strip() or default
         return default
 
-    return non_empty[0].strip().lstrip("#").strip() or default
+    return first_line.lstrip("#").strip() or default
 
 
 def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
@@ -414,7 +417,7 @@ class Harness:
         docker_image: str | None = None,
         init_workdir: str | None = None,
     ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
-        if hasattr(self.model, "reset"):
+        if isinstance(self.model, ResettableModel):
             self.model.reset()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

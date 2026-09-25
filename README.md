@@ -33,7 +33,7 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
   "api_key": "sk-or-v1-...",
   "max_context_chars": 32000,
   "trigger_ratio": 0.80,
-  "max_tool_chars": 2500,
+  "max_tool_chars": 2000,
   "sandbox": false
 }
 ```
@@ -149,7 +149,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 105 unit and integration tests run in ~6s)*
+*(All 106 unit and integration tests run in ~6s)*
 
 ### 3. Run Mini-SWE for Rapid Sanity Testing
 Run the lightweight 5-task sanity test suite before launching heavy benchmarks:
