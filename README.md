@@ -151,10 +151,10 @@ uv run pytest
 ```
 *(All 92 unit and integration tests run in ~5s)*
 
-### 3. Run the Mini-SWE Benchmark Suite
-Run the full 5-task SWE benchmark suite or focus on a single task:
+### 3. Run Mini-SWE for Rapid Sanity Testing
+Run the lightweight 5-task sanity test suite before launching heavy benchmarks:
 ```bash
-# Run the entire Mini-SWE benchmark suite:
+# Run the entire Mini-SWE sanity benchmark suite:
 uv run microharness --benchmark mini-swe
 
 # Filter to a specific challenge (e.g. rate_limiter or query_builder):
@@ -167,10 +167,11 @@ uv run microharness --demo greeting
 
 ---
 
-## 🏆 Mini-SWE Benchmark Suite
+## 🏆 Mini-SWE Benchmark Suite (Sanity & Smoke Testing)
 
-`microharness` includes **Mini-SWE**, a fast, lightweight, pure-Python software engineering benchmark designed to evaluate agents on real codebases with zero Docker overhead:
+`microharness` includes **Mini-SWE**, a fast, lightweight, pure-Python benchmark designed primarily for **rapid sanity testing, local iteration, and CI smoke testing**:
 
+* **Sanity Testing Focus**: Validates the agent's tool-calling loop, multi-turn file editing, memory compaction, and test assertion grading in seconds—without burning model quota or waiting on multi-hour containerized benchmarks.
 * **Pure Python & Zero Docker**: Operates entirely with Python's standard library. No multi-gigabyte container downloads, instant startup.
 * **Anti-Cheating Evaluator (`PristineTestEvaluator`)**: Evaluators restore pristine test files prior to running verification. An agent cannot bypass tests by deleting or rewriting assertions in the test suite.
 * **5 Realistic Engineering Challenges**:

@@ -273,6 +273,7 @@ while not done:
 ---
 
 ### 3.9 Mini-SWE Benchmark Suite & Anti-Cheating Invariants (`benchmarks/`)
+* **Rapid Sanity Testing & Smoke Test Suite**: Designed primarily for local developer iteration and CI smoke tests to quickly verify agent tool use, memory compaction, and test evaluation in seconds before running heavy containerized benchmarks.
 * **Zero-Docker Pure Python Standard**: Full SWE-style benchmark runs entirely in standard Python without container virtualization or dependency bloat.
 * **Anti-Cheating `PristineTestEvaluator`**:
   * Restores pristine, untouched unit test files into the sandbox immediately prior to verification.
