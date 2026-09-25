@@ -166,7 +166,12 @@ class Environment:
             )
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + f"\n[Command timed out after {timeout} seconds]"
+            stdout_str = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            output = stdout_str + f"\n[Command timed out after {timeout} seconds]"
             return 124, output
         except Exception as exc:
             return 1, f"[Execution error: {exc}]"
@@ -332,7 +337,12 @@ class DockerEnvironment(Environment):
                 )
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + f"\n[Command timed out after {timeout} seconds]"
+            stdout_str = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else (exc.stdout or "")
+            )
+            output = stdout_str + f"\n[Command timed out after {timeout} seconds]"
             return 124, output
         except Exception as exc:
             return 1, f"[Docker execution error: {exc}]"

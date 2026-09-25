@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Protocol
@@ -168,19 +169,34 @@ class HttpChatModel:
             method="POST",
         )
 
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                res_body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise ConnectionError(
-                f"Could not connect to model endpoint at {self.endpoint}.\n"
-                f"Is the server running and reachable? (Detail: {exc.reason})"
-            ) from exc
+        max_retries = 4
+        base_delay = 2.0
+        res_body: dict[str, Any] = {}
+
+        for attempt in range(max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                    res_body = json.loads(response.read().decode("utf-8"))
+                    break
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="replace")
+                # Retry on rate limits (429) and transient server errors (500, 502, 503, 504)
+                if exc.code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    sleep_time = base_delay * (2**attempt)
+                    time.sleep(sleep_time)
+                    continue
+                raise RuntimeError(
+                    f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
+                ) from exc
+            except urllib.error.URLError as exc:
+                if attempt < max_retries - 1:
+                    sleep_time = base_delay * (2**attempt)
+                    time.sleep(sleep_time)
+                    continue
+                raise ConnectionError(
+                    f"Could not connect to model endpoint at {self.endpoint}.\n"
+                    f"Is the server running and reachable? (Detail: {exc.reason})"
+                ) from exc
 
         # Extract usage and track cumulative prompt caching metrics
         usage = res_body.get("usage", {})
