@@ -50,7 +50,45 @@ def normalize_cache_ttl(ttl: str | None) -> str | None:
     )
 
 
-class HttpChatModel:
+class _CacheTelemetryMixin:
+    """Provides common prompt cache telemetry and token usage accounting."""
+
+    cache_ttl: str | None
+    last_usage: dict[str, Any]
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cached_tokens: int
+
+    def _init_cache_telemetry(self, cache_ttl: str | None = None) -> None:
+        self.cache_ttl = normalize_cache_ttl(cache_ttl)
+        self.last_usage = {}
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_cached_tokens = 0
+
+    def set_cache_ttl(self, ttl: str | None) -> str | None:
+        """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
+        self.cache_ttl = normalize_cache_ttl(ttl)
+        return self.cache_ttl
+
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Returns prompt cache TTL and cumulative token utilization metrics."""
+        hit_rate = (
+            (self.total_cached_tokens / self.total_prompt_tokens * 100)
+            if self.total_prompt_tokens > 0
+            else 0.0
+        )
+        return {
+            "cache_ttl": self.cache_ttl,
+            "last_usage": dict(self.last_usage),
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "total_cached_tokens": self.total_cached_tokens,
+            "cache_hit_rate_pct": round(hit_rate, 1),
+        }
+
+
+class HttpChatModel(_CacheTelemetryMixin):
     """A generic HTTP model client for any OpenAI-compatible completions endpoint.
 
     Accepts either:
@@ -87,34 +125,7 @@ class HttpChatModel:
             if "X-Title" not in self.extra_headers:
                 self.extra_headers["X-Title"] = "microharness"
         self.timeout = timeout
-        self.cache_ttl = normalize_cache_ttl(cache_ttl)
-
-        # Telemetry & prompt caching metrics
-        self.last_usage: dict[str, Any] = {}
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self.total_cached_tokens = 0
-
-    def set_cache_ttl(self, ttl: str | None) -> str | None:
-        """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
-        self.cache_ttl = normalize_cache_ttl(ttl)
-        return self.cache_ttl
-
-    def get_cache_stats(self) -> dict[str, Any]:
-        """Returns prompt cache TTL and cumulative token utilization metrics."""
-        hit_rate = (
-            (self.total_cached_tokens / self.total_prompt_tokens * 100)
-            if self.total_prompt_tokens > 0
-            else 0.0
-        )
-        return {
-            "cache_ttl": self.cache_ttl,
-            "last_usage": dict(self.last_usage),
-            "total_prompt_tokens": self.total_prompt_tokens,
-            "total_completion_tokens": self.total_completion_tokens,
-            "total_cached_tokens": self.total_cached_tokens,
-            "cache_hit_rate_pct": round(hit_rate, 1),
-        }
+        self._init_cache_telemetry(cache_ttl)
 
     def _build_headers(self) -> dict[str, str]:
         headers = {
@@ -257,7 +268,7 @@ class HttpChatModel:
         return content, tool_calls
 
 
-class MockModel:
+class MockModel(_CacheTelemetryMixin):
     """Deterministic model for offline testing and educational walkthroughs."""
 
     def __init__(
@@ -267,36 +278,11 @@ class MockModel:
     ):
         self.script = list(script)
         self.step_idx = 0
-        self.cache_ttl = normalize_cache_ttl(cache_ttl)
-        self.last_usage: dict[str, Any] = {}
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self.total_cached_tokens = 0
+        self._init_cache_telemetry(cache_ttl)
 
     def reset(self) -> None:
         """Resets the script execution index for subsequent task runs."""
         self.step_idx = 0
-
-    def set_cache_ttl(self, ttl: str | None) -> str | None:
-        """Dynamically switches prompt caching duration on the fly."""
-        self.cache_ttl = normalize_cache_ttl(ttl)
-        return self.cache_ttl
-
-    def get_cache_stats(self) -> dict[str, Any]:
-        """Returns prompt cache TTL and cumulative token metrics."""
-        hit_rate = (
-            (self.total_cached_tokens / self.total_prompt_tokens * 100)
-            if self.total_prompt_tokens > 0
-            else 0.0
-        )
-        return {
-            "cache_ttl": self.cache_ttl,
-            "last_usage": dict(self.last_usage),
-            "total_prompt_tokens": self.total_prompt_tokens,
-            "total_completion_tokens": self.total_completion_tokens,
-            "total_cached_tokens": self.total_cached_tokens,
-            "cache_hit_rate_pct": round(hit_rate, 1),
-        }
 
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]

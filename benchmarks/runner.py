@@ -62,6 +62,36 @@ class BenchmarkReport:
         print("=" * width + "\n")
 
 
+def _build_report(
+    suite_name: str,
+    total_tasks: int,
+    task_reports: list[TaskReport],
+    duration_s: float,
+) -> BenchmarkReport:
+    """Builds a BenchmarkReport with consistent denominators and zero-division guards."""
+    passed = sum(1 for t in task_reports if t.passed)
+    denominator = total_tasks if total_tasks > 0 else len(task_reports)
+    pass_rate = (passed / denominator * 100.0) if denominator > 0 else 0.0
+    mean_score = (sum(t.score for t in task_reports) / denominator) if denominator > 0 else 0.0
+    return BenchmarkReport(
+        suite_name=suite_name,
+        total_tasks=total_tasks,
+        passed_tasks=passed,
+        pass_rate=pass_rate,
+        mean_score=mean_score,
+        total_duration_s=duration_s,
+        tasks=list(task_reports),
+    )
+
+
+def _save_report_json(report: BenchmarkReport, output_dir: Path | str, suite_name: str) -> Path:
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    report_file = out_path / f"{suite_name.lower().replace('-', '_')}_report.json"
+    report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    return report_file
+
+
 def run_benchmark_suite(
     harness_factory: Callable[[Evaluator], Harness],
     tasks: list[tuple[Task, Evaluator]],
@@ -100,45 +130,26 @@ def run_benchmark_suite(
 
         # Incrementally persist benchmark report after each task
         if output_dir:
-            out_path = Path(output_dir)
-            out_path.mkdir(parents=True, exist_ok=True)
-            report_file = out_path / f"{suite_name.lower().replace('-', '_')}_report.json"
-            cur_report = BenchmarkReport(
+            cur_report = _build_report(
                 suite_name=suite_name,
                 total_tasks=len(tasks),
-                passed_tasks=sum(1 for t in task_reports if t.passed),
-                pass_rate=(sum(1 for t in task_reports if t.passed) / len(task_reports) * 100.0),
-                mean_score=(sum(t.score for t in task_reports) / len(task_reports)),
-                total_duration_s=time.time() - start_time,
-                tasks=task_reports,
+                task_reports=task_reports,
+                duration_s=time.time() - start_time,
             )
-            report_file.write_text(json.dumps(cur_report.to_dict(), indent=2), encoding="utf-8")
+            _save_report_json(cur_report, output_dir, suite_name)
 
-    total_duration = time.time() - start_time
-    total_tasks = len(task_reports)
-    passed_tasks = sum(1 for t in task_reports if t.passed)
-    pass_rate = (passed_tasks / total_tasks * 100.0) if total_tasks else 0.0
-    mean_score = (sum(t.score for t in task_reports) / total_tasks) if total_tasks else 0.0
-
-    report = BenchmarkReport(
+    report = _build_report(
         suite_name=suite_name,
-        total_tasks=total_tasks,
-        passed_tasks=passed_tasks,
-        pass_rate=pass_rate,
-        mean_score=mean_score,
-        total_duration_s=total_duration,
-        tasks=task_reports,
+        total_tasks=len(tasks),
+        task_reports=task_reports,
+        duration_s=time.time() - start_time,
     )
 
     if verbose:
         report.print_scorecard()
 
-    # Save summary report JSON if output_dir provided
     if output_dir:
-        out_path = Path(output_dir)
-        out_path.mkdir(parents=True, exist_ok=True)
-        report_file = out_path / f"{suite_name.lower().replace('-', '_')}_report.json"
-        report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        report_file = _save_report_json(report, output_dir, suite_name)
         if verbose:
             print(f"📄 Benchmark report saved to: {report_file}")
 

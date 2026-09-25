@@ -19,6 +19,27 @@ def _decode_timeout_output(exc: subprocess.TimeoutExpired, timeout: float) -> tu
     return 124, f"{stdout_str}\n[Command timed out after {timeout} seconds]"
 
 
+def _run_command_process(
+    cmd: str | list[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout: float = 30.0,
+    shell: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Runs a subprocess with standardized text-mode streaming and unified stdout/stderr."""
+    return subprocess.run(
+        cmd,
+        shell=shell,
+        cwd=str(cwd) if cwd is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
 class Environment:
     """Provides workspace execution, security boundaries, and sandboxing."""
 
@@ -56,15 +77,17 @@ class Environment:
         for rel_path, content in files.items():
             self.write_file(rel_path, content)
 
-    def resolve_path(self, rel_path: str) -> Path:
-        """Resolve a path strictly inside workspace (used for write operations)."""
-        expanded = os.path.expanduser(rel_path)
+    def _resolve_target(self, path_str: str) -> Path:
+        """Expands and resolves a path string relative to the workspace directory."""
+        expanded = os.path.expanduser(path_str)
         target = Path(expanded)
         if not target.is_absolute():
-            target = (self.workspace_dir / target).resolve()
-        else:
-            target = target.resolve()
+            return (self.workspace_dir / target).resolve()
+        return target.resolve()
 
+    def resolve_path(self, rel_path: str) -> Path:
+        """Resolve a path strictly inside workspace (used for write operations)."""
+        target = self._resolve_target(rel_path)
         if not target.is_relative_to(self.workspace_dir):
             raise PermissionError(
                 f"Access denied: path '{rel_path}' resolves outside workspace sandbox."
@@ -73,12 +96,7 @@ class Environment:
 
     def resolve_read_path(self, path_str: str) -> Path:
         """Resolve a path for reading, permitting workspace and authorized global directories."""
-        expanded = os.path.expanduser(path_str)
-        target = Path(expanded)
-        if not target.is_absolute():
-            target = (self.workspace_dir / target).resolve()
-        else:
-            target = target.resolve()
+        target = self._resolve_target(path_str)
 
         # Check workspace
         if target.is_relative_to(self.workspace_dir):
@@ -185,16 +203,11 @@ class Environment:
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the workspace directory."""
         try:
-            process = subprocess.run(
+            process = _run_command_process(
                 command,
-                shell=True,
-                cwd=str(self.workspace_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+                cwd=self.workspace_dir,
                 timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
+                shell=True,
             )
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
@@ -350,27 +363,11 @@ class DockerEnvironment(Environment):
             command,
         ]
         try:
-            process = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
-            )
+            process = _run_command_process(cmd, timeout=timeout)
             # If bash doesn't exist in the target image (e.g. alpine), fall back to sh (index 5)
             if process.returncode == 127 and "bash: not found" in (process.stdout or ""):
                 cmd[5] = "/bin/sh"
-                process = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=timeout,
-                    encoding="utf-8",
-                    errors="replace",
-                )
+                process = _run_command_process(cmd, timeout=timeout)
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
             return _decode_timeout_output(exc, timeout)

@@ -106,6 +106,29 @@ def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
     return _bold(text) if color else text
 
 
+def _pair_calls_with_results(
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any] | None, dict[str, Any] | None]]:
+    """Pairs tool calls with corresponding results, first by call_id, then by index."""
+    results_by_id = {tr.get("call_id"): tr for tr in tool_results if tr.get("call_id")}
+    remaining_results = list(tool_results)
+    pairs: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = []
+
+    for i, tc in enumerate(tool_calls):
+        tr = results_by_id.get(tc.get("id")) or (
+            remaining_results[i] if i < len(remaining_results) else None
+        )
+        if tr in remaining_results:
+            remaining_results.remove(tr)
+        pairs.append((tc, tr))
+
+    for tr in remaining_results:
+        pairs.append((None, tr))
+
+    return pairs
+
+
 class Tracer:
     """Collects telemetry during the agent run and exports structured traces."""
 
@@ -140,27 +163,15 @@ class Tracer:
         if step.compaction_applied:
             print(_dim("🧹 [Memory Compaction]: Pruned older observations to preserve context.\n"))
 
-        # Pair tool calls with tool results
-        results_by_id = {tr.get("call_id"): tr for tr in step.tool_results if tr.get("call_id")}
-        remaining_results = list(step.tool_results)
-
-        for i, tc in enumerate(tool_calls):
-            name = tc.get("name", "")
-            args = tc.get("arguments", {})
-            action_text = _format_action_summary(name, args, color=True)
-            print(action_text)
-
-            tr = results_by_id.get(tc.get("id")) or (
-                remaining_results[i] if i < len(remaining_results) else None
-            )
-            if tr in remaining_results:
-                remaining_results.remove(tr)
+        for tc, tr in _pair_calls_with_results(tool_calls, step.tool_results):
+            if tc:
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                action_text = _format_action_summary(name, args, color=True)
+                print(action_text)
 
             if tr:
                 self._print_tool_output(tr)
-
-        for tr in remaining_results:
-            self._print_tool_output(tr)
 
     def _print_tool_output(self, tr: dict[str, Any]) -> None:
         exit_code = tr.get("exit_code", 0)
@@ -266,31 +277,25 @@ class Tracer:
                 lines.extend([content.strip(), ""])
 
             tool_calls = s.model_response.get("tool_calls") or []
-            results_by_id = {tr.get("call_id"): tr for tr in s.tool_results if tr.get("call_id")}
-            remaining_results = list(s.tool_results)
-
-            for i, tc in enumerate(tool_calls):
-                name = tc.get("name", "")
-                args = tc.get("arguments", {})
-                tr = results_by_id.get(tc.get("id")) or (
-                    remaining_results[i] if i < len(remaining_results) else None
-                )
-                if tr in remaining_results:
-                    remaining_results.remove(tr)
-
-                if name == "bash":
-                    cmd = args.get("command", "").strip() if isinstance(args, dict) else str(args)
-                    lines.extend(["**Command** (`bash`):", f"```bash\n{cmd}\n```"])
-                elif name in ("read_file", "write_file", "edit_file"):
-                    action_summary = _format_action_summary(name, args, color=False)
-                    lines.append(f"**Action** (`{name}`): `{action_summary}`")
-                else:
-                    lines.extend(
-                        [
-                            f"**Action**: `{name}`",
-                            f"```json\n{json.dumps(args, indent=2)}\n```",
-                        ]
-                    )
+            for tc, tr in _pair_calls_with_results(tool_calls, s.tool_results):
+                if tc:
+                    name = tc.get("name", "")
+                    args = tc.get("arguments", {})
+                    if name == "bash":
+                        cmd = (
+                            args.get("command", "").strip() if isinstance(args, dict) else str(args)
+                        )
+                        lines.extend(["**Command** (`bash`):", f"```bash\n{cmd}\n```"])
+                    elif name in _ACTION_FORMATTERS:
+                        action_summary = _format_action_summary(name, args, color=False)
+                        lines.append(f"**Action** (`{name}`): `{action_summary}`")
+                    else:
+                        lines.extend(
+                            [
+                                f"**Action**: `{name}`",
+                                f"```json\n{json.dumps(args, indent=2)}\n```",
+                            ]
+                        )
 
                 if tr:
                     trunc = " (Truncated)" if tr.get("was_truncated") else ""
@@ -302,16 +307,6 @@ class Tracer:
                             "",
                         ]
                     )
-
-            for tr in remaining_results:
-                trunc = " (Truncated)" if tr.get("was_truncated") else ""
-                lines.extend(
-                    [
-                        f"**Output** (exit={tr.get('exit_code')}){trunc}:",
-                        f"```\n{tr.get('output', '').strip()}\n```",
-                        "",
-                    ]
-                )
 
         if self.patch_diff:
             lines.extend(

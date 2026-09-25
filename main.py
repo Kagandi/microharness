@@ -340,6 +340,19 @@ def _dispatch_benchmark(
     docker_image: str,
 ) -> bool:
     bench_choice = args.benchmark or args.demo
+    if not bench_choice:
+        return False
+
+    factory = create_benchmark_harness_factory(
+        model=model,
+        global_dir=global_dir,
+        runs_dir=runs_dir,
+        use_docker=use_docker,
+        docker_image=docker_image,
+        cache_ttl=cache_ttl,
+        verbose=True,
+    )
+
     if bench_choice in ("mini-swe", "all"):
         from benchmarks.mini_swe import get_mini_swe_suite
         from benchmarks.runner import run_benchmark_suite
@@ -357,15 +370,7 @@ def _dispatch_benchmark(
                     t.timeout_seconds = args.timeout
 
         run_benchmark_suite(
-            harness_factory=create_benchmark_harness_factory(
-                model=model,
-                global_dir=global_dir,
-                runs_dir=runs_dir,
-                use_docker=use_docker,
-                docker_image=docker_image,
-                cache_ttl=cache_ttl,
-                verbose=True,
-            ),
+            harness_factory=factory,
             tasks=suite,
             suite_name="Mini-SWE",
             output_dir=runs_dir,
@@ -402,15 +407,7 @@ def _dispatch_benchmark(
             return True
 
         run_benchmark_suite(
-            harness_factory=create_benchmark_harness_factory(
-                model=model,
-                global_dir=global_dir,
-                runs_dir=runs_dir,
-                use_docker=use_docker,
-                docker_image=docker_image,
-                cache_ttl=cache_ttl,
-                verbose=True,
-            ),
+            harness_factory=factory,
             tasks=suite,
             suite_name="DeepSWE-mini",
             output_dir=runs_dir,
@@ -422,17 +419,7 @@ def _dispatch_benchmark(
         task, evaluator = (
             create_calculator_demo() if bench_choice == "calculator" else create_greeting_demo()
         )
-        harness = Harness(
-            model=model,
-            global_dir=global_dir,
-            runs_dir=runs_dir,
-            sandbox=True,
-            docker=use_docker,
-            docker_image=docker_image,
-            evaluator=evaluator,
-            cache_ttl=cache_ttl,
-            verbose=True,
-        )
+        harness = factory(evaluator)
         result = harness.run(task)
         _print_run_summary(result)
         return True

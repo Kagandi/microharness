@@ -271,53 +271,35 @@ class Harness:
         self.project_config = load_project_config(self.explicit_workspace_dir)
         self.merged_config = {**self.global_config, **self.project_config}
 
-        self.sandbox = (
-            sandbox if sandbox is not None else bool(self.merged_config.get("sandbox", False))
-        )
-        self.docker = (
-            docker if docker is not None else bool(self.merged_config.get("docker", False))
-        )
-        self.docker_image = docker_image or self.merged_config.get("docker_image", "python:3.11")
+        def _cfg(
+            key: str,
+            explicit: Any,
+            cast: Callable[[Any], Any] = lambda x: x,
+            default: Any = None,
+        ) -> Any:
+            val = explicit if explicit is not None else self.merged_config.get(key, default)
+            return cast(val) if val is not None else default
+
+        self.sandbox = _cfg("sandbox", sandbox, bool, False)
+        self.docker = _cfg("docker", docker, bool, False)
+        self.docker_image = _cfg("docker_image", docker_image, str, "python:3.11")
         self.custom_tools = tools
         self.evaluator = evaluator
-        configured_runs_dir = self.merged_config.get("runs_dir")
-        if runs_dir is not None:
-            self.runs_dir = Path(runs_dir).resolve()
-        elif configured_runs_dir:
-            self.runs_dir = Path(configured_runs_dir).resolve()
-        else:
-            self.runs_dir = (self.global_dir / "runs").resolve()
-        self.max_tool_chars = (
-            max_tool_chars
-            if max_tool_chars is not None
-            else int(self.merged_config.get("max_tool_chars", DEFAULT_MAX_TOOL_CHARS))
-        )
-        self.max_context_chars = (
-            max_context_chars
-            if max_context_chars is not None
-            else int(self.merged_config.get("max_context_chars", 8000))
-        )
-        self.trigger_ratio = (
-            trigger_ratio
-            if trigger_ratio is not None
-            else float(self.merged_config.get("trigger_ratio", 0.80))
-        )
-        configured_cache_ttl = (
-            cache_ttl if cache_ttl is not None else self.merged_config.get("cache_ttl", "5m")
-        )
+
+        runs_val = _cfg("runs_dir", runs_dir, Path, None)
+        self.runs_dir = runs_val.resolve() if runs_val else (self.global_dir / "runs").resolve()
+
+        self.max_tool_chars = _cfg("max_tool_chars", max_tool_chars, int, DEFAULT_MAX_TOOL_CHARS)
+        self.max_context_chars = _cfg("max_context_chars", max_context_chars, int, 8000)
+        self.trigger_ratio = _cfg("trigger_ratio", trigger_ratio, float, 0.80)
+
+        configured_cache_ttl = _cfg("cache_ttl", cache_ttl, str, "5m")
         self.cache_ttl = normalize_cache_ttl(configured_cache_ttl)
         if hasattr(self.model, "set_cache_ttl"):
             self.model.set_cache_ttl(self.cache_ttl)
-        self.max_step_retries = (
-            max_step_retries
-            if max_step_retries is not None
-            else int(self.merged_config.get("max_step_retries", 3))
-        )
-        self.step_retry_delay = (
-            step_retry_delay
-            if step_retry_delay is not None
-            else float(self.merged_config.get("step_retry_delay", 5.0))
-        )
+
+        self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
+        self.step_retry_delay = _cfg("step_retry_delay", step_retry_delay, float, 5.0)
         self.verbose = verbose
 
     def set_cache_ttl(self, ttl: str | None) -> str | None:
