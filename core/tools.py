@@ -192,9 +192,6 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
-    def get_tool(self, name: str) -> Tool | None:
-        return self._tools.get(name)
-
     def to_system_prompt_snippet(self) -> str:
         """Generates dynamic documentation for all registered tools."""
         if not self._tools:

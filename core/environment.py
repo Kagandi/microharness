@@ -8,6 +8,16 @@ import uuid
 from pathlib import Path
 
 
+def _decode_timeout_output(exc: subprocess.TimeoutExpired, timeout: float) -> tuple[int, str]:
+    """Decodes subprocess timeout output gracefully, handling bytes or string."""
+    stdout_str = (
+        exc.stdout.decode("utf-8", errors="replace")
+        if isinstance(exc.stdout, bytes)
+        else (exc.stdout or "")
+    )
+    return 124, f"{stdout_str}\n[Command timed out after {timeout} seconds]"
+
+
 class Environment:
     """Provides workspace execution, security boundaries, and sandboxing."""
 
@@ -166,13 +176,7 @@ class Environment:
             )
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
-            stdout_str = (
-                exc.stdout.decode("utf-8", errors="replace")
-                if isinstance(exc.stdout, bytes)
-                else (exc.stdout or "")
-            )
-            output = stdout_str + f"\n[Command timed out after {timeout} seconds]"
-            return 124, output
+            return _decode_timeout_output(exc, timeout)
         except Exception as exc:
             return 1, f"[Execution error: {exc}]"
 
@@ -337,13 +341,7 @@ class DockerEnvironment(Environment):
                 )
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
-            stdout_str = (
-                exc.stdout.decode("utf-8", errors="replace")
-                if isinstance(exc.stdout, bytes)
-                else (exc.stdout or "")
-            )
-            output = stdout_str + f"\n[Command timed out after {timeout} seconds]"
-            return 124, output
+            return _decode_timeout_output(exc, timeout)
         except Exception as exc:
             return 1, f"[Docker execution error: {exc}]"
 
