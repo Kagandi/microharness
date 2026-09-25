@@ -216,7 +216,13 @@ class Harness:
         )
         self.custom_tools = tools
         self.evaluator = evaluator
-        self.runs_dir = Path(runs_dir or ".runs").resolve()
+        configured_runs_dir = self.merged_config.get("runs_dir")
+        if runs_dir is not None:
+            self.runs_dir = Path(runs_dir).resolve()
+        elif configured_runs_dir:
+            self.runs_dir = Path(configured_runs_dir).resolve()
+        else:
+            self.runs_dir = (self.global_dir / "runs").resolve()
         self.max_tool_chars = (
             max_tool_chars
             if max_tool_chars is not None

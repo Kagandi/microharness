@@ -135,12 +135,12 @@ class RunResult:
 ### 3.2 Workspace & Execution Environment (`core/environment.py`)
 * **Workspace Resolution**:
   * In-place mode targets the specified project directory (`workspace_dir` or `.`).
-  * Sandbox mode creates a disposable directory in `.runs/<task_id>_<timestamp>/workspace`.
+  * Sandbox mode creates a disposable directory in `~/.microharness/runs/<task_id>_<timestamp>/workspace` (or custom `--runs-dir`).
 * **Path Traversal Security & Read Permissions**:
   * `resolve_path(rel_path)` ensures all file write operations strictly remain within `workspace_dir` (raises `PermissionError` on `../../`, sibling directory prefix spoofing, or paths outside the workspace).
   * `resolve_read_path(path_str)` permits reading files inside `workspace_dir` as well as authorized external configuration directories (`allowed_read_dirs`, e.g. `~/.microharness`), enabling global skill inspection while keeping mutations sandboxed.
 * **Clean Log Isolation**:
-  * Raw spillover logs are routed to `run_dir/logs/` rather than polluting the user's project root with `.logs/` folders.
+  * Raw spillover logs are routed to `runs_dir/<run_id>/logs/` (defaulting to `~/.microharness/runs/`) rather than polluting the user's project root with `.logs/` or `.runs/` folders.
 * **Bash Subprocess Execution**:
   * Runs commands in `cwd=workspace_dir`.
   * Enforces strict timeouts (returns exit code 124 on timeout).
@@ -162,7 +162,7 @@ Tools implement the `Tool` Protocol: `name`, `description`, `parameters` (JSON S
 
 #### Massive Output Handling (Head/Tail Truncation + Spillover)
 When a command outputs excessive text (e.g. `> 2,000` chars):
-1. **Spill to Disk**: The full unedited output is saved to `.runs/<run_id>/logs/step_<N>_<tool>.log`.
+1. **Spill to Disk**: The full unedited output is saved to `runs_dir/<run_id>/logs/step_<N>_<tool>.log` (under `~/.microharness/runs/`).
 2. **Head + Tail Truncation**: Preserves the first $1/3$ (setup/context) and last $2/3$ (errors/stack traces) of the character allowance.
 3. **Explicit Pointer**: Injects a notice directing the agent to use `grep` or `read_file` on the spill file if it needs more detail.
 4. **Zero False Truncation**: When output is below threshold, output is untouched and zero log files are created.

@@ -938,6 +938,41 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(cmds["test"][0], "Run Tests Fast")
         self.assertEqual(cmds["test"][2], "project")
 
+    def test_runs_dir_precedence_and_global_default(self):
+        """Invariant: runs_dir defaults to global_dir / 'runs' unless overridden by config or argument."""
+        global_dir = Path(tempfile.mkdtemp(prefix="global_runs_")).resolve()
+        project_dir = Path(tempfile.mkdtemp(prefix="project_runs_")).resolve()
+
+        # 1. Default fallback: global_dir / "runs"
+        h1 = Harness(
+            model=MockModel([]), workspace_dir=project_dir, global_dir=global_dir, verbose=False
+        )
+        self.assertEqual(h1.runs_dir, (global_dir / "runs").resolve())
+
+        # 2. Config override: .microharness/config.json specifying "runs_dir"
+        custom_runs = Path(tempfile.mkdtemp(prefix="custom_runs_")).resolve()
+        dot_mh = project_dir / ".microharness"
+        dot_mh.mkdir(parents=True, exist_ok=True)
+        (dot_mh / "config.json").write_text(
+            json.dumps({"runs_dir": str(custom_runs)}), encoding="utf-8"
+        )
+
+        h2 = Harness(
+            model=MockModel([]), workspace_dir=project_dir, global_dir=global_dir, verbose=False
+        )
+        self.assertEqual(h2.runs_dir, custom_runs)
+
+        # 3. Explicit argument override wins over config
+        explicit_runs = Path(tempfile.mkdtemp(prefix="explicit_runs_")).resolve()
+        h3 = Harness(
+            model=MockModel([]),
+            workspace_dir=project_dir,
+            global_dir=global_dir,
+            runs_dir=explicit_runs,
+            verbose=False,
+        )
+        self.assertEqual(h3.runs_dir, explicit_runs)
+
 
 if __name__ == "__main__":
     unittest.main()

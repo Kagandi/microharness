@@ -217,6 +217,11 @@ def main():
         default=None,
         help="API key (env: MODEL_API_KEY, OPENROUTER_API_KEY, or ~/.microharness/config.json)",
     )
+    parser.add_argument(
+        "--runs-dir",
+        default=None,
+        help="Directory to store runs, logs, and traces (default: ~/.microharness/runs)",
+    )
     args = parser.parse_args()
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
@@ -225,6 +230,13 @@ def main():
     global_config = load_global_config(global_dir)
     project_config = load_project_config(target_dir)
     config = {**global_config, **project_config}
+
+    configured_runs_dir = args.runs_dir or config.get("runs_dir")
+    runs_dir = (
+        Path(configured_runs_dir).resolve()
+        if configured_runs_dir
+        else (global_dir / "runs").resolve()
+    )
 
     # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > project config.json > global config.json > Fallback)
     endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
@@ -271,6 +283,7 @@ def main():
                 return Harness(
                     model=model,
                     global_dir=global_dir,
+                    runs_dir=runs_dir,
                     sandbox=True,
                     evaluator=evaluator,
                     verbose=True,
@@ -280,7 +293,7 @@ def main():
                 harness_factory=harness_factory,
                 tasks=suite,
                 suite_name="Mini-SWE",
-                output_dir=".runs",
+                output_dir=runs_dir,
                 verbose=True,
             )
             return
@@ -292,6 +305,7 @@ def main():
             harness = Harness(
                 model=model,
                 global_dir=global_dir,
+                runs_dir=runs_dir,
                 sandbox=True,
                 evaluator=evaluator,
                 verbose=True,
@@ -315,6 +329,7 @@ def main():
         model=model,
         workspace_dir=target_dir,
         global_dir=global_dir,
+        runs_dir=runs_dir,
         sandbox=sandbox,
         verbose=True,
     )

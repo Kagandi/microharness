@@ -162,7 +162,7 @@ uv run microharness --demo greeting
   3. `auth_middleware`: HTTP auth middleware case-insensitive headers & whitespace tolerance.
   4. `lru_ttl_cache`: LRU cache with TTL updating existing keys & refreshing MRU order.
   5. `query_builder`: SQL query builder AST precedence grouping & single-quote escaping.
-* **Automated Scorecard & JSON Telemetry**: Generates a formatted summary table in the terminal and exports comprehensive JSON results to `.runs/benchmark_report.json`.
+* **Automated Scorecard & JSON Telemetry**: Generates a formatted summary table in the terminal and exports comprehensive JSON results to `~/.microharness/runs/benchmark_report.json`.
 
 ---
 
@@ -188,8 +188,8 @@ harness.run_interactive("Help me refactor the database layer")
 ## 🔑 Key Educational Paradigms Demonstrated
 
 1. **In-Place Project Operation vs. Sandboxing (`core/environment.py`)**
-   - By default, operates directly on existing project files.
-   - Optional `--sandbox` creates an isolated scratchpad in `.runs/`.
+   - By default, operates directly on existing project files with zero root directory pollution.
+   - Optional `--sandbox` creates an isolated scratchpad in `~/.microharness/runs/` (or `--runs-dir`).
    - Prevents path traversal outside project boundaries while permitting read access to authorized global directories (`allowed_read_dirs`).
    - Executes bash with timeouts and combined stdout/stderr.
 
@@ -208,7 +208,7 @@ harness.run_interactive("Help me refactor the database layer")
 
 5. **Large Log Handling & Spillover (`core/tools.py`)**
    - Massive command outputs are head + tail truncated.
-   - The full, raw output is spilled to `.runs/<run_id>/logs/` so it never pollutes the user's project root.
+   - The full, raw output is spilled to `~/.microharness/runs/<run_id>/logs/` so it never pollutes the user's project root.
 
 6. **Proactive 80% Context Compaction & Memory Optimization (`core/memory.py`)**
    - Proactively prunes older tool observations at an 80% high-water mark (`trigger_ratio = 0.80`), keeping 20% reserved for output tokens and model reasoning.
@@ -220,7 +220,7 @@ harness.run_interactive("Help me refactor the database layer")
 7. **Git Patch Export (`patch.diff`) & Tracing (`core/tracer.py`)**
    - Automatic git diff extraction: generates `patch.diff` for coding tasks in git repositories.
    - Real-time terminal streaming of thoughts, actions, observations, truncations, and compactions.
-   - Persists machine-readable [`trace.json`](file:///Users/dimakagan/Projects/mini-harness/.runs) and human-readable [`trace.md`](file:///Users/dimakagan/Projects/mini-harness/.runs) for every run.
+   - Persists machine-readable `trace.json` and human-readable `trace.md` in `~/.microharness/runs/<run_id>/` for every run.
 
 8. **Automated Evaluation (`core/evaluator.py`)**
    - Evaluators test whether the agent actually succeeded (e.g. running test commands or asserting file contents).
