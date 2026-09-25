@@ -10,7 +10,7 @@ from core.environment import Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import Model
+from core.model import Model, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import BashTool, EditFileTool, ReadFileTool, Tool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
@@ -200,6 +200,7 @@ class Harness:
         max_tool_chars: int | None = None,
         max_context_chars: int | None = None,
         trigger_ratio: float | None = None,
+        cache_ttl: str | None = None,
         verbose: bool = True,
     ):
         self.model = model
@@ -238,7 +239,26 @@ class Harness:
             if trigger_ratio is not None
             else float(self.merged_config.get("trigger_ratio", 0.80))
         )
+        configured_cache_ttl = (
+            cache_ttl if cache_ttl is not None else self.merged_config.get("cache_ttl", "5m")
+        )
+        self.cache_ttl = normalize_cache_ttl(configured_cache_ttl)
+        if hasattr(self.model, "set_cache_ttl"):
+            self.model.set_cache_ttl(self.cache_ttl)
         self.verbose = verbose
+
+    def set_cache_ttl(self, ttl: str | None) -> str | None:
+        """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
+        self.cache_ttl = normalize_cache_ttl(ttl)
+        if hasattr(self.model, "set_cache_ttl"):
+            return self.model.set_cache_ttl(self.cache_ttl)
+        return self.cache_ttl
+
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Returns prompt cache TTL and token performance metrics."""
+        if hasattr(self.model, "get_cache_stats"):
+            return self.model.get_cache_stats()
+        return {"cache_ttl": self.cache_ttl}
 
     def _setup_run(
         self,
@@ -440,9 +460,9 @@ class Harness:
 
         print("\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
-        print(
-            "💡 Commands: /compact (prune memory) | /status (context info) | /new (reset) | /help | /exit\n"
-        )
+        cache_label = self.cache_ttl.upper() if self.cache_ttl else "OFF"
+        print(f"⚡ Prompt Caching: {cache_label}")
+        print("💡 Commands: /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n")
 
         step_idx = 1
         has_pending_turn = True
@@ -499,10 +519,15 @@ class Harness:
 
             elif cmd in ("/help", "help"):
                 print("\nAvailable commands:")
-                print("  /status   - Show context window size, message breakdown, and budget")
-                print("  /compact  - Manually collapse older observations to free context")
-                print("  /new      - Clear conversation history while keeping workspace files")
-                print("  /exit     - Save session trace and exit")
+                print("  /cache [5m|1h|off] - View or switch prompt caching duration on the fly")
+                print(
+                    "  /status            - Show context window size, message breakdown, and budget"
+                )
+                print("  /compact           - Manually collapse older observations to free context")
+                print(
+                    "  /new               - Clear conversation history while keeping workspace files"
+                )
+                print("  /exit              - Save session trace and exit")
                 if custom_commands:
                     print("\nCustom slash commands (from commands/):")
                     for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
@@ -519,8 +544,56 @@ class Harness:
                 )
                 print(
                     f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
-                    f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools\n"
+                    f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
                 )
+                c_stats = self.get_cache_stats()
+                ttl_val = c_stats.get("cache_ttl")
+                print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
+                if c_stats.get("total_prompt_tokens"):
+                    cached = c_stats.get("total_cached_tokens", 0)
+                    total = c_stats.get("total_prompt_tokens", 0)
+                    rate = c_stats.get("cache_hit_rate_pct", 0.0)
+                    print(
+                        f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n"
+                    )
+                else:
+                    print()
+                continue
+
+            elif cmd.startswith("/cache") or cmd == "cache":
+                parts = user_input.strip().split()
+                if len(parts) == 1:
+                    stats = self.get_cache_stats()
+                    curr_ttl = stats.get("cache_ttl")
+                    if curr_ttl:
+                        desc = (
+                            "5 minutes (Standard Ephemeral)"
+                            if curr_ttl == "5m"
+                            else "1 hour (Extended Beta)"
+                        )
+                        print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
+                    else:
+                        print("\n⚡ Prompt Caching: DISABLED (off)")
+                    if stats.get("total_prompt_tokens"):
+                        cached = stats.get("total_cached_tokens", 0)
+                        total = stats.get("total_prompt_tokens", 0)
+                        rate = stats.get("cache_hit_rate_pct", 0.0)
+                        print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
+                    print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
+                    continue
+
+                target_ttl = parts[1].lower().strip()
+                try:
+                    new_ttl = self.set_cache_ttl(target_ttl)
+                    if new_ttl:
+                        desc = "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
+                        print(
+                            f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
+                        )
+                    else:
+                        print("\n⚡ Prompt caching disabled for subsequent turns.\n")
+                except ValueError as exc:
+                    print(f"\n❌ {exc}\n")
                 continue
 
             elif cmd in ("/compact", "compact"):

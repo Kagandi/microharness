@@ -973,6 +973,43 @@ class TestHarnessIntegration(unittest.TestCase):
         )
         self.assertEqual(h3.runs_dir, explicit_runs)
 
+    def test_harness_cache_ttl_on_the_fly_and_config(self):
+        model = MockModel([], cache_ttl="5m")
+        harness = Harness(
+            model=model,
+            runs_dir=self.runs_dir,
+            cache_ttl="5m",
+            verbose=False,
+        )
+        self.assertEqual(harness.cache_ttl, "5m")
+        self.assertEqual(model.cache_ttl, "5m")
+
+        # Switch to 1h on the fly
+        res = harness.set_cache_ttl("1h")
+        self.assertEqual(res, "1h")
+        self.assertEqual(harness.cache_ttl, "1h")
+        self.assertEqual(model.cache_ttl, "1h")
+
+        # Switch to off on the fly
+        res_off = harness.set_cache_ttl("off")
+        self.assertIsNone(res_off)
+        self.assertIsNone(harness.cache_ttl)
+        self.assertIsNone(model.cache_ttl)
+
+        stats = harness.get_cache_stats()
+        self.assertIsNone(stats.get("cache_ttl"))
+
+        # Config precedence
+        project_dir = Path(tempfile.mkdtemp(prefix="project_cache_"))
+        dot_mh = project_dir / ".microharness"
+        dot_mh.mkdir(parents=True, exist_ok=True)
+        (dot_mh / "config.json").write_text(json.dumps({"cache_ttl": "1h"}), encoding="utf-8")
+
+        m2 = MockModel([])
+        h2 = Harness(model=m2, workspace_dir=project_dir, runs_dir=self.runs_dir, verbose=False)
+        self.assertEqual(h2.cache_ttl, "1h")
+        self.assertEqual(m2.cache_ttl, "1h")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,7 +113,8 @@ When you chat with the agent, the harness maintains persistent memory and render
 ### Slash Commands (No Model Call)
 You can inspect or control the harness runtime directly:
 
-* **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage).
+* **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
+* **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
 * **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
 * **`/new`**: Starts a fresh conversation context while keeping all your project files intact.
 * **`/help`**: Lists available commands.

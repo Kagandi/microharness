@@ -222,6 +222,12 @@ def main():
         default=None,
         help="Directory to store runs, logs, and traces (default: ~/.microharness/runs)",
     )
+    parser.add_argument(
+        "--cache-ttl",
+        choices=["5m", "1h", "off"],
+        default=None,
+        help="Prompt cache duration: 5m (default ephemeral), 1h (extended beta), or off (env: CACHE_TTL or config.json)",
+    )
     args = parser.parse_args()
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
@@ -237,6 +243,7 @@ def main():
         if configured_runs_dir
         else (global_dir / "runs").resolve()
     )
+    cache_ttl = args.cache_ttl or os.getenv("CACHE_TTL") or config.get("cache_ttl", "5m")
 
     # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > project config.json > global config.json > Fallback)
     endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
@@ -254,11 +261,13 @@ def main():
     )
 
     if endpoint:
-        print(f"🔌 Connected to: {endpoint} (model: {model_name})")
+        cache_lbl = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
+        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl})")
         model: Model = HttpChatModel(
             base_url=endpoint,
             model=model_name,
             api_key=api_key,
+            cache_ttl=cache_ttl,
         )
     else:
         print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
@@ -286,6 +295,7 @@ def main():
                     runs_dir=runs_dir,
                     sandbox=True,
                     evaluator=evaluator,
+                    cache_ttl=cache_ttl,
                     verbose=True,
                 )
 
@@ -308,6 +318,7 @@ def main():
                 runs_dir=runs_dir,
                 sandbox=True,
                 evaluator=evaluator,
+                cache_ttl=cache_ttl,
                 verbose=True,
             )
             result = harness.run(task)
@@ -331,6 +342,7 @@ def main():
         global_dir=global_dir,
         runs_dir=runs_dir,
         sandbox=sandbox,
+        cache_ttl=cache_ttl,
         verbose=True,
     )
 

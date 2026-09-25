@@ -255,7 +255,8 @@ while not done:
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
 * **Interactive Meta-Commands & Resilience**:
   * Graceful interruption: Hitting `Ctrl+C` during an active tool step cancels the step and returns cleanly to the prompt without aborting the session.
-  * `/status`: Displays context window usage (chars and estimated tokens) and message role counts.
+  * `/cache [5m|1h|off]`: Inspects or dynamically toggles prompt caching TTL on the fly (`5m` standard ephemeral or `1h` extended beta).
+  * `/status`: Displays context window usage (chars and estimated tokens), message role counts, and prompt cache hit metrics.
   * `/compact`: Triggers manual memory compaction.
   * `/new`: Resets conversation context while preserving workspace files.
   * `/help`: Lists available slash commands.
