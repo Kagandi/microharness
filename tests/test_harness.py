@@ -17,7 +17,7 @@ from core.harness import (
 )
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import MockModel, ResettableModel
+from core.model import MockModel
 from core.tools import EditFileTool, ToolRegistry, WriteFileTool
 from core.types import Message, Task, ToolCall
 
@@ -1297,23 +1297,33 @@ class TestHarnessIntegration(unittest.TestCase):
             "● custom_query(target='users_table')",
         )
 
-        # 5. Test custom formatter fail-soft on malformed / non-dict args
+        # 5. Test custom formatter fail-soft on malformed / non-dict args with warning
         try:
             register_action_formatter(
                 "strict_dict_tool",
                 lambda args: f"Strict({args['key']})",  # assumes dict, raises TypeError on string
             )
-            # When passed a non-dict arg (like a string or list), must fail-soft without raising
-            failsoft_out = _format_action_summary(
-                "strict_dict_tool",
-                "malformed_string_args",
-                color=False,
-            )
-            self.assertEqual(failsoft_out, "● strict_dict_tool(malformed_string_args)")
+            import warnings
+
+            with warnings.catch_warnings(record=True) as recorded_warnings:
+                warnings.simplefilter("always")
+                failsoft_out = _format_action_summary(
+                    "strict_dict_tool",
+                    "malformed_string_args",
+                    color=False,
+                )
+                self.assertEqual(failsoft_out, "● strict_dict_tool(malformed_string_args)")
+                self.assertEqual(len(recorded_warnings), 1)
+                self.assertIn(
+                    "Action formatter for tool 'strict_dict_tool' raised",
+                    str(recorded_warnings[0].message),
+                )
         finally:
             unregister_action_formatter("strict_dict_tool")
 
     def test_mock_model_reset_composition_factory(self):
+        from main import create_benchmark_harness_factory
+
         # 1-entry script: executes write_file on step 0, exhausted on step 1
         script = [
             (
@@ -1328,15 +1338,16 @@ class TestHarnessIntegration(unittest.TestCase):
             )
         ]
         model = MockModel(script)
-
-        # The composition-site factory resets model between tasks
-        def make_harness():
-            if isinstance(model, ResettableModel):
-                model.reset()
-            return Harness(model=model, runs_dir=self.runs_dir, verbose=False)
+        factory = create_benchmark_harness_factory(
+            model=model,
+            global_dir=Path(tempfile.mkdtemp()),
+            runs_dir=Path(self.runs_dir),
+            verbose=False,
+        )
+        dummy_eval = FileContentEvaluator("flag.txt", "active")
 
         task1 = Task(id="t1", instruction="do 1", max_steps=2)
-        h1 = make_harness()
+        h1 = factory(dummy_eval)
         res1 = h1.run(task1)
         self.assertEqual(res1.finish_reason, "completed")
         self.assertTrue((Path(res1.workspace_path) / "flag.txt").exists())
@@ -1346,10 +1357,10 @@ class TestHarnessIntegration(unittest.TestCase):
         )
 
         task2 = Task(id="t2", instruction="do 2", max_steps=2)
-        h2 = make_harness()
+        h2 = factory(dummy_eval)
         res2 = h2.run(task2)
         self.assertEqual(res2.finish_reason, "completed")
-        # If reset() was not called by the factory, task 2 starts exhausted and fails this assertion!
+        # If reset() was not called by create_benchmark_harness_factory, task 2 starts exhausted and fails this assertion!
         self.assertTrue((Path(res2.workspace_path) / "flag.txt").exists())
         self.assertEqual(
             (Path(res2.workspace_path) / "flag.txt").read_text(encoding="utf-8"),

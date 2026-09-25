@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import (
@@ -299,6 +299,35 @@ def _print_run_summary(result: RunResult) -> None:
     print("=" * 60)
 
 
+def create_benchmark_harness_factory(
+    model: Model,
+    global_dir: Path,
+    runs_dir: Path,
+    use_docker: bool = False,
+    docker_image: str | None = None,
+    cache_ttl: str | None = None,
+    verbose: bool = True,
+) -> Callable[[Evaluator], Harness]:
+    """Creates a harness factory for benchmark suites that resets ResettableModel between tasks."""
+
+    def factory(ev: Evaluator) -> Harness:
+        if isinstance(model, ResettableModel):
+            model.reset()
+        return Harness(
+            model=model,
+            global_dir=global_dir,
+            runs_dir=runs_dir,
+            sandbox=True,
+            docker=use_docker,
+            docker_image=docker_image,
+            evaluator=ev,
+            cache_ttl=cache_ttl,
+            verbose=verbose,
+        )
+
+    return factory
+
+
 def _dispatch_benchmark(
     args: argparse.Namespace,
     config: dict[str, Any],
@@ -327,23 +356,16 @@ def _dispatch_benchmark(
                 if args.timeout:
                     t.timeout_seconds = args.timeout
 
-        def _create_mini_swe_harness(ev: Evaluator) -> Harness:
-            if isinstance(model, ResettableModel):
-                model.reset()
-            return Harness(
+        run_benchmark_suite(
+            harness_factory=create_benchmark_harness_factory(
                 model=model,
                 global_dir=global_dir,
                 runs_dir=runs_dir,
-                sandbox=True,
-                docker=use_docker,
+                use_docker=use_docker,
                 docker_image=docker_image,
-                evaluator=ev,
                 cache_ttl=cache_ttl,
                 verbose=True,
-            )
-
-        run_benchmark_suite(
-            harness_factory=_create_mini_swe_harness,
+            ),
             tasks=suite,
             suite_name="Mini-SWE",
             output_dir=runs_dir,
@@ -379,23 +401,16 @@ def _dispatch_benchmark(
             print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
             return True
 
-        def _create_deepswe_harness(ev: Evaluator) -> Harness:
-            if isinstance(model, ResettableModel):
-                model.reset()
-            return Harness(
+        run_benchmark_suite(
+            harness_factory=create_benchmark_harness_factory(
                 model=model,
                 global_dir=global_dir,
                 runs_dir=runs_dir,
-                sandbox=True,
-                docker=use_docker,
+                use_docker=use_docker,
                 docker_image=docker_image,
-                evaluator=ev,
                 cache_ttl=cache_ttl,
                 verbose=True,
-            )
-
-        run_benchmark_suite(
-            harness_factory=_create_deepswe_harness,
+            ),
             tasks=suite,
             suite_name="DeepSWE-mini",
             output_dir=runs_dir,

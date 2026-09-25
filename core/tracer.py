@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -88,7 +89,11 @@ def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
     if formatter:
         try:
             text = formatter(args)
-        except Exception:
+        except Exception as exc:
+            warnings.warn(
+                f"Action formatter for tool '{name}' raised exception: {exc}. Falling back to default format.",
+                stacklevel=2,
+            )
             text = None
 
     if text is None:
