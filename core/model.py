@@ -109,24 +109,23 @@ class HttpChatModel:
             "cache_hit_rate_pct": round(hit_rate, 1),
         }
 
-    def generate(
-        self, messages: list[Message], tools: list[dict[str, Any]]
-    ) -> tuple[str, list[ToolCall]]:
-        req_headers = {
+    def _build_headers(self) -> dict[str, str]:
+        headers = {
             "Content-Type": "application/json",
             **self.extra_headers,
         }
         if self.api_key:
-            req_headers["Authorization"] = f"Bearer {self.api_key}"
-
-        # Inject provider-specific cache headers when prompt caching is active
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if self.cache_ttl == "1h":
-            req_headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11"
-            req_headers["X-OpenRouter-Cache-TTL"] = "3600"
+            headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11"
+            headers["X-OpenRouter-Cache-TTL"] = "3600"
         elif self.cache_ttl == "5m":
-            req_headers["X-OpenRouter-Cache-TTL"] = "300"
+            headers["X-OpenRouter-Cache-TTL"] = "300"
+        return headers
 
-        # Format messages with cache breakpoint on system prompt if caching is active
+    def _build_payload(
+        self, messages: list[Message], tools: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         formatted_messages: list[dict[str, Any]] = []
         system_cached = False
         for msg in messages:
@@ -154,52 +153,46 @@ class HttpChatModel:
                 cache_ctrl = {"type": "ephemeral"}
                 if self.cache_ttl == "1h":
                     cache_ctrl["ttl"] = "1h"
-                # Attach cache_control to the last tool definition for Anthropic / OpenRouter
                 tools_payload = [dict(t) for t in tools]
                 tools_payload[-1] = {**tools_payload[-1], "cache_control": cache_ctrl}
                 payload["tools"] = tools_payload
             else:
                 payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        return payload
 
+    def _send_request(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         req = urllib.request.Request(
             self.endpoint,
             data=json.dumps(payload).encode("utf-8"),
-            headers=req_headers,
+            headers=headers,
             method="POST",
         )
-
         max_retries = 4
         base_delay = 2.0
-        res_body: dict[str, Any] = {}
-
         for attempt in range(max_retries):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                    res_body = json.loads(response.read().decode("utf-8"))
-                    break
+                    return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
-                # Retry on rate limits (429) and transient server errors (500, 502, 503, 504)
                 if exc.code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                    sleep_time = base_delay * (2**attempt)
-                    time.sleep(sleep_time)
+                    time.sleep(base_delay * (2**attempt))
                     continue
                 raise RuntimeError(
                     f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
                 ) from exc
             except urllib.error.URLError as exc:
                 if attempt < max_retries - 1:
-                    sleep_time = base_delay * (2**attempt)
-                    time.sleep(sleep_time)
+                    time.sleep(base_delay * (2**attempt))
                     continue
                 raise ConnectionError(
                     f"Could not connect to model endpoint at {self.endpoint}.\n"
                     f"Is the server running and reachable? (Detail: {exc.reason})"
                 ) from exc
+        return {}
 
-        # Extract usage and track cumulative prompt caching metrics
-        usage = res_body.get("usage", {})
+    def _update_usage(self, usage: dict[str, Any]) -> None:
         self.last_usage = usage
         prompt_toks = usage.get("prompt_tokens", 0) or 0
         comp_toks = usage.get("completion_tokens", 0) or 0
@@ -217,29 +210,42 @@ class HttpChatModel:
         self.total_completion_tokens += comp_toks
         self.total_cached_tokens += cached_toks
 
+    def _parse_tool_calls(self, raw_tool_calls: list[dict[str, Any]] | None) -> list[ToolCall]:
+        if not raw_tool_calls:
+            return []
+        tool_calls: list[ToolCall] = []
+        for raw_tc in raw_tool_calls:
+            func_data = raw_tc["function"]
+            args_raw = func_data.get("arguments", "{}")
+            if isinstance(args_raw, str):
+                try:
+                    parsed_args = json.loads(args_raw)
+                except json.JSONDecodeError:
+                    parsed_args = {"_raw_arguments": args_raw}
+            else:
+                parsed_args = args_raw or {}
+
+            tool_calls.append(
+                ToolCall(
+                    id=raw_tc["id"],
+                    name=func_data["name"],
+                    arguments=parsed_args,
+                )
+            )
+        return tool_calls
+
+    def generate(
+        self, messages: list[Message], tools: list[dict[str, Any]]
+    ) -> tuple[str, list[ToolCall]]:
+        headers = self._build_headers()
+        payload = self._build_payload(messages, tools)
+        res_body = self._send_request(payload, headers)
+
+        self._update_usage(res_body.get("usage", {}))
+
         choice = res_body["choices"][0]["message"]
         content = choice.get("content") or ""
-        tool_calls: list[ToolCall] = []
-
-        if choice.get("tool_calls"):
-            for raw_tc in choice["tool_calls"]:
-                func_data = raw_tc["function"]
-                args_raw = func_data.get("arguments", "{}")
-                if isinstance(args_raw, str):
-                    try:
-                        parsed_args = json.loads(args_raw)
-                    except json.JSONDecodeError:
-                        parsed_args = {"_raw_arguments": args_raw}
-                else:
-                    parsed_args = args_raw or {}
-
-                tool_calls.append(
-                    ToolCall(
-                        id=raw_tc["id"],
-                        name=func_data["name"],
-                        arguments=parsed_args,
-                    )
-                )
+        tool_calls = self._parse_tool_calls(choice.get("tool_calls"))
 
         return content, tool_calls
 
