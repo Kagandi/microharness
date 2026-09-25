@@ -149,7 +149,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 106 unit and integration tests run in ~6s)*
+*(All 107 unit and integration tests run in ~6s)*
 
 ### 3. Run Mini-SWE for Rapid Sanity Testing
 Run the lightweight 5-task sanity test suite before launching heavy benchmarks:

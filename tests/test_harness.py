@@ -17,7 +17,7 @@ from core.harness import (
 )
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import MockModel
+from core.model import MockModel, ResettableModel
 from core.tools import EditFileTool, ToolRegistry, WriteFileTool
 from core.types import Message, Task, ToolCall
 
@@ -1297,7 +1297,23 @@ class TestHarnessIntegration(unittest.TestCase):
             "● custom_query(target='users_table')",
         )
 
-    def test_mock_model_reset_multi_task(self):
+        # 5. Test custom formatter fail-soft on malformed / non-dict args
+        try:
+            register_action_formatter(
+                "strict_dict_tool",
+                lambda args: f"Strict({args['key']})",  # assumes dict, raises TypeError on string
+            )
+            # When passed a non-dict arg (like a string or list), must fail-soft without raising
+            failsoft_out = _format_action_summary(
+                "strict_dict_tool",
+                "malformed_string_args",
+                color=False,
+            )
+            self.assertEqual(failsoft_out, "● strict_dict_tool(malformed_string_args)")
+        finally:
+            unregister_action_formatter("strict_dict_tool")
+
+    def test_mock_model_reset_composition_factory(self):
         # 1-entry script: executes write_file on step 0, exhausted on step 1
         script = [
             (
@@ -1312,10 +1328,16 @@ class TestHarnessIntegration(unittest.TestCase):
             )
         ]
         model = MockModel(script)
-        harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
+
+        # The composition-site factory resets model between tasks
+        def make_harness():
+            if isinstance(model, ResettableModel):
+                model.reset()
+            return Harness(model=model, runs_dir=self.runs_dir, verbose=False)
 
         task1 = Task(id="t1", instruction="do 1", max_steps=2)
-        res1 = harness.run(task1)
+        h1 = make_harness()
+        res1 = h1.run(task1)
         self.assertEqual(res1.finish_reason, "completed")
         self.assertTrue((Path(res1.workspace_path) / "flag.txt").exists())
         self.assertEqual(
@@ -1324,14 +1346,33 @@ class TestHarnessIntegration(unittest.TestCase):
         )
 
         task2 = Task(id="t2", instruction="do 2", max_steps=2)
-        res2 = harness.run(task2)
+        h2 = make_harness()
+        res2 = h2.run(task2)
         self.assertEqual(res2.finish_reason, "completed")
-        # If reset() did NOT run, task 2 starts with exhausted script, writes no flag, and fails this assertion!
+        # If reset() was not called by the factory, task 2 starts exhausted and fails this assertion!
         self.assertTrue((Path(res2.workspace_path) / "flag.txt").exists())
         self.assertEqual(
             (Path(res2.workspace_path) / "flag.txt").read_text(encoding="utf-8"),
             "active",
         )
+
+    def test_run_dir_uniqueness_same_task_same_second(self):
+        harness = Harness(model=MockModel([("Done", [])]), runs_dir=self.runs_dir, verbose=False)
+        _, _, _, _, _, run_dir1 = harness._setup_run(
+            task_id="same_second_task",
+            system_prompt="",
+            initial_instruction="test",
+            initial_files={},
+        )
+        _, _, _, _, _, run_dir2 = harness._setup_run(
+            task_id="same_second_task",
+            system_prompt="",
+            initial_instruction="test",
+            initial_files={},
+        )
+        self.assertNotEqual(run_dir1, run_dir2)
+        self.assertTrue(run_dir1.exists())
+        self.assertTrue(run_dir2.exists())
 
 
 if __name__ == "__main__":

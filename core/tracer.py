@@ -84,13 +84,19 @@ register_action_formatter("edit_file", _format_edit_file_action)
 def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
     """Formats a tool call concisely using registered formatters or a generic fallback."""
     formatter = _ACTION_FORMATTERS.get(name)
+    text: str | None = None
     if formatter:
-        text = formatter(args)
-    elif isinstance(args, dict):
-        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        text = f"● {name}({args_str})"
-    else:
-        text = f"● {name}({args})"
+        try:
+            text = formatter(args)
+        except Exception:
+            text = None
+
+    if text is None:
+        if isinstance(args, dict):
+            args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            text = f"● {name}({args_str})"
+        else:
+            text = f"● {name}({args})"
 
     return _bold(text) if color else text
 

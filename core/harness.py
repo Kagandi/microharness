@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -10,7 +11,7 @@ from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import Model, ResettableModel, normalize_cache_ttl
+from core.model import Model, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
     DEFAULT_MAX_TOOL_CHARS,
@@ -417,11 +418,9 @@ class Harness:
         docker_image: str | None = None,
         init_workdir: str | None = None,
     ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
-        if isinstance(self.model, ResettableModel):
-            self.model.reset()
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = self.runs_dir / f"{task_id}_{timestamp}"
+        run_id = f"{task_id}_{timestamp}_{uuid.uuid4().hex[:6]}"
+        run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
