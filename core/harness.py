@@ -273,6 +273,8 @@ class Harness:
         initial_instruction: str,
         initial_files: dict[str, str],
         force_sandbox: bool = False,
+        docker_image: str | None = None,
+        init_workdir: str | None = None,
     ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir = self.runs_dir / f"{task_id}_{timestamp}"
@@ -288,14 +290,17 @@ class Harness:
         else:
             workspace = self.explicit_workspace_dir
 
+        active_docker = self.docker or bool(docker_image)
+        active_image = docker_image or self.docker_image
         allowed_reads = [self.global_dir] if self.global_dir else []
-        if self.docker:
+        if active_docker:
             env: Environment = DockerEnvironment(
-                image=self.docker_image,
+                image=active_image,
                 workspace_dir=workspace,
                 logs_dir=logs_dir,
                 allowed_read_dirs=allowed_reads,
                 cleanup_on_teardown=True,
+                init_workdir=init_workdir,
             )
         else:
             env = Environment(
@@ -372,19 +377,24 @@ class Harness:
         run_start = time.time()
         system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
 
+        active_docker = self.docker or bool(task.docker_image)
+        active_image = task.docker_image or self.docker_image
+
         env, _, _, tracer, loop, run_dir = self._setup_run(
             task_id=task.id,
             system_prompt=system_prompt,
             initial_instruction=task.instruction,
             initial_files=task.initial_files,
-            force_sandbox=bool(task.initial_files),
+            force_sandbox=bool(task.initial_files) or bool(task.init_workdir),
+            docker_image=task.docker_image,
+            init_workdir=task.init_workdir,
         )
 
         if self.verbose:
             print(f"\n🚀 Starting Harness for Task: {task.id}")
             print(f"📁 Workspace: {env.workspace_dir}")
-            if self.docker:
-                print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
+            if active_docker:
+                print(f"🐳 Docker Sandbox: ACTIVE ({active_image})")
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
         finish_reason = "max_steps_exceeded"

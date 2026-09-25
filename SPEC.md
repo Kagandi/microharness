@@ -339,12 +339,27 @@ $$N_{\text{pings}} = \frac{0.75 \times B}{0.10 \times B} = \mathbf{7.5 \text{ pi
 
 ---
 
+### 3.11 DeepSWE-mini Benchmark Suite & Harbor Architecture (`benchmarks/harbor.py`)
+`microharness` natively supports the **Harbor task standard** and the **DeepSWE-mini** benchmark (curated from [Datacurve DeepSWE](https://github.com/datacurve-ai/deep-swe) and [`LocalLLaMA/deepswe-mini`](https://huggingface.co/datasets/LocalLLaMA/deepswe-mini)):
+* **16 Curated Real-World Repositories**: Across Python, Go, and TypeScript (`aiomonitor`, `bandit`, `ipython`, `narwhals`, `textual`, `prometheus-typed-label`, `prometheus-reload`, `valibot`, `dasel`, `expr`, `koota`, `ofetch`, `scc`, `termenv`, `dynamodb-toolbox`, `yaegi`).
+* **Zero-Dependency Harbor Parser**: Uses Python 3.11's standard library `tomllib` to extract task metadata (`task_id`, `base_commit_hash`, `docker_image`, `collect_cmd`) and `instruction.md`.
+* **Dynamic Container Synchronization**: Automatically starts isolated Docker containers, syncs container-baked repositories (`/app`) to the host workspace at NVMe speed, and symlinks container `/app` to `/workspace`.
+* **Programmatic Behavioral Verification**:
+  * Injects pristine hidden tests into `/tests/` dynamically at verification time (preventing test leaking to the agent).
+  * Automatically captures working tree git diffs against `base_commit_hash` to `/logs/artifacts/model.patch`.
+  * Executes `/tests/test.sh` via `DockerEnvironment.execute_bash()` and parses `/logs/verifier/reward.json`.
+  * Computes binary reward (0 or 1), partial score, and fail-to-pass / pass-to-pass test ratios.
+* **Pier Framework Adapter (`benchmarks/pier_agent.py`)**: Implements `BaseAgent` adapter so `microharness` can also be evaluated directly using Datacurve's official `pier run` CLI.
+
+---
+
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (80 passing tests in ~2.8s):
+All features are tested against rigorous, non-tautological standards in `tests/` (91 passing tests in ~5.8s):
 * `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner and task filtering.
-* `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
+* `test_harbor.py`: Verifies `task.toml` parsing, missing metadata rejection, missing file errors, evaluator DockerEnvironment enforcement, and task filtering.
+* `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes, Docker container lifecycle, command execution, and timeout enforcement.
 * `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors.
 * `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
 * `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing, cache TTL normalization, 5m/1h/off payload generation, dynamic on-the-fly TTL switching, and cumulative cache hit statistics.
 * `test_evaluator.py`: Strict equality assertions, missing target files, forbidden string rejection.
-* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, global config (`config.json`) cascading precedence, and harness on-the-fly cache TTL switching with config precedence.
+* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, global config (`config.json`) cascading precedence, dynamic cache TTL switching, and Docker sandboxing with evaluator assertions.

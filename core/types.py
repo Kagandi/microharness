@@ -69,6 +69,8 @@ class Task:
     initial_files: dict[str, str] = field(default_factory=dict)
     max_steps: int = 15
     timeout_seconds: float = 60.0
+    docker_image: str | None = None
+    init_workdir: str | None = None
 
 
 @dataclass

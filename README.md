@@ -183,6 +183,28 @@ uv run microharness --demo greeting
 
 ---
 
+## 🌐 DeepSWE-mini Benchmark Suite (Harbor Format & Docker)
+
+`microharness` natively supports **DeepSWE-mini** (curated from [Datacurve-AI DeepSWE](https://github.com/datacurve-ai/deep-swe) and [`LocalLLaMA/deepswe-mini`](https://huggingface.co/datasets/LocalLLaMA/deepswe-mini)):
+
+* **16 Curated Real-World Repositories**: Across Python, Go, and TypeScript (e.g. `aiomonitor`, `bandit`, `ipython`, `narwhals`, `textual`, `prometheus`, `valibot`, `dasel`).
+* **Harbor Standard Compliance**: Automatically parses `task.toml` metadata (via Python 3.11's standard library `tomllib`), pulls task ECR container images, mounts behavioral verifiers, and grades via `tests/grader.py`.
+* **Zero Dependency Container Sandboxing**: Spawns isolated Docker containers via **OrbStack** or Docker Desktop, syncs repo code at NVMe speed, and automatically captures `model.patch` diffs.
+
+```bash
+# Clone tasks once (only ~3.5MB repository metadata):
+git clone --depth 1 https://github.com/datacurve-ai/deep-swe datasets/deep-swe
+
+# Run a specific task in Docker with prompt caching:
+uv run microharness --benchmark deepswe-mini --task aiomonitor --docker
+
+# Run with official Datacurve Pier framework using microharness adapter:
+uvx --from datacurve-pier pier run -p datasets/deep-swe/tasks/aiomonitor-task-snapshots-diff \
+  --agent-import-path benchmarks.pier_agent:MicroharnessAgent --env docker
+```
+
+---
+
 ## 🔑 True Pluggability (Zero Code Modifications)
 
 Because components follow minimal Python `Protocols`, you can plug in any Model, Tool, or Evaluator from the outside without touching a single line of harness code:

@@ -187,9 +187,9 @@ def main():
     )
     parser.add_argument(
         "--benchmark",
-        choices=["mini-swe", "calculator", "all"],
+        choices=["mini-swe", "calculator", "all", "deepswe-mini"],
         default=None,
-        help="Run a benchmark suite (e.g. 'mini-swe')",
+        help="Run a benchmark suite (e.g. 'mini-swe', 'deepswe-mini')",
     )
     parser.add_argument(
         "--task",
@@ -318,6 +318,47 @@ def main():
                 harness_factory=harness_factory,
                 tasks=suite,
                 suite_name="Mini-SWE",
+                output_dir=runs_dir,
+                verbose=True,
+            )
+            return
+
+        elif bench_choice == "deepswe-mini":
+            from benchmarks.harbor import get_deepswe_mini_suite
+            from benchmarks.runner import run_benchmark_suite
+
+            dataset_dir = target_dir / "datasets" / "deep-swe" / "tasks"
+            if not dataset_dir.is_dir():
+                dataset_dir = Path("datasets/deep-swe/tasks").resolve()
+
+            if not dataset_dir.is_dir():
+                print("❌ DeepSWE dataset not found at datasets/deep-swe/tasks")
+                print(
+                    "Tip: Run `git clone --depth 1 https://github.com/datacurve-ai/deep-swe datasets/deep-swe` to download tasks."
+                )
+                return
+
+            suite = get_deepswe_mini_suite(dataset_dir=dataset_dir, task_filter=args.task)
+            if not suite:
+                print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
+                return
+
+            def harbor_harness_factory(evaluator: Evaluator) -> Harness:
+                return Harness(
+                    model=model,
+                    global_dir=global_dir,
+                    runs_dir=runs_dir,
+                    sandbox=True,
+                    docker=True,  # DeepSWE requires Docker sandboxing
+                    evaluator=evaluator,
+                    cache_ttl=cache_ttl,
+                    verbose=True,
+                )
+
+            run_benchmark_suite(
+                harness_factory=harbor_harness_factory,
+                tasks=suite,
+                suite_name="DeepSWE-mini",
                 output_dir=runs_dir,
                 verbose=True,
             )

@@ -217,6 +217,7 @@ class DockerEnvironment(Environment):
         container_name: str | None = None,
         cleanup_on_teardown: bool = True,
         docker_args: list[str] | None = None,
+        init_workdir: str | None = None,
     ):
         super().__init__(
             workspace_dir=workspace_dir,
@@ -227,6 +228,7 @@ class DockerEnvironment(Environment):
         self.image = image
         self.container_name = container_name or f"microharness_{uuid.uuid4().hex[:10]}"
         self.docker_args = docker_args or []
+        self.init_workdir = init_workdir
         self._container_started = False
         self._start_container()
 
@@ -261,6 +263,35 @@ class DockerEnvironment(Environment):
                 f"Failed to start Docker container '{self.container_name}' with image '{self.image}':\n{res.stderr.strip()}"
             )
         self._container_started = True
+
+        if self.init_workdir:
+            # Sync pre-baked files from container's internal workdir (e.g. /app) into host workspace
+            cp_res = subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{self.container_name}:{self.init_workdir}/.",
+                    str(self.workspace_dir),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if cp_res.returncode == 0:
+                # Symlink internal workdir to /workspace inside container so paths match
+                subprocess.run(
+                    [
+                        "docker",
+                        "exec",
+                        self.container_name,
+                        "bash",
+                        "-c",
+                        f"rm -rf {self.init_workdir} && ln -s /workspace {self.init_workdir}",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
 
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the Docker container at /workspace."""
