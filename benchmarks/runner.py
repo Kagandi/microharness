@@ -98,6 +98,22 @@ def run_benchmark_suite(
             )
         )
 
+        # Incrementally persist benchmark report after each task
+        if output_dir:
+            out_path = Path(output_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            report_file = out_path / f"{suite_name.lower().replace('-', '_')}_report.json"
+            cur_report = BenchmarkReport(
+                suite_name=suite_name,
+                total_tasks=len(tasks),
+                passed_tasks=sum(1 for t in task_reports if t.passed),
+                pass_rate=(sum(1 for t in task_reports if t.passed) / len(task_reports) * 100.0),
+                mean_score=(sum(t.score for t in task_reports) / len(task_reports)),
+                total_duration_s=time.time() - start_time,
+                tasks=task_reports,
+            )
+            report_file.write_text(json.dumps(cur_report.to_dict(), indent=2), encoding="utf-8")
+
     total_duration = time.time() - start_time
     total_tasks = len(task_reports)
     passed_tasks = sum(1 for t in task_reports if t.passed)
