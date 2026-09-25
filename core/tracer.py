@@ -1,9 +1,62 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
+from typing import Any
 
 from core.types import EvalResult, StepTrace, Task
+
+
+def _supports_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+
+def _dim(text: str) -> str:
+    return f"\033[2m{text}\033[0m" if _supports_color() else text
+
+
+def _bold(text: str) -> str:
+    return f"\033[1m{text}\033[0m" if _supports_color() else text
+
+
+def _red(text: str) -> str:
+    return f"\033[31m{text}\033[0m" if _supports_color() else text
+
+
+def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
+    """Formats a tool call concisely in modern developer CLI style."""
+    if not isinstance(args, dict):
+        text = f"$ {args}" if name == "bash" else f"● {name}({args})"
+        return _bold(text) if color else text
+
+    if name == "bash":
+        cmd = args.get("command", "").strip()
+        return _bold(f"$ {cmd}") if color else f"$ {cmd}"
+    elif name == "read_file":
+        path = args.get("path", "")
+        start = args.get("start_line")
+        end = args.get("end_line")
+        lines_info = f" (lines {start}-{end})" if start and end else ""
+        text = f"● Read {path}{lines_info}"
+        return _bold(text) if color else text
+    elif name == "write_file":
+        path = args.get("path", "")
+        content = args.get("content", "")
+        lines = len(content.splitlines()) if isinstance(content, str) else 0
+        text = f"● Write {path} ({lines} lines)"
+        return _bold(text) if color else text
+    elif name == "edit_file":
+        path = args.get("path", "")
+        text = f"● Edit {path}"
+        return _bold(text) if color else text
+    else:
+        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        text = f"● {name}({args_str})"
+        return _bold(text) if color else text
 
 
 class Tracer:
@@ -28,30 +81,56 @@ class Tracer:
         if not self.verbose:
             return
 
-        print(f"\n{'=' * 25} Step {step.step_index} ({step.duration_s:.2f}s) {'=' * 25}")
+        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s " + "─" * 40)
+        print(f"\n{divider}")
+
         model_text = step.model_response.get("content")
         tool_calls = step.model_response.get("tool_calls") or []
 
         if model_text:
-            print(f"🧠 Thought / Message:\n{model_text.strip()}")
+            print(f"{model_text.strip()}\n")
 
         if step.compaction_applied:
-            print("🧹 [Memory Compaction]: Pruned older observations to preserve context.")
+            print(_dim("🧹 [Memory Compaction]: Pruned older observations to preserve context.\n"))
 
-        for tc in tool_calls:
-            args_repr = json.dumps(tc.get("arguments", {}))
-            print(f"⚡ Action: {tc.get('name')}({args_repr})")
+        # Pair tool calls with tool results
+        results_by_id = {tr.get("call_id"): tr for tr in step.tool_results if tr.get("call_id")}
+        remaining_results = list(step.tool_results)
 
-        for tr in step.tool_results:
-            exit_info = f"exit={tr.get('exit_code')}"
-            trunc_info = " [TRUNCATED]" if tr.get("was_truncated") else ""
-            print(f"👁️ Observation ({exit_info}{trunc_info}):")
-            output = tr.get("output", "").strip()
-            # Indent observation for readable terminal output
-            for line in output.splitlines()[:15]:
-                print(f"   {line}")
-            if output.count("\n") > 15:
-                print(f"   ... ({output.count(chr(10)) - 15} more lines in observation)")
+        for i, tc in enumerate(tool_calls):
+            name = tc.get("name", "")
+            args = tc.get("arguments", {})
+            action_text = _format_action_summary(name, args, color=True)
+            print(action_text)
+
+            tr = results_by_id.get(tc.get("id")) or (
+                remaining_results[i] if i < len(remaining_results) else None
+            )
+            if tr in remaining_results:
+                remaining_results.remove(tr)
+
+            if tr:
+                self._print_tool_output(tr)
+
+        for tr in remaining_results:
+            self._print_tool_output(tr)
+
+    def _print_tool_output(self, tr: dict[str, Any]) -> None:
+        exit_code = tr.get("exit_code", 0)
+        if exit_code != 0:
+            print(_red(f"  ❌ (exit {exit_code})"))
+
+        output = tr.get("output", "").strip()
+        if not output:
+            return
+
+        lines = output.splitlines()
+        max_preview_lines = 15
+        for line in lines[:max_preview_lines]:
+            print(f"  {line}")
+        if len(lines) > max_preview_lines:
+            remaining = len(lines) - max_preview_lines
+            print(_dim(f"  ... ({remaining} more lines)"))
 
     def finalize(
         self,
@@ -137,28 +216,55 @@ class Tracer:
 
             content = s.model_response.get("content")
             if content:
-                lines.extend(["**Agent Response / Reasoning**:", f"```\n{content}\n```", ""])
+                lines.extend([content.strip(), ""])
 
             tool_calls = s.model_response.get("tool_calls") or []
-            for tc in tool_calls:
-                lines.extend(
-                    [
-                        f"**Action**: `{tc.get('name')}`",
-                        f"```json\n{json.dumps(tc.get('arguments', {}), indent=2)}\n```",
-                    ]
-                )
+            results_by_id = {tr.get("call_id"): tr for tr in s.tool_results if tr.get("call_id")}
+            remaining_results = list(s.tool_results)
 
-            for tr in s.tool_results:
+            for i, tc in enumerate(tool_calls):
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                tr = results_by_id.get(tc.get("id")) or (
+                    remaining_results[i] if i < len(remaining_results) else None
+                )
+                if tr in remaining_results:
+                    remaining_results.remove(tr)
+
+                if name == "bash":
+                    cmd = args.get("command", "").strip() if isinstance(args, dict) else str(args)
+                    lines.extend(["**Command** (`bash`):", f"```bash\n{cmd}\n```"])
+                elif name in ("read_file", "write_file", "edit_file"):
+                    action_summary = _format_action_summary(name, args, color=False)
+                    lines.append(f"**Action** (`{name}`): `{action_summary}`")
+                else:
+                    lines.extend(
+                        [
+                            f"**Action**: `{name}`",
+                            f"```json\n{json.dumps(args, indent=2)}\n```",
+                        ]
+                    )
+
+                if tr:
+                    trunc = " (Truncated)" if tr.get("was_truncated") else ""
+                    exit_code = tr.get("exit_code", 0)
+                    lines.extend(
+                        [
+                            f"**Output** (exit={exit_code}){trunc}:",
+                            f"```\n{tr.get('output', '').strip()}\n```",
+                            "",
+                        ]
+                    )
+
+            for tr in remaining_results:
                 trunc = " (Truncated)" if tr.get("was_truncated") else ""
                 lines.extend(
                     [
-                        f"**Observation** (Exit code: {tr.get('exit_code')}){trunc}:",
+                        f"**Output** (exit={tr.get('exit_code')}){trunc}:",
                         f"```\n{tr.get('output', '').strip()}\n```",
+                        "",
                     ]
                 )
-                if tr.get("raw_log_path"):
-                    lines.append(f"*Full log saved at: `{tr['raw_log_path']}`*")
-                lines.append("")
 
         if self.patch_diff:
             lines.extend(
