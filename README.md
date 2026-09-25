@@ -149,7 +149,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 71 unit and integration tests run in ~2.8s)*
+*(All 92 unit and integration tests run in ~5s)*
 
 ### 3. Run the Mini-SWE Benchmark Suite
 Run the full 5-task SWE benchmark suite or focus on a single task:
@@ -195,8 +195,11 @@ uv run microharness --demo greeting
 # Clone tasks once (only ~3.5MB repository metadata):
 git clone --depth 1 https://github.com/datacurve-ai/deep-swe datasets/deep-swe
 
-# Run a specific task in Docker with prompt caching:
-uv run microharness --benchmark deepswe-mini --task aiomonitor --docker
+# Run the entire 16-task DeepSWE-mini benchmark suite in Docker:
+uv run main.py --benchmark deepswe-mini --docker
+
+# Run a specific task with custom step & timeout budgets:
+uv run main.py --benchmark deepswe-mini --task aiomonitor --max-steps 500 --timeout 7200 --docker
 
 # Run with official Datacurve Pier framework using microharness adapter:
 uvx --from datacurve-pier pier run -p datasets/deep-swe/tasks/aiomonitor-task-snapshots-diff \
@@ -256,13 +259,13 @@ harness.run_interactive("Help me refactor the database layer")
    - **Session Files Modified Ledger**: Injects and maintains an active session ledger (`[Session Files Modified: file1.py, file2.py]`) across compactions at the safe prefix.
    - Preserves system prompt, initial task, and recent working turns.
 
-7. **Git Patch Export (`patch.diff`) & Tracing (`core/tracer.py`)**
+7. **Git Patch Export (`patch.diff`) & Modern CLI Tracing (`core/tracer.py`)**
    - Automatic git diff extraction: generates `patch.diff` for coding tasks in git repositories.
-   - Real-time terminal streaming of thoughts, actions, observations, truncations, and compactions.
+   - **Modern Developer CLI Output**: Eliminates academic ReAct tags (`Thought:` / `Action:` / `Observation:`) in favor of natural assistant speech, `$ <command>` execution, `● Read/Write/Edit <path>`, real-time duration headers, and clean output gutters.
    - Persists machine-readable `trace.json` and human-readable `trace.md` in `~/.microharness/runs/<run_id>/` for every run.
 
 8. **Automated Evaluation (`core/evaluator.py`)**
-   - Evaluators test whether the agent actually succeeded (e.g. running test commands or asserting file contents).
+   - Evaluators test whether the agent actually succeeded (e.g. running test commands, asserting file contents, or Docker-based SWE-bench graders).
 
 ---
 
@@ -283,9 +286,11 @@ microharness/
 │       └── review.md
 ├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration & CLI entrypoint
-├── benchmarks/         # Pure-Python Mini-SWE benchmark suite
-│   ├── mini_swe.py     # 5 real-world SWE tasks & PristineTestEvaluator
-│   └── runner.py       # Benchmark orchestrator, scorecard table & JSON export
+├── benchmarks/         # SWE benchmark suites & runners
+│   ├── mini_swe.py     # 5 real-world pure-Python SWE tasks & PristineTestEvaluator
+│   ├── harbor.py       # Harbor / DeepSWE-mini benchmark loader & Docker verifier adapter
+│   ├── pier_agent.py   # Datacurve Pier framework agent adapter (MicroharnessAgent)
+│   └── runner.py       # Benchmark orchestrator, scorecard table & incremental JSON report export
 ├── core/
 │   ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
 │   ├── prompts.py      # System prompt templates
@@ -295,10 +300,11 @@ microharness/
 │   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
 │   ├── loop.py         # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
-│   ├── tracer.py       # Telemetry collector & trace exporter
+│   ├── tracer.py       # Telemetry collector, modern CLI renderer & trace exporter
 │   └── harness.py      # Harness orchestrator with global config & commands support
 └── tests/
     ├── test_benchmarks.py  # Mini-SWE baseline failure, anti-cheating & reference tests
+    ├── test_harbor.py      # Harbor task parsing, Docker image validation & evaluator tests
     ├── test_environment.py # Path sandboxing & bash timeout tests
     ├── test_tools.py       # Tools, truncation & disk spillover tests
     ├── test_memory.py      # Conversation history, stats & 80% compaction tests
