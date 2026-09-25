@@ -282,12 +282,61 @@ while not done:
 
 ---
 
+### 3.10 Prompt Caching Economics & Dynamic TTL Architecture (`core/model.py`, `core/harness.py`)
+Modern coding agent transcripts regularly start at **25,000 to 60,000+ tokens** on step 1 due to extensive system instructions, `AGENTS.md` conventions, tool schemas, skills, git history, and directory trees. Because Anthropic/OpenRouter caching triggers at just **1,024 tokens**, every coding turn operates in high-stakes context territory.
+
+#### 1. Provider Cache Tiers & Breakeven Economics
+Frontier providers price prompt caching using two distinct tiers:
+
+| Tier | Cache Write Cost | Cache Read Cost (Hits) | Rolling Expiration Window |
+| :--- | :--- | :--- | :--- |
+| **`5m` (Ephemeral)** | **1.25x** base input price | **0.10x** (90% discount) | 5 minutes from last access |
+| **`1h` (Extended Beta)** | **2.00x** base input price | **0.10x** (90% discount) | 60 minutes from last access |
+| **`off` (Disabled)** | **1.00x** (no cache write) | **1.00x** (full price every turn) | None |
+
+#### 2. The 7.5 Heartbeat Breakeven Formula
+Because every cache read hit **resets the rolling 5-minute timer**, a long-running step can be kept warm using periodic heartbeat pings (at $t = 4\text{m }30\text{s}$) with `max_tokens=1`.
+
+The mathematical breakeven between paying the 1-hour upfront write premium vs. using rolling 5-minute pings is:
+$$\text{Premium Difference} = (2.00 - 1.25) \times B = 0.75 \times B$$
+$$\text{Cost per Ping} = 0.10 \times B$$
+$$N_{\text{pings}} = \frac{0.75 \times B}{0.10 \times B} = \mathbf{7.5 \text{ pings}} \approx \mathbf{35\text{--}40 \text{ minutes}}$$
+
+* **Under 35 Minutes**: The **5m cache + heartbeat pings** strategy is strictly cheaper than paying the 1h write cost.
+  * 0 pings (<5 min): $1.25\times$ (37% cheaper than 1h)
+  * 1 ping (~9 min): $1.35\times$ (32% cheaper than 1h)
+  * 2 pings (~14 min): $1.45\times$ (27% cheaper than 1h)
+  * 3 pings (~18 min): $1.55\times$ (22% cheaper than 1h)
+* **Over 35 Minutes**: Paying the **1-hour upfront write ($2.0\times$)** becomes more cost-effective.
+
+#### 3. Human-in-the-Loop vs. Non-Human Workloads
+* **Non-Human Execution (Builds / Test Suites / Crawls)**:
+  * Duration is bounded and measurable (typically 5 to 15 minutes).
+  * 1 to 3 pings at 4:30 keep the cache warm at $1.35\times$ to $1.55\times$, saving money over 1h write.
+* **Human-in-the-Loop Pauses (Interactive User Input)**:
+  * Human pause duration is fundamentally unpredictable (ranging from 30 seconds to hours).
+  * Firing background keep-alives during human pauses risks silent token leaks.
+  * User-idle caching should either default to manual user control (`/cache 1h`), empirical usage pattern telemetry, or a capped fallback without unbounded background pings.
+
+#### 4. Current Implementation
+* **On-the-Fly Switching**: Runtime toggling between `5m`, `1h`, and `off` via `/cache [5m|1h|off]` in interactive mode without restarting the session.
+* **Breakpoint Placement**:
+  * Invariant System Prompt (`{"type": "ephemeral"}` or `{"type": "ephemeral", "ttl": "1h"}`).
+  * Last Tool Schema in OpenAPI definitions.
+* **Prefix Stability Invariant**: Proactive 80% memory compaction (`core/memory.py`) strictly preserves the system prompt and initial user turn, ensuring compaction **never invalidates the cache**.
+* **Provider Headers**:
+  * 1h mode injects `anthropic-beta: extended-cache-ttl-2025-04-11` and `X-OpenRouter-Cache-TTL: 3600`.
+  * 5m mode injects `X-OpenRouter-Cache-TTL: 300`.
+* **Telemetry & Hit Rates**: Exposes real-time cache hit rates, prompt token counts, and cached token totals in `/status` and `tracer.py`.
+
+---
+
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (71 passing tests in ~2.8s):
+All features are tested against rigorous, non-tautological standards in `tests/` (80 passing tests in ~2.8s):
 * `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner and task filtering.
 * `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes.
 * `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors.
 * `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
-* `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing.
+* `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing, cache TTL normalization, 5m/1h/off payload generation, dynamic on-the-fly TTL switching, and cumulative cache hit statistics.
 * `test_evaluator.py`: Strict equality assertions, missing target files, forbidden string rejection.
-* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, and global config (`config.json`) cascading precedence.
+* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, global config (`config.json`) cascading precedence, and harness on-the-fly cache TTL switching with config precedence.
