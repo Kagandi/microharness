@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+from typing import Any
 
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import (
@@ -25,7 +26,7 @@ from core.harness import (
     load_project_config,
 )
 from core.model import HttpChatModel, MockModel, Model
-from core.types import Task, ToolCall
+from core.types import RunResult, Task, ToolCall
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -151,9 +152,7 @@ def build_mock_agent_script() -> MockModel:
     return MockModel(script=script)
 
 
-def main():
-    load_dotenv()
-
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="microharness: Interactive AI coding agent microframework for existing projects or benchmarks.",
         usage="%(prog)s [instruction] [-d DIR] [--sandbox] [--batch] [--demo {calculator,greeting}] [options]",
@@ -251,6 +250,173 @@ def main():
         default=None,
         help="Timeout in seconds for task execution (e.g. 3600, 7200)",
     )
+    return parser
+
+
+def _resolve_model(args: argparse.Namespace, config: dict[str, Any], cache_ttl: str) -> Model:
+    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
+    model_name = (
+        args.model
+        or os.getenv("MODEL_NAME")
+        or config.get("model")
+        or "cohere/north-mini-code:free"
+    )
+    api_key = (
+        args.api_key
+        or os.getenv("MODEL_API_KEY")
+        or os.getenv("OPENROUTER_API_KEY")
+        or config.get("api_key")
+    )
+
+    if endpoint:
+        cache_lbl = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
+        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl})")
+        return HttpChatModel(
+            base_url=endpoint,
+            model=model_name,
+            api_key=api_key,
+            cache_ttl=cache_ttl,
+        )
+
+    print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
+    print(
+        "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or configure ~/.microharness/config.json.\n"
+    )
+    return build_mock_agent_script()
+
+
+def _print_run_summary(result: RunResult) -> None:
+    print("=" * 60)
+    if result.eval_result:
+        print(f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})")
+    else:
+        print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
+    print(f"Total Steps: {result.total_steps}")
+    print(f"Workspace: {result.workspace_path}")
+    print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
+    if result.patch_path:
+        print(f"Patch: {result.patch_path}")
+    print("=" * 60)
+
+
+def _dispatch_benchmark(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    model: Model,
+    runs_dir: Path,
+    global_dir: Path,
+    target_dir: Path,
+    cache_ttl: str,
+    use_docker: bool,
+    docker_image: str,
+) -> bool:
+    bench_choice = args.benchmark or args.demo
+    if bench_choice in ("mini-swe", "all"):
+        from benchmarks.mini_swe import get_mini_swe_suite
+        from benchmarks.runner import run_benchmark_suite
+
+        suite = get_mini_swe_suite(task_filter=args.task)
+        if not suite:
+            print(f"❌ No benchmark tasks found matching filter: '{args.task}'")
+            return True
+
+        if args.max_steps or args.timeout:
+            for t, _ in suite:
+                if args.max_steps:
+                    t.max_steps = args.max_steps
+                if args.timeout:
+                    t.timeout_seconds = args.timeout
+
+        run_benchmark_suite(
+            harness_factory=lambda ev: Harness(
+                model=model,
+                global_dir=global_dir,
+                runs_dir=runs_dir,
+                sandbox=True,
+                docker=use_docker,
+                docker_image=docker_image,
+                evaluator=ev,
+                cache_ttl=cache_ttl,
+                verbose=True,
+            ),
+            tasks=suite,
+            suite_name="Mini-SWE",
+            output_dir=runs_dir,
+            verbose=True,
+        )
+        return True
+
+    elif bench_choice == "deepswe-mini":
+        from benchmarks.harbor import get_deepswe_mini_suite
+        from benchmarks.runner import run_benchmark_suite
+
+        dataset_dir = target_dir / "datasets" / "deep-swe" / "tasks"
+        if not dataset_dir.is_dir():
+            dataset_dir = Path("datasets/deep-swe/tasks").resolve()
+
+        if not dataset_dir.is_dir():
+            print("❌ DeepSWE dataset not found at datasets/deep-swe/tasks")
+            print(
+                "Tip: Run `git clone --depth 1 https://github.com/datacurve-ai/deep-swe datasets/deep-swe` to download tasks."
+            )
+            return True
+
+        max_steps = args.max_steps or int(config.get("max_steps", 30))
+        timeout_seconds = args.timeout or (max_steps * 30.0 if max_steps > 30 else 900.0)
+
+        suite = get_deepswe_mini_suite(
+            dataset_dir=dataset_dir,
+            task_filter=args.task,
+            max_steps=max_steps,
+            timeout_seconds=timeout_seconds,
+        )
+        if not suite:
+            print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
+            return True
+
+        run_benchmark_suite(
+            harness_factory=lambda ev: Harness(
+                model=model,
+                global_dir=global_dir,
+                runs_dir=runs_dir,
+                sandbox=True,
+                docker=True,
+                evaluator=ev,
+                cache_ttl=cache_ttl,
+                verbose=True,
+            ),
+            tasks=suite,
+            suite_name="DeepSWE-mini",
+            output_dir=runs_dir,
+            verbose=True,
+        )
+        return True
+
+    elif bench_choice in ("calculator", "greeting"):
+        task, evaluator = (
+            create_calculator_demo() if bench_choice == "calculator" else create_greeting_demo()
+        )
+        harness = Harness(
+            model=model,
+            global_dir=global_dir,
+            runs_dir=runs_dir,
+            sandbox=True,
+            docker=use_docker,
+            docker_image=docker_image,
+            evaluator=evaluator,
+            cache_ttl=cache_ttl,
+            verbose=True,
+        )
+        result = harness.run(task)
+        _print_run_summary(result)
+        return True
+
+    return False
+
+
+def main():
+    load_dotenv()
+    parser = _build_arg_parser()
     args = parser.parse_args()
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
@@ -270,154 +436,23 @@ def main():
     use_docker = args.docker if args.docker is not None else bool(config.get("docker", False))
     docker_image = args.docker_image or config.get("docker_image", "python:3.11")
 
-    # 1. Select Model (Precedence: CLI Flag > Environment Variable / .env > project config.json > global config.json > Fallback)
-    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
-    model_name = (
-        args.model
-        or os.getenv("MODEL_NAME")
-        or config.get("model")
-        or "cohere/north-mini-code:free"
-    )
-    api_key = (
-        args.api_key
-        or os.getenv("MODEL_API_KEY")
-        or os.getenv("OPENROUTER_API_KEY")
-        or config.get("api_key")
-    )
-
-    if endpoint:
-        cache_lbl = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
-        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl})")
-        model: Model = HttpChatModel(
-            base_url=endpoint,
-            model=model_name,
-            api_key=api_key,
-            cache_ttl=cache_ttl,
-        )
-    else:
-        print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
-        print(
-            "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or configure ~/.microharness/config.json.\n"
-        )
-        model = build_mock_agent_script()
+    # 1. Select Model
+    model = _resolve_model(args, config, cache_ttl)
 
     # 2. Benchmark Suite Mode (e.g. --benchmark mini-swe or --demo calculator)
     if args.benchmark or args.demo:
-        bench_choice = args.benchmark or args.demo
-        if bench_choice in ("mini-swe", "all"):
-            from benchmarks.mini_swe import get_mini_swe_suite
-            from benchmarks.runner import run_benchmark_suite
-
-            suite = get_mini_swe_suite(task_filter=args.task)
-            if not suite:
-                print(f"❌ No benchmark tasks found matching filter: '{args.task}'")
-                return
-
-            def harness_factory(evaluator: Evaluator) -> Harness:
-                return Harness(
-                    model=model,
-                    global_dir=global_dir,
-                    runs_dir=runs_dir,
-                    sandbox=True,
-                    docker=use_docker,
-                    docker_image=docker_image,
-                    evaluator=evaluator,
-                    cache_ttl=cache_ttl,
-                    verbose=True,
-                )
-
-            if args.max_steps or args.timeout:
-                for t, _ in suite:
-                    if args.max_steps:
-                        t.max_steps = args.max_steps
-                    if args.timeout:
-                        t.timeout_seconds = args.timeout
-
-            run_benchmark_suite(
-                harness_factory=harness_factory,
-                tasks=suite,
-                suite_name="Mini-SWE",
-                output_dir=runs_dir,
-                verbose=True,
-            )
-            return
-
-        elif bench_choice == "deepswe-mini":
-            from benchmarks.harbor import get_deepswe_mini_suite
-            from benchmarks.runner import run_benchmark_suite
-
-            dataset_dir = target_dir / "datasets" / "deep-swe" / "tasks"
-            if not dataset_dir.is_dir():
-                dataset_dir = Path("datasets/deep-swe/tasks").resolve()
-
-            if not dataset_dir.is_dir():
-                print("❌ DeepSWE dataset not found at datasets/deep-swe/tasks")
-                print(
-                    "Tip: Run `git clone --depth 1 https://github.com/datacurve-ai/deep-swe datasets/deep-swe` to download tasks."
-                )
-                return
-
-            max_steps = args.max_steps or int(config.get("max_steps", 30))
-            timeout_seconds = args.timeout or (max_steps * 30.0 if max_steps > 30 else 900.0)
-
-            suite = get_deepswe_mini_suite(
-                dataset_dir=dataset_dir,
-                task_filter=args.task,
-                max_steps=max_steps,
-                timeout_seconds=timeout_seconds,
-            )
-            if not suite:
-                print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
-                return
-
-            def harbor_harness_factory(evaluator: Evaluator) -> Harness:
-                return Harness(
-                    model=model,
-                    global_dir=global_dir,
-                    runs_dir=runs_dir,
-                    sandbox=True,
-                    docker=True,  # DeepSWE requires Docker sandboxing
-                    evaluator=evaluator,
-                    cache_ttl=cache_ttl,
-                    verbose=True,
-                )
-
-            run_benchmark_suite(
-                harness_factory=harbor_harness_factory,
-                tasks=suite,
-                suite_name="DeepSWE-mini",
-                output_dir=runs_dir,
-                verbose=True,
-            )
-            return
-
-        elif bench_choice in ("calculator", "greeting"):
-            task, evaluator = (
-                create_calculator_demo() if bench_choice == "calculator" else create_greeting_demo()
-            )
-            harness = Harness(
-                model=model,
-                global_dir=global_dir,
-                runs_dir=runs_dir,
-                sandbox=True,
-                docker=use_docker,
-                docker_image=docker_image,
-                evaluator=evaluator,
-                cache_ttl=cache_ttl,
-                verbose=True,
-            )
-            result = harness.run(task)
-            print("=" * 60)
-            print(
-                f"Outcome: {'PASSED ✅' if result.passed else 'FAILED ❌'} (Score: {result.score})"
-            )
-            print(f"Total Steps: {result.total_steps}")
-            print(f"Workspace: {result.workspace_path}")
-            print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
-            if result.patch_path:
-                print(f"Patch: {result.patch_path}")
-            print("=" * 60)
-            return
+        _dispatch_benchmark(
+            args=args,
+            config=config,
+            model=model,
+            runs_dir=runs_dir,
+            global_dir=global_dir,
+            target_dir=target_dir,
+            cache_ttl=cache_ttl,
+            use_docker=use_docker,
+            docker_image=docker_image,
+        )
+        return
 
     # 3. Resolve Sandbox Flag and Instantiate Harness
     sandbox = args.sandbox or bool(config.get("sandbox", False))
@@ -442,14 +477,7 @@ def main():
             timeout_seconds=args.timeout or 60.0,
         )
         result = harness.run(task)
-        print("=" * 60)
-        print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
-        print(f"Total Steps: {result.total_steps}")
-        print(f"Workspace: {result.workspace_path}")
-        print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
-        if result.patch_path:
-            print(f"Patch: {result.patch_path}")
-        print("=" * 60)
+        _print_run_summary(result)
         return
 
     # Default: Interactive Mode in the target project directory
