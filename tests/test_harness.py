@@ -1385,6 +1385,34 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertTrue(run_dir1.exists())
         self.assertTrue(run_dir2.exists())
 
+    def test_harness_config_empty_string_fallback(self):
+        """Invariant: Empty string values in config for runs_dir and docker_image fall back to defaults."""
+        global_dir = Path(tempfile.mkdtemp(prefix="test_empty_cfg_")).resolve()
+        config_path = global_dir / "config.json"
+        config_path.write_text(
+            json.dumps({"runs_dir": "", "docker_image": ""}),
+            encoding="utf-8",
+        )
+
+        harness = Harness(
+            model=MockModel([("Done", [])]),
+            global_dir=global_dir,
+            verbose=False,
+        )
+        self.assertEqual(harness.runs_dir, (global_dir / "runs").resolve())
+        self.assertEqual(harness.docker_image, "python:3.11")
+
+        # Explicit empty string argument should also fall back to default
+        harness_explicit = Harness(
+            model=MockModel([("Done", [])]),
+            global_dir=global_dir,
+            runs_dir="",
+            docker_image="",
+            verbose=False,
+        )
+        self.assertEqual(harness_explicit.runs_dir, (global_dir / "runs").resolve())
+        self.assertEqual(harness_explicit.docker_image, "python:3.11")
+
 
 if __name__ == "__main__":
     unittest.main()

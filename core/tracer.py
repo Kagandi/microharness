@@ -111,18 +111,30 @@ def _pair_calls_with_results(
     tool_results: list[dict[str, Any]],
 ) -> list[tuple[dict[str, Any] | None, dict[str, Any] | None]]:
     """Pairs tool calls with corresponding results, first by call_id, then by index."""
-    results_by_id = {tr.get("call_id"): tr for tr in tool_results if tr.get("call_id")}
+    results_by_id: dict[str, dict[str, Any]] = {
+        tr["call_id"]: tr for tr in tool_results if tr.get("call_id")
+    }
     remaining_results = list(tool_results)
-    pairs: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = []
+    paired_results: list[dict[str, Any] | None] = [None] * len(tool_calls)
 
+    # 1. Match by call_id
     for i, tc in enumerate(tool_calls):
-        tr = results_by_id.get(tc.get("id")) or (
-            remaining_results[i] if i < len(remaining_results) else None
-        )
-        if tr in remaining_results:
+        call_id = tc.get("id")
+        if call_id and call_id in results_by_id:
+            tr = results_by_id.pop(call_id)
             remaining_results.remove(tr)
-        pairs.append((tc, tr))
+            paired_results[i] = tr
 
+    # 2. Match remaining unmatched calls with remaining results in order
+    for i in range(len(tool_calls)):
+        if paired_results[i] is None and remaining_results:
+            paired_results[i] = remaining_results.pop(0)
+
+    pairs: list[tuple[dict[str, Any] | None, dict[str, Any] | None]] = [
+        (tc, paired_results[i]) for i, tc in enumerate(tool_calls)
+    ]
+
+    # 3. Any leftover results without a corresponding tool call
     for tr in remaining_results:
         pairs.append((None, tr))
 

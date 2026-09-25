@@ -276,17 +276,24 @@ class Harness:
             explicit: Any,
             cast: Callable[[Any], Any] = lambda x: x,
             default: Any = None,
+            require_truthy: bool = False,
         ) -> Any:
-            val = explicit if explicit is not None else self.merged_config.get(key, default)
+            val = explicit if explicit is not None else self.merged_config.get(key)
+            if require_truthy:
+                val = val if val else default
+            else:
+                val = val if val is not None else default
             return cast(val) if val is not None else default
 
         self.sandbox = _cfg("sandbox", sandbox, bool, False)
         self.docker = _cfg("docker", docker, bool, False)
-        self.docker_image = _cfg("docker_image", docker_image, str, "python:3.11")
+        self.docker_image = _cfg(
+            "docker_image", docker_image, str, "python:3.11", require_truthy=True
+        )
         self.custom_tools = tools
         self.evaluator = evaluator
 
-        runs_val = _cfg("runs_dir", runs_dir, Path, None)
+        runs_val = _cfg("runs_dir", runs_dir, Path, None, require_truthy=True)
         self.runs_dir = runs_val.resolve() if runs_val else (self.global_dir / "runs").resolve()
 
         self.max_tool_chars = _cfg("max_tool_chars", max_tool_chars, int, DEFAULT_MAX_TOOL_CHARS)
