@@ -23,32 +23,24 @@ DEFAULT_GLOBAL_DIR = (
 )
 
 
-def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
-    """Loads user baseline configuration from ~/.microharness/config.json."""
-    if not global_dir:
-        return {}
-    config_file = global_dir / "config.json"
-    if not config_file.is_file():
+def _load_json_config(config_file: Path | None) -> dict[str, Any]:
+    if not config_file or not config_file.is_file():
         return {}
     try:
         data = json.loads(config_file.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
+    """Loads user baseline configuration from ~/.microharness/config.json."""
+    return _load_json_config(global_dir / "config.json" if global_dir else None)
 
 
 def load_project_config(workspace: Path | None = None) -> dict[str, Any]:
     """Loads optional project-level configuration from .microharness/config.json."""
-    if not workspace:
-        return {}
-    config_file = workspace / ".microharness" / "config.json"
-    if not config_file.is_file():
-        return {}
-    try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return _load_json_config(workspace / ".microharness" / "config.json" if workspace else None)
 
 
 def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
@@ -278,32 +270,15 @@ class Harness:
             return self.model.get_cache_stats()
         return {"cache_ttl": self.cache_ttl}
 
-    def _setup_run(
+    def _create_environment(
         self,
-        task_id: str,
-        system_prompt: str,
-        initial_instruction: str,
+        workspace: Path,
+        logs_dir: Path,
+        active_docker: bool,
+        active_image: str,
+        init_workdir: str | None,
         initial_files: dict[str, str],
-        force_sandbox: bool = False,
-        docker_image: str | None = None,
-        init_workdir: str | None = None,
-    ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = self.runs_dir / f"{task_id}_{timestamp}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        logs_dir = run_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-
-        use_sandbox = self.sandbox or force_sandbox or (self.explicit_workspace_dir is None)
-
-        if use_sandbox:
-            workspace = run_dir / "workspace"
-            workspace.mkdir(parents=True, exist_ok=True)
-        else:
-            workspace = self.explicit_workspace_dir
-
-        active_docker = self.docker or bool(docker_image)
-        active_image = docker_image or self.docker_image
+    ) -> Environment:
         allowed_reads = [self.global_dir] if self.global_dir else []
         if active_docker:
             env: Environment = DockerEnvironment(
@@ -323,41 +298,80 @@ class Harness:
             )
         if initial_files:
             env.populate_files(initial_files)
+        return env
 
-        tool_registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
+    def _init_tools(self, env: Environment) -> ToolRegistry:
+        registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
         if self.custom_tools:
             for t in self.custom_tools:
-                tool_registry.register(t)
+                registry.register(t)
         else:
-            tool_registry.register(BashTool(env))
-            tool_registry.register(ReadFileTool(env))
-            tool_registry.register(WriteFileTool(env))
-            tool_registry.register(EditFileTool(env))
+            registry.register(BashTool(env))
+            registry.register(ReadFileTool(env))
+            registry.register(WriteFileTool(env))
+            registry.register(EditFileTool(env))
+        return registry
 
-        active_system_prompt = system_prompt
+    def _build_system_prompt(
+        self,
+        workspace: Path,
+        base_prompt: str,
+        tool_registry: ToolRegistry,
+        use_sandbox: bool,
+    ) -> str:
+        prompt = base_prompt
         tool_docs = tool_registry.to_system_prompt_snippet()
-        if (
-            tool_docs
-            and "You have access to tools to interact with the environment:"
-            not in active_system_prompt
-        ):
-            active_system_prompt += f"\n\n{tool_docs}"
+        if tool_docs and "You have access to tools to interact with the environment:" not in prompt:
+            prompt += f"\n\n{tool_docs}"
 
         if not use_sandbox:
-            active_system_prompt += (
+            prompt += (
                 f"\n\nContext:\nYou are working directly in an existing project directory at `{workspace}`.\n"
                 "Inspect existing files and git history to understand the codebase before making changes."
             )
 
-        # 1. Project steering instructions (AGENTS.md)
         agents_instructions = _load_agents_instructions(workspace, self.global_dir)
         if agents_instructions:
-            active_system_prompt += f"\n\n{agents_instructions}"
+            prompt += f"\n\n{agents_instructions}"
 
-        # 2. Progressive skills index (skills/ or .skills/)
         skills_index = _discover_skills_index(workspace, self.global_dir)
         if skills_index:
-            active_system_prompt += f"\n\n{skills_index}"
+            prompt += f"\n\n{skills_index}"
+
+        return prompt
+
+    def _setup_run(
+        self,
+        task_id: str,
+        system_prompt: str,
+        initial_instruction: str,
+        initial_files: dict[str, str],
+        force_sandbox: bool = False,
+        docker_image: str | None = None,
+        init_workdir: str | None = None,
+    ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = self.runs_dir / f"{task_id}_{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = run_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        use_sandbox = self.sandbox or force_sandbox or (self.explicit_workspace_dir is None)
+        workspace = (run_dir / "workspace") if use_sandbox else self.explicit_workspace_dir
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        env = self._create_environment(
+            workspace=workspace,
+            logs_dir=logs_dir,
+            active_docker=self.docker or bool(docker_image),
+            active_image=docker_image or self.docker_image,
+            init_workdir=init_workdir,
+            initial_files=initial_files,
+        )
+        tool_registry = self._init_tools(env)
+        active_system_prompt = self._build_system_prompt(
+            workspace, system_prompt, tool_registry, use_sandbox
+        )
 
         # Expand custom command if initial instruction is a slash command
         custom_commands = _discover_commands(workspace, self.global_dir)
@@ -377,7 +391,6 @@ class Harness:
             max_context_chars=self.max_context_chars,
             trigger_ratio=self.trigger_ratio,
         )
-
         task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)
         tracer = Tracer(task=task, output_dir=run_dir, verbose=self.verbose)
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
