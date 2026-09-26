@@ -897,6 +897,45 @@ class TestModel(unittest.TestCase):
         self.assertIn("credit limit exhausted", str(ctx.exception))
         mock_sleep.assert_not_called()
 
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_send_request_google_daily_limit_fails_immediately(self, mock_urlopen, mock_sleep):
+        """Invariant: Google's GenerateRequestsPerDay quota error halts immediately without sleeping."""
+        import urllib.error
+        google_daily_body = json.dumps([{
+            "error": {
+                "code": 429,
+                "message": "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [{
+                            "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                            "quotaValue": "20"
+                        }]
+                    },
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "59s"}
+                ]
+            }
+        }]).encode("utf-8")
+
+        err = urllib.error.HTTPError(
+            url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=google_daily_body)),
+        )
+        mock_urlopen.side_effect = err
+
+        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini-3.8-flash")
+        with self.assertRaises(RateLimitError) as ctx:
+            m._send_request(payload={"model": "gemini-3.8-flash"}, headers={})
+
+        self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
+        mock_sleep.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

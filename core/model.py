@@ -46,6 +46,8 @@ def _is_unrecoverable_quota_error(status_code: int, err_body: str) -> bool:
     if any(
         k in body_lower
         for k in (
+            "generaterequestsperday",
+            "perday",
             "daily limit",
             "daily request limit",
             "limit reached for today",
@@ -558,21 +560,21 @@ class HttpChatModel(_CacheTelemetryMixin):
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
                 if exc.code in (429, 402):
+                    # 1. Daily Quota / Credit Exhaustion (e.g. GenerateRequestsPerDay, payment required)
+                    if _is_unrecoverable_quota_error(exc.code, err_body):
+                        raise RateLimitError(
+                            f"Model API daily quota or credit limit exhausted (HTTP {exc.code}) from {self.endpoint}:\n{err_body}"
+                        ) from exc
+
                     retry_header = exc.headers.get("Retry-After") if exc.headers else None
                     delay = extract_retry_delay(err_body, retry_header)
 
-                    # 1. Prolonged or Daily Limit: Delay exceeds maximum wait threshold (120s)
+                    # 2. Prolonged Limit: Delay exceeds maximum wait threshold (120s)
                     if delay is not None and delay > MAX_RETRY_SLEEP_S:
                         raise RateLimitError(
                             f"Model API rate limit retry delay ({delay:.1f}s) exceeds maximum allowed sleep "
                             f"({MAX_RETRY_SLEEP_S:.0f}s). Daily quota or prolonged limit reached from {self.endpoint}:\n{err_body}",
                             retry_after=delay,
-                        ) from exc
-
-                    # 2. Daily Quota / Credit Exhaustion with no short wait specified
-                    if delay is None and _is_unrecoverable_quota_error(exc.code, err_body):
-                        raise RateLimitError(
-                            f"Model API quota or credit limit exhausted (HTTP {exc.code}) from {self.endpoint}:\n{err_body}"
                         ) from exc
 
                     # 3. Transient Rate Limit: Use extracted delay, or fall back to exponential backoff
