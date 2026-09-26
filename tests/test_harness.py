@@ -1495,6 +1495,46 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(res.finish_reason, "rate_limited")
         self.assertFalse(res.passed)
 
+    def test_harness_reasoning_effort_control_and_slash_command(self):
+        """Invariant: Harness allows dynamic reasoning effort configuration and /reasoning slash command."""
+        mock_model = MockModel([("Hello", [])], reasoning_effort="high")
+        harness = Harness(model=mock_model, reasoning_effort="high", verbose=False)
+        self.assertEqual(harness.get_reasoning_effort(), "high")
+
+        # Programmatic switch
+        harness.set_reasoning_effort("low")
+        self.assertEqual(harness.get_reasoning_effort(), "low")
+        self.assertEqual(mock_model.get_reasoning_effort(), "low")
+
+        # Interactive /reasoning slash command switch
+        memory = Memory(system_prompt="sys", user_prompt="init")
+        action = harness._dispatch_interactive_input("/reasoning medium", memory, custom_commands={})
+        self.assertEqual(action, "skip")
+        self.assertEqual(harness.get_reasoning_effort(), "medium")
+
+        # Interactive /reasoning off
+        action = harness._dispatch_interactive_input("/reasoning off", memory, custom_commands={})
+        self.assertEqual(action, "skip")
+        self.assertIsNone(harness.get_reasoning_effort())
+
+    def test_harness_run_result_token_telemetry(self):
+        """Invariant: RunResult captures prompt, completion, cached tokens and cache hit percentage."""
+        mock_model = MockModel([("Done", [])])
+        mock_model._update_usage({
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 750},
+        })
+
+        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
+        task = Task(id="token_task", instruction="Test tokens")
+        result = harness.run(task)
+
+        self.assertEqual(result.prompt_tokens, 1000)
+        self.assertEqual(result.completion_tokens, 100)
+        self.assertEqual(result.cached_tokens, 750)
+        self.assertEqual(result.cache_hit_rate_pct, 75.0)
+
 
 if __name__ == "__main__":
     unittest.main()

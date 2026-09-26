@@ -10,6 +10,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    extra_content: dict[str, Any] | None = None
 
 
 @dataclass
@@ -25,8 +26,9 @@ class Message:
         if self.tool_call_id:
             data["tool_call_id"] = self.tool_call_id
         if self.tool_calls:
-            data["tool_calls"] = [
-                {
+            calls_list: list[dict[str, Any]] = []
+            for tc in self.tool_calls:
+                call_data: dict[str, Any] = {
                     "id": tc.id,
                     "type": "function",
                     "function": {
@@ -38,8 +40,10 @@ class Message:
                         ),
                     },
                 }
-                for tc in self.tool_calls
-            ]
+                if tc.extra_content:
+                    call_data["extra_content"] = tc.extra_content
+                calls_list.append(call_data)
+            data["tool_calls"] = calls_list
         return data
 
 
@@ -81,6 +85,7 @@ class StepTrace:
     tool_results: list[dict[str, Any]]
     compaction_applied: bool = False
     duration_s: float = 0.0
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -102,3 +107,7 @@ class RunResult:
     workspace_path: str
     eval_result: EvalResult | None = None
     patch_path: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_hit_rate_pct: float = 0.0

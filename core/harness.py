@@ -11,7 +11,14 @@ from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import CacheAwareModel, Model, RateLimitError, normalize_cache_ttl
+from core.model import (
+    CacheAwareModel,
+    Model,
+    RateLimitError,
+    ReasoningAwareModel,
+    normalize_cache_ttl,
+    normalize_reasoning_effort,
+)
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
     DEFAULT_MAX_TOOL_CHARS,
@@ -41,7 +48,12 @@ def _load_json_config(config_file: Path | None) -> dict[str, Any]:
     if not config_file or not config_file.is_file():
         return {}
     try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
+        raw = config_file.read_text(encoding="utf-8")
+        lines = [
+            line for line in raw.splitlines()
+            if not line.strip().startswith("//") and not line.strip().startswith("#")
+        ]
+        data = json.loads("\n".join(lines))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -258,6 +270,7 @@ class Harness:
         max_context_chars: int | None = None,
         trigger_ratio: float | None = None,
         cache_ttl: str | None = None,
+        reasoning_effort: str | None = None,
         max_step_retries: int | None = None,
         step_retry_delay: float | None = None,
         verbose: bool = True,
@@ -305,6 +318,11 @@ class Harness:
         if isinstance(self.model, CacheAwareModel):
             self.model.set_cache_ttl(self.cache_ttl)
 
+        configured_reasoning = _cfg("reasoning_effort", reasoning_effort, str, None)
+        self.reasoning_effort = normalize_reasoning_effort(configured_reasoning)
+        if isinstance(self.model, ReasoningAwareModel):
+            self.model.set_reasoning_effort(self.reasoning_effort)
+
         self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
         self.step_retry_delay = _cfg("step_retry_delay", step_retry_delay, float, 5.0)
         self.verbose = verbose
@@ -319,8 +337,25 @@ class Harness:
     def get_cache_stats(self) -> dict[str, Any]:
         """Returns prompt cache TTL and token performance metrics."""
         if isinstance(self.model, CacheAwareModel):
-            return self.model.get_cache_stats()
+            stats = self.model.get_cache_stats()
+            if isinstance(stats, dict):
+                return stats
         return {"cache_ttl": self.cache_ttl}
+
+    def set_reasoning_effort(self, effort: str | None) -> str | None:
+        """Dynamically switches reasoning effort level ('low', 'medium', 'high', numeric budget, or 'off'/None)."""
+        self.reasoning_effort = normalize_reasoning_effort(effort)
+        if isinstance(self.model, ReasoningAwareModel):
+            return self.model.set_reasoning_effort(self.reasoning_effort)
+        return self.reasoning_effort
+
+    def get_reasoning_effort(self) -> str | None:
+        """Returns the current reasoning effort level or None."""
+        if isinstance(self.model, ReasoningAwareModel):
+            effort = self.model.get_reasoning_effort()
+            if isinstance(effort, str) or effort is None:
+                return effort
+        return getattr(self, "reasoning_effort", None)
 
     def _create_environment(
         self,
@@ -581,12 +616,60 @@ class Harness:
                 if self.verbose:
                     print(f"📦 Git patch saved to: {patch_file}")
 
+            c_stats = self.get_cache_stats()
+            if not isinstance(c_stats, dict):
+                c_stats = {"cache_ttl": self.cache_ttl}
             json_trace_path, md_trace_path = tracer.finalize(
-                finish_reason=finish_reason, eval_result=eval_result, patch_diff=patch_diff
+                finish_reason=finish_reason,
+                eval_result=eval_result,
+                patch_diff=patch_diff,
+                telemetry=c_stats,
             )
 
             passed = eval_result.passed if eval_result else (finish_reason == "completed")
             score = eval_result.score if eval_result else (1.0 if passed else 0.0)
+
+            raw_prompt = c_stats.get("total_prompt_tokens")
+            raw_comp = c_stats.get("total_completion_tokens")
+            raw_cached = c_stats.get("total_cached_tokens")
+            raw_hit = c_stats.get("cache_hit_rate_pct")
+
+            total_prompt_tokens = (
+                int(raw_prompt)
+                if isinstance(raw_prompt, (int, float)) and raw_prompt
+                else sum(
+                    int(s.usage.get("prompt_tokens", 0) or 0)
+                    for s in tracer.steps
+                    if isinstance(s.usage, dict)
+                )
+            )
+            total_comp_tokens = (
+                int(raw_comp)
+                if isinstance(raw_comp, (int, float)) and raw_comp
+                else sum(
+                    int(s.usage.get("completion_tokens", 0) or 0)
+                    for s in tracer.steps
+                    if isinstance(s.usage, dict)
+                )
+            )
+            total_cached_tokens = (
+                int(raw_cached)
+                if isinstance(raw_cached, (int, float)) and raw_cached
+                else sum(
+                    int(s.usage.get("cached_tokens", 0) or 0)
+                    for s in tracer.steps
+                    if isinstance(s.usage, dict)
+                )
+            )
+            hit_rate = (
+                float(raw_hit)
+                if isinstance(raw_hit, (int, float))
+                else (
+                    round(total_cached_tokens / total_prompt_tokens * 100, 1)
+                    if total_prompt_tokens > 0
+                    else 0.0
+                )
+            )
 
             return RunResult(
                 task_id=task.id,
@@ -599,17 +682,22 @@ class Harness:
                 workspace_path=str(env.workspace_dir),
                 eval_result=eval_result,
                 patch_path=patch_path,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_comp_tokens,
+                cached_tokens=total_cached_tokens,
+                cache_hit_rate_pct=hit_rate,
             )
         finally:
             env.teardown()
 
     def _print_interactive_help(self, custom_commands: dict[str, tuple[str, str, str]]) -> None:
         print("\nAvailable commands:")
-        print("  /cache [5m|1h|off] - View or switch prompt caching duration on the fly")
-        print("  /status            - Show context window size, message breakdown, and budget")
-        print("  /compact           - Manually collapse older observations to free context")
-        print("  /new               - Clear conversation history while keeping workspace files")
-        print("  /exit              - Save session trace and exit")
+        print("  /reasoning [low|med|high|off] - View or switch reasoning / thinking effort")
+        print("  /cache [5m|1h|off]            - View or switch prompt caching duration on the fly")
+        print("  /status                       - Show context window size, message breakdown, and budget")
+        print("  /compact                      - Manually collapse older observations to free context")
+        print("  /new                          - Clear conversation history while keeping workspace files")
+        print("  /exit                         - Save session trace and exit")
         if custom_commands:
             print("\nCustom slash commands (from commands/):")
             for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
@@ -627,6 +715,8 @@ class Harness:
             f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
             f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
         )
+        curr_reasoning = self.get_reasoning_effort()
+        print(f"  • Reasoning Effort: {curr_reasoning.upper() if curr_reasoning else 'OFF'}")
         c_stats = self.get_cache_stats()
         ttl_val = c_stats.get("cache_ttl")
         print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
@@ -637,6 +727,29 @@ class Harness:
             print(f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n")
         else:
             print()
+
+    def _handle_reasoning_command(self, user_input: str) -> None:
+        parts = user_input.strip().split()
+        if len(parts) == 1:
+            curr = self.get_reasoning_effort()
+            status_str = curr.upper() if curr else "OFF (Disabled)"
+            print(f"\n🧠 Reasoning / Thinking Effort: {status_str}")
+            print(
+                "  • Usage: /reasoning low | /reasoning medium | /reasoning high | /reasoning off | /reasoning <tokens>\n"
+            )
+            return
+
+        target = parts[1].strip()
+        try:
+            new_effort = self.set_reasoning_effort(target)
+            if new_effort:
+                print(
+                    f"\n🧠 Reasoning effort switched to: {new_effort.upper()} for subsequent turns.\n"
+                )
+            else:
+                print("\n🧠 Reasoning effort disabled (off) for subsequent turns.\n")
+        except ValueError as exc:
+            print(f"\n❌ {exc}\n")
 
     def _handle_cache_command(self, user_input: str) -> None:
         parts = user_input.strip().split()
@@ -699,6 +812,10 @@ class Harness:
             self._print_context_status(memory)
             return "skip"
 
+        if cmd.startswith("/reasoning") or cmd == "reasoning":
+            self._handle_reasoning_command(user_input)
+            return "skip"
+
         if cmd.startswith("/cache") or cmd == "cache":
             self._handle_cache_command(user_input)
             return "skip"
@@ -756,7 +873,11 @@ class Harness:
             print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
         cache_label = self.cache_ttl.upper() if self.cache_ttl else "OFF"
         print(f"⚡ Prompt Caching: {cache_label}")
-        print("💡 Commands: /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n")
+        reasoning_label = self.get_reasoning_effort()
+        print(f"🧠 Reasoning Effort: {reasoning_label.upper() if reasoning_label else 'OFF'}")
+        print(
+            "💡 Commands: /reasoning [low|med|high|off] | /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n"
+        )
 
         step_idx = 1
         has_pending_turn = False
@@ -817,8 +938,9 @@ class Harness:
                 patch_file.write_text(patch_diff, encoding="utf-8")
                 print(f"📦 Git patch saved to: {patch_file}")
 
+            c_stats = self.get_cache_stats()
             json_path, md_path = tracer.finalize(
-                finish_reason="session_ended", patch_diff=patch_diff
+                finish_reason="session_ended", patch_diff=patch_diff, telemetry=c_stats
             )
             print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
         finally:

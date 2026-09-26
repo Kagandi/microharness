@@ -153,6 +153,58 @@ class TestTracer(unittest.TestCase):
         self.assertIn("ls -la", md_content)
         self.assertIn("total 0", md_content)
 
+    def test_tracer_token_telemetry_in_logs_and_exports(self):
+        """Invariant: Tracer prints token telemetry in step header and exports metrics to JSON and Markdown."""
+        import io
+        import sys
+        from core.types import StepTrace
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="test_tracer_telemetry_"))
+        task = Task(id="telemetry_task", instruction="Test telemetry")
+        tracer = Tracer(task=task, output_dir=temp_dir, verbose=True)
+
+        step = StepTrace(
+            step_index=1,
+            prompt_messages=[],
+            model_response={"content": "Thinking deeply...", "tool_calls": []},
+            tool_results=[],
+            duration_s=1.25,
+            usage={
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "cached_tokens": 600,
+                "cache_hit_rate_pct": 50.0,
+            },
+        )
+
+        captured_stdout = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = captured_stdout
+            tracer.record_step(step)
+        finally:
+            sys.stdout = orig_stdout
+
+        output_log = captured_stdout.getvalue()
+        # Verify step divider contains input, cached tokens, hit rate, and output tokens
+        self.assertIn("Step 1", output_log)
+        self.assertIn("1,200 in (600 cached - 50.0%)", output_log)
+        self.assertIn("80 out", output_log)
+
+        json_path, md_path = tracer.finalize(finish_reason="completed")
+        trace_json = json.loads(json_path.read_text(encoding="utf-8"))
+
+        self.assertIn("telemetry", trace_json)
+        self.assertEqual(trace_json["telemetry"]["total_prompt_tokens"], 1200)
+        self.assertEqual(trace_json["telemetry"]["total_completion_tokens"], 80)
+        self.assertEqual(trace_json["telemetry"]["total_cached_tokens"], 600)
+        self.assertEqual(trace_json["telemetry"]["cache_hit_rate_pct"], 50.0)
+        self.assertEqual(trace_json["steps"][0]["usage"]["cached_tokens"], 600)
+
+        md_text = md_path.read_text(encoding="utf-8")
+        self.assertIn("- **Tokens**: 1,200 in (600 cached - 50.0% hit rate), 80 out", md_text)
+        self.assertIn("### Step 1 (1.25s · 1,200 in [600 cached - 50.0%], 80 out)", md_text)
+
 
 if __name__ == "__main__":
     unittest.main()

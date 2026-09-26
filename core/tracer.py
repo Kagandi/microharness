@@ -152,6 +152,8 @@ class Tracer:
         self.steps: list[StepTrace] = []
         self.eval_result: EvalResult | None = None
         self.finish_reason: str = "running"
+        self.patch_diff: str | None = None
+        self.telemetry: dict[str, Any] = {}
 
     def log(self, text: str) -> None:
         if self.verbose:
@@ -163,7 +165,19 @@ class Tracer:
         if not self.verbose:
             return
 
-        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s " + "─" * 40)
+        token_str = ""
+        if step.usage:
+            p_tok = int(step.usage.get("prompt_tokens") or 0)
+            c_tok = int(step.usage.get("completion_tokens") or 0)
+            cached_tok = int(step.usage.get("cached_tokens") or 0)
+            hit_pct = float(step.usage.get("cache_hit_rate_pct") or 0.0)
+            if p_tok > 0 or c_tok > 0:
+                if cached_tok > 0:
+                    token_str = f" · {p_tok:,} in ({cached_tok:,} cached - {hit_pct:.1f}%), {c_tok:,} out"
+                else:
+                    token_str = f" · {p_tok:,} in, {c_tok:,} out"
+
+        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s{token_str} " + "─" * 25)
         print(f"\n{divider}")
 
         model_text = step.model_response.get("content")
@@ -202,15 +216,42 @@ class Tracer:
             remaining = len(lines) - max_preview_lines
             print(_dim(f"  ... ({remaining} more lines)"))
 
+    def _compute_telemetry(self) -> dict[str, Any]:
+        p_tok = sum(
+            int(s.usage.get("prompt_tokens", 0) or 0)
+            for s in self.steps
+            if isinstance(s.usage, dict) and isinstance(s.usage.get("prompt_tokens"), (int, float))
+        )
+        c_tok = sum(
+            int(s.usage.get("completion_tokens", 0) or 0)
+            for s in self.steps
+            if isinstance(s.usage, dict)
+            and isinstance(s.usage.get("completion_tokens"), (int, float))
+        )
+        cached_tok = sum(
+            int(s.usage.get("cached_tokens", 0) or 0)
+            for s in self.steps
+            if isinstance(s.usage, dict) and isinstance(s.usage.get("cached_tokens"), (int, float))
+        )
+        hit_pct = round((cached_tok / p_tok * 100), 1) if p_tok > 0 else 0.0
+        return {
+            "total_prompt_tokens": p_tok,
+            "total_completion_tokens": c_tok,
+            "total_cached_tokens": cached_tok,
+            "cache_hit_rate_pct": hit_pct,
+        }
+
     def finalize(
         self,
         finish_reason: str,
         eval_result: EvalResult | None = None,
         patch_diff: str | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> tuple[Path, Path]:
         self.finish_reason = finish_reason
         self.eval_result = eval_result
         self.patch_diff = patch_diff
+        self.telemetry = telemetry if isinstance(telemetry, dict) else self._compute_telemetry()
 
         json_path = self.output_dir / "trace.json"
         md_path = self.output_dir / "trace.md"
@@ -229,6 +270,7 @@ class Tracer:
             },
             "finish_reason": self.finish_reason,
             "total_steps": len(self.steps),
+            "telemetry": self.telemetry,
             "patch_diff": self.patch_diff,
             "eval_result": {
                 "passed": self.eval_result.passed if self.eval_result else None,
@@ -240,6 +282,7 @@ class Tracer:
                     "step_index": s.step_index,
                     "duration_s": s.duration_s,
                     "compaction_applied": s.compaction_applied,
+                    "usage": s.usage,
                     "prompt_messages": s.prompt_messages,
                     "model_response": s.model_response,
                     "tool_results": s.tool_results,
@@ -255,6 +298,17 @@ class Tracer:
             f"- **Status**: `{self.finish_reason}`",
             f"- **Total Steps**: {len(self.steps)}",
         ]
+        if self.telemetry:
+            p_tok = self.telemetry.get("total_prompt_tokens", 0)
+            c_tok = self.telemetry.get("total_completion_tokens", 0)
+            cached_tok = self.telemetry.get("total_cached_tokens", 0)
+            hit_pct = self.telemetry.get("cache_hit_rate_pct", 0.0)
+            if p_tok or c_tok:
+                cached_tag = (
+                    f" ({cached_tok:,} cached - {hit_pct:.1f}% hit rate)" if cached_tok else ""
+                )
+                lines.append(f"- **Tokens**: {p_tok:,} in{cached_tag}, {c_tok:,} out")
+
         if self.eval_result:
             status_tag = "PASSED" if self.eval_result.passed else "FAILED"
             lines.extend(
@@ -275,9 +329,19 @@ class Tracer:
         )
 
         for s in self.steps:
+            step_header = f"### Step {s.step_index} ({s.duration_s:.2f}s"
+            if s.usage:
+                p = s.usage.get("prompt_tokens", 0)
+                c = s.usage.get("completion_tokens", 0)
+                ca = s.usage.get("cached_tokens", 0)
+                h = s.usage.get("cache_hit_rate_pct", 0.0)
+                if p or c:
+                    ca_str = f" [{ca:,} cached - {h:.1f}%]" if ca else ""
+                    step_header += f" · {p:,} in{ca_str}, {c:,} out"
+            step_header += ")"
             lines.extend(
                 [
-                    f"### Step {s.step_index} ({s.duration_s:.2f}s)",
+                    step_header,
                     "",
                 ]
             )

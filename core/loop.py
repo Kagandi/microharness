@@ -43,6 +43,12 @@ class AgentLoop:
         # 4. Record assistant thought / intent into memory
         self.memory.add_assistant(content=content, tool_calls=tool_calls)
 
+        step_usage: dict[str, Any] = {}
+        if hasattr(self.model, "get_last_step_usage"):
+            step_usage = self.model.get_last_step_usage()
+        elif hasattr(self.model, "last_usage"):
+            step_usage = dict(getattr(self.model, "last_usage", {}) or {})
+
         # 5. Stop condition: If no tools called, the agent has finished reasoning
         if not tool_calls:
             duration = time.time() - start_time
@@ -53,6 +59,7 @@ class AgentLoop:
                 tool_results=[],
                 compaction_applied=compaction_applied,
                 duration_s=duration,
+                usage=step_usage,
             )
             return True, trace
 
@@ -80,6 +87,7 @@ class AgentLoop:
             tool_results=[tr.to_dict() for tr in tool_results],
             compaction_applied=compaction_applied,
             duration_s=duration,
+            usage=step_usage,
         )
 
         return False, trace

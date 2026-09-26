@@ -45,6 +45,15 @@ class CacheAwareModel(Model, Protocol):
     def get_cache_stats(self) -> dict[str, Any]: ...
 
 
+@runtime_checkable
+class ReasoningAwareModel(Model, Protocol):
+    """Protocol for models that support dynamic reasoning effort level control."""
+
+    def set_reasoning_effort(self, effort: str | None) -> str | None: ...
+
+    def get_reasoning_effort(self) -> str | None: ...
+
+
 def normalize_cache_ttl(ttl: str | None) -> str | None:
     """Normalizes cache TTL setting ('5m', '1h', or None for disabled).
 
@@ -64,6 +73,22 @@ def normalize_cache_ttl(ttl: str | None) -> str | None:
         return "1h"
     raise ValueError(
         f"Unsupported cache TTL: '{ttl}'. Valid options: '5m' (5 minutes), '1h' (1 hour), or 'off'."
+    )
+
+
+def normalize_reasoning_effort(effort: str | None) -> str | None:
+    """Normalizes reasoning/thinking effort level ('low', 'medium', 'high', numeric budget, or None)."""
+    if effort is None:
+        return None
+    val = str(effort).strip().lower()
+    if val in ("off", "none", "disable", "disabled", "false", "0", ""):
+        return None
+    if val in ("low", "medium", "high"):
+        return val
+    if val.isdigit():
+        return val
+    raise ValueError(
+        f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', numeric token budget, or 'off'."
     )
 
 
@@ -88,6 +113,41 @@ class _CacheTelemetryMixin:
         self.cache_ttl = normalize_cache_ttl(ttl)
         return self.cache_ttl
 
+    def get_last_step_usage(self) -> dict[str, Any]:
+        """Returns normalized token counts and cache hit percentage for the most recent generation step."""
+        usage = self.last_usage or {}
+        p_tok = int(
+            usage.get("prompt_tokens")
+            or usage.get("input_tokens")
+            or usage.get("promptTokenCount")
+            or 0
+        )
+        c_tok = int(
+            usage.get("completion_tokens")
+            or usage.get("output_tokens")
+            or usage.get("candidatesTokenCount")
+            or 0
+        )
+        prompt_details = usage.get("prompt_tokens_details")
+        cached_tok = 0
+        if isinstance(prompt_details, dict):
+            cached_tok = int(prompt_details.get("cached_tokens") or 0)
+        if not cached_tok:
+            cached_tok = int(
+                usage.get("cache_read_input_tokens")
+                or usage.get("cached_tokens")
+                or usage.get("cachedContentTokenCount")
+                or usage.get("native_tokens_prompt_cache_read")
+                or 0
+            )
+        hit_pct = round((cached_tok / p_tok * 100), 1) if p_tok > 0 else 0.0
+        return {
+            "prompt_tokens": p_tok,
+            "completion_tokens": c_tok,
+            "cached_tokens": cached_tok,
+            "cache_hit_rate_pct": hit_pct,
+        }
+
     def get_cache_stats(self) -> dict[str, Any]:
         """Returns prompt cache TTL and cumulative token utilization metrics."""
         hit_rate = (
@@ -103,6 +163,38 @@ class _CacheTelemetryMixin:
             "total_cached_tokens": self.total_cached_tokens,
             "cache_hit_rate_pct": round(hit_rate, 1),
         }
+
+    def _update_usage(self, usage: dict[str, Any]) -> None:
+        self.last_usage = usage
+        prompt_toks = int(
+            usage.get("prompt_tokens")
+            or usage.get("input_tokens")
+            or usage.get("promptTokenCount")
+            or 0
+        )
+        comp_toks = int(
+            usage.get("completion_tokens")
+            or usage.get("output_tokens")
+            or usage.get("candidatesTokenCount")
+            or 0
+        )
+
+        cached_toks = 0
+        prompt_details = usage.get("prompt_tokens_details")
+        if isinstance(prompt_details, dict):
+            cached_toks = int(prompt_details.get("cached_tokens") or 0)
+        if not cached_toks:
+            cached_toks = int(
+                usage.get("cache_read_input_tokens")
+                or usage.get("cached_tokens")
+                or usage.get("cachedContentTokenCount")
+                or usage.get("native_tokens_prompt_cache_read")
+                or 0
+            )
+
+        self.total_prompt_tokens += prompt_toks
+        self.total_completion_tokens += comp_toks
+        self.total_cached_tokens += cached_toks
 
 
 class HttpChatModel(_CacheTelemetryMixin):
@@ -124,6 +216,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         headers: dict[str, str] | None = None,
         timeout: float = 90.0,
         cache_ttl: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -143,7 +236,17 @@ class HttpChatModel(_CacheTelemetryMixin):
                 self.extra_headers["X-Title"] = "microharness"
         self.timeout = timeout
         self.total_rate_limit_wait_s: float = 0.0
+        self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self._init_cache_telemetry(cache_ttl)
+
+    def set_reasoning_effort(self, effort: str | None) -> str | None:
+        """Dynamically switches reasoning effort level ('low', 'medium', 'high', numeric budget, or 'off'/None)."""
+        self.reasoning_effort = normalize_reasoning_effort(effort)
+        return self.reasoning_effort
+
+    def get_reasoning_effort(self) -> str | None:
+        """Returns the current reasoning effort level or None."""
+        return self.reasoning_effort
 
     def _build_headers(self) -> dict[str, str]:
         headers = {
@@ -185,6 +288,15 @@ class HttpChatModel(_CacheTelemetryMixin):
             "model": self.model,
             "messages": formatted_messages,
         }
+        if self.reasoning_effort:
+            effort = self.reasoning_effort.lower()
+            if effort in ("low", "medium", "high"):
+                payload["reasoning_effort"] = effort
+                if "openrouter.ai" in self.endpoint:
+                    payload["reasoning"] = {"effort": effort}
+            elif effort.isdigit() and "openrouter.ai" in self.endpoint:
+                payload["reasoning"] = {"max_tokens": int(effort)}
+
         if tools:
             if self.cache_ttl and supports_cache_ctrl:
                 cache_ctrl = {"type": "ephemeral"}
@@ -252,24 +364,6 @@ class HttpChatModel(_CacheTelemetryMixin):
                 ) from exc
         return {}
 
-    def _update_usage(self, usage: dict[str, Any]) -> None:
-        self.last_usage = usage
-        prompt_toks = usage.get("prompt_tokens", 0) or 0
-        comp_toks = usage.get("completion_tokens", 0) or 0
-
-        cached_toks = 0
-        prompt_details = usage.get("prompt_tokens_details")
-        if isinstance(prompt_details, dict):
-            cached_toks = prompt_details.get("cached_tokens", 0) or 0
-        if not cached_toks:
-            cached_toks = (
-                usage.get("cache_read_input_tokens", 0) or usage.get("cached_tokens", 0) or 0
-            )
-
-        self.total_prompt_tokens += prompt_toks
-        self.total_completion_tokens += comp_toks
-        self.total_cached_tokens += cached_toks
-
     def _parse_tool_calls(self, raw_tool_calls: list[dict[str, Any]] | None) -> list[ToolCall]:
         if not raw_tool_calls:
             return []
@@ -285,11 +379,13 @@ class HttpChatModel(_CacheTelemetryMixin):
             else:
                 parsed_args = args_raw or {}
 
+            extra_content = raw_tc.get("extra_content")
             tool_calls.append(
                 ToolCall(
                     id=raw_tc["id"],
                     name=func_data["name"],
                     arguments=parsed_args,
+                    extra_content=extra_content if isinstance(extra_content, dict) else None,
                 )
             )
         return tool_calls
@@ -317,10 +413,21 @@ class MockModel(_CacheTelemetryMixin):
         self,
         script: list[tuple[str, list[ToolCall]]],
         cache_ttl: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.script = list(script)
         self.step_idx = 0
+        self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self._init_cache_telemetry(cache_ttl)
+
+    def set_reasoning_effort(self, effort: str | None) -> str | None:
+        """Dynamically switches reasoning effort level on MockModel."""
+        self.reasoning_effort = normalize_reasoning_effort(effort)
+        return self.reasoning_effort
+
+    def get_reasoning_effort(self) -> str | None:
+        """Returns current reasoning effort level on MockModel."""
+        return self.reasoning_effort
 
     def reset(self) -> None:
         """Resets the script execution index for subsequent task runs."""

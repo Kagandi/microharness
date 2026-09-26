@@ -2,7 +2,13 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
-from core.model import HttpChatModel, MockModel, normalize_cache_ttl
+from core.model import (
+    HttpChatModel,
+    MockModel,
+    ReasoningAwareModel,
+    normalize_cache_ttl,
+    normalize_reasoning_effort,
+)
 from core.types import Message, ToolCall
 
 
@@ -437,6 +443,120 @@ class TestModel(unittest.TestCase):
             model = _resolve_model(args, config=config, cache_ttl="off")
             self.assertIsInstance(model, HttpChatModel)
             self.assertEqual(model.api_key, "test-env-key-gemini")
+
+    def test_normalize_reasoning_effort(self):
+        """Invariant: Reasoning effort normalization accepts low/medium/high/digits and disables cleanly."""
+        self.assertEqual(normalize_reasoning_effort("low"), "low")
+        self.assertEqual(normalize_reasoning_effort("LOW"), "low")
+        self.assertEqual(normalize_reasoning_effort("medium"), "medium")
+        self.assertEqual(normalize_reasoning_effort("high"), "high")
+        self.assertEqual(normalize_reasoning_effort("2048"), "2048")
+
+        self.assertIsNone(normalize_reasoning_effort(None))
+        self.assertIsNone(normalize_reasoning_effort("off"))
+        self.assertIsNone(normalize_reasoning_effort("none"))
+        self.assertIsNone(normalize_reasoning_effort("disable"))
+        self.assertIsNone(normalize_reasoning_effort("disabled"))
+        self.assertIsNone(normalize_reasoning_effort("false"))
+        self.assertIsNone(normalize_reasoning_effort("0"))
+        self.assertIsNone(normalize_reasoning_effort(""))
+
+        with self.assertRaises(ValueError):
+            normalize_reasoning_effort("extreme")
+        with self.assertRaises(ValueError):
+            normalize_reasoning_effort("unsupported_effort")
+
+    def test_reasoning_protocol_and_methods(self):
+        """Invariant: HttpChatModel and MockModel implement ReasoningAwareModel."""
+        m_http = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="high")
+        self.assertTrue(isinstance(m_http, ReasoningAwareModel))
+        self.assertEqual(m_http.get_reasoning_effort(), "high")
+        m_http.set_reasoning_effort("low")
+        self.assertEqual(m_http.get_reasoning_effort(), "low")
+        m_http.set_reasoning_effort("off")
+        self.assertIsNone(m_http.get_reasoning_effort())
+
+        m_mock = MockModel(script=[], reasoning_effort="medium")
+        self.assertTrue(isinstance(m_mock, ReasoningAwareModel))
+        self.assertEqual(m_mock.get_reasoning_effort(), "medium")
+        m_mock.set_reasoning_effort("off")
+        self.assertIsNone(m_mock.get_reasoning_effort())
+
+    def test_reasoning_payload_injection(self):
+        """Invariant: HttpChatModel injects reasoning payload according to effort."""
+        messages = [Message(role="user", content="Think carefully")]
+
+        # Standard OpenAI / Google AI Studio endpoint (uses standard reasoning_effort)
+        m_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="low")
+        payload_std = m_std._build_payload(messages, tools=[])
+        self.assertEqual(payload_std.get("reasoning_effort"), "low")
+        self.assertNotIn("reasoning", payload_std)
+
+        # OpenRouter endpoint (uses both standard reasoning_effort and proprietary reasoning dict)
+        m_or = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="low")
+        payload_or = m_or._build_payload(messages, tools=[])
+        self.assertEqual(payload_or.get("reasoning_effort"), "low")
+        self.assertEqual(payload_or.get("reasoning"), {"effort": "low"})
+
+        # Numeric token budget on OpenRouter
+        m_num = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="4096")
+        payload_num = m_num._build_payload(messages, tools=[])
+        self.assertEqual(payload_num.get("reasoning"), {"max_tokens": 4096})
+        self.assertNotIn("reasoning_effort", payload_num)
+
+        # Off / None
+        m_off = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort=None)
+        payload_off = m_off._build_payload(messages, tools=[])
+        self.assertNotIn("reasoning", payload_off)
+        self.assertNotIn("reasoning_effort", payload_off)
+
+    def test_get_last_step_usage_and_cache_hit_rate(self):
+        """Invariant: Token extraction normalizes OpenAI, Anthropic, Gemini formats and computes hit percentage."""
+        m = HttpChatModel(base_url="https://api.openai.com/v1", model="test")
+
+        # 1. OpenAI / OpenRouter format
+        m._update_usage({
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "prompt_tokens_details": {"cached_tokens": 750},
+        })
+        step_usage = m.get_last_step_usage()
+        self.assertEqual(step_usage["prompt_tokens"], 1000)
+        self.assertEqual(step_usage["completion_tokens"], 200)
+        self.assertEqual(step_usage["cached_tokens"], 750)
+        self.assertEqual(step_usage["cache_hit_rate_pct"], 75.0)
+
+        # 2. Anthropic format
+        m._update_usage({
+            "input_tokens": 2000,
+            "output_tokens": 150,
+            "cache_read_input_tokens": 1200,
+        })
+        step_usage2 = m.get_last_step_usage()
+        self.assertEqual(step_usage2["prompt_tokens"], 2000)
+        self.assertEqual(step_usage2["completion_tokens"], 150)
+        self.assertEqual(step_usage2["cached_tokens"], 1200)
+        self.assertEqual(step_usage2["cache_hit_rate_pct"], 60.0)
+
+        # 3. Google AI Studio / Gemini format
+        m._update_usage({
+            "promptTokenCount": 500,
+            "candidatesTokenCount": 50,
+            "cachedContentTokenCount": 200,
+        })
+        step_usage3 = m.get_last_step_usage()
+        self.assertEqual(step_usage3["prompt_tokens"], 500)
+        self.assertEqual(step_usage3["completion_tokens"], 50)
+        self.assertEqual(step_usage3["cached_tokens"], 200)
+        self.assertEqual(step_usage3["cache_hit_rate_pct"], 40.0)
+
+        # 4. Zero tokens
+        m._update_usage({})
+        step_usage4 = m.get_last_step_usage()
+        self.assertEqual(step_usage4["prompt_tokens"], 0)
+        self.assertEqual(step_usage4["completion_tokens"], 0)
+        self.assertEqual(step_usage4["cached_tokens"], 0)
+        self.assertEqual(step_usage4["cache_hit_rate_pct"], 0.0)
 
 
 if __name__ == "__main__":

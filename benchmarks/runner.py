@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +23,10 @@ class TaskReport:
     workspace_path: str
     patch_path: str | None = None
     feedback: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    cache_hit_rate_pct: float = 0.0
 
 
 @dataclass
@@ -34,24 +38,47 @@ class BenchmarkReport:
     mean_score: float
     total_duration_s: float
     tasks: list[TaskReport]
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_cached_tokens: int = 0
+    cache_hit_rate_pct: float = 0.0
+    config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def print_scorecard(self) -> None:
-        width = 96
+        width = 108
         print("\n" + "=" * width)
         print(f"📊 {self.suite_name.upper()} BENCHMARK SCORECARD".center(width))
         print("=" * width)
+        if self.config:
+            cfg_parts = []
+            if self.config.get("model"):
+                cfg_parts.append(f"Model: {self.config['model']}")
+            if self.config.get("provider"):
+                cfg_parts.append(f"Provider: {self.config['provider']}")
+            if self.config.get("reasoning_effort"):
+                cfg_parts.append(f"Reasoning: {str(self.config['reasoning_effort']).upper()}")
+            if self.config.get("max_steps"):
+                cfg_parts.append(f"Max Steps: {self.config['max_steps']}")
+            if cfg_parts:
+                print(("Config: " + " | ".join(cfg_parts)).center(width))
+                print("-" * width)
         header = (
-            f"{'Task ID':<32} {'Status':<10} {'Score':<8} {'Steps':<7} {'Duration':<10} {'Trace'}"
+            f"{'Task ID':<30} {'Status':<10} {'Score':<7} {'Steps':<6} {'Duration':<9} {'Tokens (In / Out)':<22} {'Cache Hit':<10} {'Trace'}"
         )
         print(header)
         print("-" * width)
         for t in self.tasks:
             status_str = "PASSED ✅" if t.passed else "FAILED ❌"
             trace_short = Path(t.trace_path).name if t.trace_path else "-"
-            line = f"{t.task_id:<32} {status_str:<10} {t.score:<8.2f} {t.total_steps:<7} {t.duration_s:<9.1f}s {trace_short}"
+            tokens_str = f"{t.prompt_tokens:,} / {t.completion_tokens:,}"
+            hit_str = f"{t.cache_hit_rate_pct:.1f}%" if t.prompt_tokens > 0 else "-"
+            line = (
+                f"{t.task_id:<30} {status_str:<10} {t.score:<7.2f} {t.total_steps:<6} {t.duration_s:<8.1f}s "
+                f"{tokens_str:<22} {hit_str:<10} {trace_short}"
+            )
             print(line)
         print("-" * width)
         summary = (
@@ -59,6 +86,12 @@ class BenchmarkReport:
             f"| Mean Score: {self.mean_score:.2f} | Total Time: {self.total_duration_s:.1f}s"
         )
         print(summary.center(width))
+        if self.total_prompt_tokens > 0 or self.total_completion_tokens > 0:
+            token_summary = (
+                f"Tokens: {self.total_prompt_tokens:,} in ({self.total_cached_tokens:,} cached - "
+                f"{self.cache_hit_rate_pct:.1f}% hit rate) | {self.total_completion_tokens:,} out"
+            )
+            print(token_summary.center(width))
         print("=" * width + "\n")
 
 
@@ -67,12 +100,21 @@ def _build_report(
     total_tasks: int,
     task_reports: list[TaskReport],
     duration_s: float,
+    config: dict[str, Any] | None = None,
 ) -> BenchmarkReport:
     """Builds a BenchmarkReport with consistent denominators and zero-division guards."""
     passed = sum(1 for t in task_reports if t.passed)
     denominator = total_tasks if total_tasks > 0 else len(task_reports)
     pass_rate = (passed / denominator * 100.0) if denominator > 0 else 0.0
     mean_score = (sum(t.score for t in task_reports) / denominator) if denominator > 0 else 0.0
+
+    total_prompt = sum(t.prompt_tokens for t in task_reports)
+    total_comp = sum(t.completion_tokens for t in task_reports)
+    total_cached = sum(t.cached_tokens for t in task_reports)
+    overall_hit_rate = (
+        round(total_cached / total_prompt * 100.0, 1) if total_prompt > 0 else 0.0
+    )
+
     return BenchmarkReport(
         suite_name=suite_name,
         total_tasks=total_tasks,
@@ -81,6 +123,11 @@ def _build_report(
         mean_score=mean_score,
         total_duration_s=duration_s,
         tasks=list(task_reports),
+        total_prompt_tokens=total_prompt,
+        total_completion_tokens=total_comp,
+        total_cached_tokens=total_cached,
+        cache_hit_rate_pct=overall_hit_rate,
+        config=dict(config or {}),
     )
 
 
@@ -99,10 +146,12 @@ def run_benchmark_suite(
     output_dir: Path | str | None = None,
     verbose: bool = True,
     resume: bool = False,
+    config: dict[str, Any] | None = None,
 ) -> BenchmarkReport:
     """Executes a list of (Task, Evaluator) instances sequentially and aggregates results."""
     start_time = time.time()
     task_reports: list[TaskReport] = []
+    effective_config: dict[str, Any] = dict(config or {})
 
     retained_tasks_map: dict[str, TaskReport] = {}
     if resume and output_dir:
@@ -110,6 +159,10 @@ def run_benchmark_suite(
         if report_file.is_file():
             try:
                 prev_data = json.loads(report_file.read_text(encoding="utf-8"))
+                prev_cfg = prev_data.get("config", {})
+                if isinstance(prev_cfg, dict):
+                    effective_config = {**prev_cfg, **effective_config}
+
                 for t_dict in prev_data.get("tasks", []):
                     finish_reason = str(t_dict.get("finish_reason", "completed"))
                     is_passed = bool(t_dict.get("passed", False))
@@ -134,6 +187,10 @@ def run_benchmark_suite(
                             workspace_path=str(t_dict.get("workspace_path", "")),
                             patch_path=t_dict.get("patch_path"),
                             feedback=str(t_dict.get("feedback", "")),
+                            prompt_tokens=int(t_dict.get("prompt_tokens", 0)),
+                            completion_tokens=int(t_dict.get("completion_tokens", 0)),
+                            cached_tokens=int(t_dict.get("cached_tokens", 0)),
+                            cache_hit_rate_pct=float(t_dict.get("cache_hit_rate_pct", 0.0)),
                         )
                 if verbose and retained_tasks_map:
                     print(
@@ -177,6 +234,10 @@ def run_benchmark_suite(
                 workspace_path=run_result.workspace_path,
                 patch_path=run_result.patch_path,
                 feedback=run_result.eval_result.feedback if run_result.eval_result else "",
+                prompt_tokens=run_result.prompt_tokens,
+                completion_tokens=run_result.completion_tokens,
+                cached_tokens=run_result.cached_tokens,
+                cache_hit_rate_pct=run_result.cache_hit_rate_pct,
             )
         )
 
@@ -187,6 +248,7 @@ def run_benchmark_suite(
                 total_tasks=len(tasks),
                 task_reports=task_reports,
                 duration_s=time.time() - start_time,
+                config=effective_config,
             )
             _save_report_json(cur_report, output_dir, suite_name)
 
@@ -202,6 +264,7 @@ def run_benchmark_suite(
                     total_tasks=len(tasks),
                     task_reports=task_reports,
                     duration_s=time.time() - start_time,
+                    config=effective_config,
                 )
                 _save_report_json(cur_report, output_dir, suite_name)
 
@@ -218,6 +281,7 @@ def run_benchmark_suite(
         total_tasks=len(tasks),
         task_reports=task_reports,
         duration_s=time.time() - start_time,
+        config=effective_config,
     )
 
     if verbose:

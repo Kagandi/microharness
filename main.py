@@ -239,6 +239,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Prompt cache duration: 5m (default ephemeral), 1h (extended beta), or off (env: CACHE_TTL or config.json)",
     )
     parser.add_argument(
+        "--reasoning",
+        default=None,
+        help="Reasoning/thinking effort level: 'low', 'medium', 'high', numeric token budget, or 'off' (env: REASONING_EFFORT or config.json)",
+    )
+    parser.add_argument(
         "--docker",
         action="store_true",
         default=None,
@@ -264,7 +269,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_model(args: argparse.Namespace, config: dict[str, Any], cache_ttl: str) -> Model:
+def _resolve_model(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    cache_ttl: str,
+    reasoning_effort: str | None = None,
+) -> Model:
     provider = (getattr(args, "provider", None) or config.get("provider") or "").lower().strip()
     default_endpoint = None
     default_model = "cohere/north-mini-code:free"
@@ -275,7 +285,12 @@ def _resolve_model(args: argparse.Namespace, config: dict[str, Any], cache_ttl: 
         default_endpoint = "https://openrouter.ai/api/v1"
         default_model = "stealth/space-bunny-alpha"
 
-    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint") or default_endpoint
+    endpoint = (
+        args.endpoint
+        or os.getenv("MODEL_ENDPOINT")
+        or config.get("endpoint")
+        or default_endpoint
+    )
     model_name = (
         args.model
         or os.getenv("MODEL_NAME")
@@ -293,12 +308,14 @@ def _resolve_model(args: argparse.Namespace, config: dict[str, Any], cache_ttl: 
 
     if endpoint:
         cache_lbl = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
-        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl})")
+        reasoning_lbl = f", reasoning: {reasoning_effort.upper()}" if reasoning_effort else ""
+        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl}{reasoning_lbl})")
         return HttpChatModel(
             base_url=endpoint,
             model=model_name,
             api_key=api_key,
             cache_ttl=cache_ttl,
+            reasoning_effort=reasoning_effort,
         )
 
     print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
@@ -315,6 +332,13 @@ def _print_run_summary(result: RunResult) -> None:
     else:
         print(f"Outcome: {'PASSED ✅' if result.passed else 'FINISHED 🏁'}")
     print(f"Total Steps: {result.total_steps}")
+    if result.prompt_tokens or result.completion_tokens:
+        cached_info = (
+            f" ({result.cached_tokens:,} cached - {result.cache_hit_rate_pct:.1f}% hit rate)"
+            if result.cached_tokens
+            else ""
+        )
+        print(f"Tokens: {result.prompt_tokens:,} in{cached_info}, {result.completion_tokens:,} out")
     print(f"Workspace: {result.workspace_path}")
     print(f"Trace: {Path(result.trace_path).parent / 'trace.md'}")
     if result.patch_path:
@@ -329,6 +353,7 @@ def create_benchmark_harness_factory(
     use_docker: bool = False,
     docker_image: str | None = None,
     cache_ttl: str | None = None,
+    reasoning_effort: str | None = None,
     verbose: bool = True,
 ) -> Callable[[Evaluator], Harness]:
     """Creates a harness factory for benchmark suites that resets ResettableModel between tasks."""
@@ -345,6 +370,7 @@ def create_benchmark_harness_factory(
             docker_image=docker_image,
             evaluator=ev,
             cache_ttl=cache_ttl,
+            reasoning_effort=reasoning_effort,
             verbose=verbose,
         )
 
@@ -359,6 +385,7 @@ def _dispatch_benchmark(
     global_dir: Path,
     target_dir: Path,
     cache_ttl: str,
+    reasoning_effort: str | None,
     use_docker: bool,
     docker_image: str,
 ) -> bool:
@@ -373,8 +400,18 @@ def _dispatch_benchmark(
         use_docker=use_docker,
         docker_image=docker_image,
         cache_ttl=cache_ttl,
+        reasoning_effort=reasoning_effort,
         verbose=True,
     )
+
+    benchmark_metadata = {
+        "provider": getattr(args, "provider", None) or config.get("provider"),
+        "model": getattr(model, "model", None) or getattr(args, "model", None) or config.get("model"),
+        "endpoint": getattr(model, "endpoint", None) or getattr(args, "endpoint", None) or config.get("endpoint"),
+        "cache_ttl": cache_ttl,
+        "reasoning_effort": reasoning_effort,
+        "max_steps": args.max_steps or int(config.get("max_steps", 30)),
+    }
 
     if bench_choice in ("mini-swe", "all"):
         from benchmarks.mini_swe import get_mini_swe_suite
@@ -399,6 +436,7 @@ def _dispatch_benchmark(
             output_dir=runs_dir,
             verbose=True,
             resume=args.resume,
+            config=benchmark_metadata,
         )
         return True
 
@@ -437,6 +475,7 @@ def _dispatch_benchmark(
             output_dir=runs_dir,
             verbose=True,
             resume=args.resume,
+            config=benchmark_metadata,
         )
         return True
 
@@ -471,11 +510,18 @@ def main():
         else (global_dir / "runs").resolve()
     )
     cache_ttl = args.cache_ttl or os.getenv("CACHE_TTL") or config.get("cache_ttl", "5m")
+    reasoning_effort = (
+        getattr(args, "reasoning", None)
+        or os.getenv("REASONING_EFFORT")
+        or os.getenv("MODEL_REASONING_EFFORT")
+        or config.get("reasoning_effort")
+        or config.get("reasoning")
+    )
     use_docker = args.docker if args.docker is not None else bool(config.get("docker", False))
     docker_image = args.docker_image or config.get("docker_image", "python:3.11")
 
     # 1. Select Model
-    model = _resolve_model(args, config, cache_ttl)
+    model = _resolve_model(args, config, cache_ttl, reasoning_effort)
 
     # 2. Benchmark Suite Mode (e.g. --benchmark mini-swe or --demo calculator)
     if args.benchmark or args.demo:
@@ -487,6 +533,7 @@ def main():
             global_dir=global_dir,
             target_dir=target_dir,
             cache_ttl=cache_ttl,
+            reasoning_effort=reasoning_effort,
             use_docker=use_docker,
             docker_image=docker_image,
         )
@@ -503,6 +550,7 @@ def main():
         docker=use_docker,
         docker_image=docker_image,
         cache_ttl=cache_ttl,
+        reasoning_effort=reasoning_effort,
         verbose=True,
     )
 

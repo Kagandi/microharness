@@ -552,6 +552,71 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         t3_rep = next(t for t in report.tasks if t.task_id == task3.id)
         self.assertTrue(t3_rep.passed)
 
+    def test_benchmark_report_token_aggregation_and_scorecard(self):
+        """Invariant: BenchmarkReport computes aggregate token usage, cache hit rate, and displays them in scorecard."""
+        import io
+        import sys
+        from benchmarks.runner import TaskReport, _build_report
+
+        t1 = TaskReport(
+            task_id="task_1",
+            passed=True,
+            score=1.0,
+            total_steps=5,
+            duration_s=10.0,
+            finish_reason="completed",
+            trace_path="trace1.json",
+            workspace_path="/ws1",
+            prompt_tokens=1000,
+            completion_tokens=100,
+            cached_tokens=800,
+            cache_hit_rate_pct=80.0,
+        )
+        t2 = TaskReport(
+            task_id="task_2",
+            passed=False,
+            score=0.5,
+            total_steps=8,
+            duration_s=15.0,
+            finish_reason="max_steps_exceeded",
+            trace_path="trace2.json",
+            workspace_path="/ws2",
+            prompt_tokens=2000,
+            completion_tokens=200,
+            cached_tokens=1000,
+            cache_hit_rate_pct=50.0,
+        )
+
+        report = _build_report(
+            suite_name="Mini-SWE",
+            total_tasks=2,
+            task_reports=[t1, t2],
+            duration_s=25.0,
+        )
+
+        self.assertEqual(report.total_prompt_tokens, 3000)
+        self.assertEqual(report.total_completion_tokens, 300)
+        self.assertEqual(report.total_cached_tokens, 1800)
+        # 1800 / 3000 = 60.0%
+        self.assertEqual(report.cache_hit_rate_pct, 60.0)
+
+        # Verify print_scorecard output contains the tokens data and hit rate
+        captured = io.StringIO()
+        orig = sys.stdout
+        try:
+            sys.stdout = captured
+            report.print_scorecard()
+        finally:
+            sys.stdout = orig
+
+        scorecard = captured.getvalue()
+        self.assertIn("MINI-SWE BENCHMARK SCORECARD", scorecard)
+        self.assertIn("1,000 / 100", scorecard)
+        self.assertIn("80.0%", scorecard)
+        self.assertIn("2,000 / 200", scorecard)
+        self.assertIn("50.0%", scorecard)
+        self.assertIn("Tokens: 3,000 in (1,800 cached - 60.0% hit rate) | 300 out", scorecard)
+
 
 if __name__ == "__main__":
     unittest.main()
