@@ -428,6 +428,130 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertEqual(len(report.tasks), 1)
         self.assertEqual(report.tasks[0].finish_reason, "rate_limited")
 
+    def test_benchmark_suite_resume_reruns_error_and_preserves_failed_completed_tasks(self):
+        """Invariant: resume re-runs tasks with finish_reason='error' or 'rate_limited'
+
+        while retaining tasks that completed evaluation even if the agent failed (passed=False).
+        """
+        from unittest.mock import MagicMock
+
+        from core.types import RunResult
+
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+        task3, eval3 = create_auth_middleware_task()
+        task4, eval4 = create_lru_ttl_cache_task()
+
+        report_file = Path(self.tmp_dir) / "mini_swe_report.json"
+        initial_report_data = {
+            "suite_name": "Mini-SWE",
+            "total_tasks": 4,
+            "passed_tasks": 0,
+            "pass_rate": 0.0,
+            "mean_score": 0.125,
+            "total_duration_s": 25.0,
+            "tasks": [
+                {
+                    "task_id": task1.id,
+                    "passed": False,
+                    "score": 0.5,
+                    "total_steps": 10,
+                    "duration_s": 15.0,
+                    "finish_reason": "max_steps_exceeded",
+                    "trace_path": "/t1/trace.json",
+                    "workspace_path": "/t1/ws",
+                    "patch_path": None,
+                    "feedback": "Failed tests",
+                },
+                {
+                    "task_id": task2.id,
+                    "passed": False,
+                    "score": 0.0,
+                    "total_steps": 0,
+                    "duration_s": 1.0,
+                    "finish_reason": "error",
+                    "trace_path": "/t2/trace.json",
+                    "workspace_path": "/t2/ws",
+                    "patch_path": None,
+                    "feedback": "Runtime error",
+                },
+                {
+                    "task_id": task3.id,
+                    "passed": False,
+                    "score": 0.0,
+                    "total_steps": 2,
+                    "duration_s": 4.0,
+                    "finish_reason": "rate_limited",
+                    "trace_path": "/t3/trace.json",
+                    "workspace_path": "/t3/ws",
+                    "patch_path": None,
+                    "feedback": "429 Too Many Requests",
+                },
+                {
+                    "task_id": task4.id,
+                    "passed": True,
+                    "score": 1.0,
+                    "total_steps": 5,
+                    "duration_s": 5.0,
+                    "finish_reason": "completed",
+                    "trace_path": "/t4/trace.json",
+                    "workspace_path": "/t4/ws",
+                    "patch_path": None,
+                    "feedback": "Passed all tests",
+                },
+            ],
+        }
+        report_file.write_text(json.dumps(initial_report_data), encoding="utf-8")
+
+        mock_harness = MagicMock()
+
+        def fake_run(t):
+            return RunResult(
+                task_id=t.id,
+                passed=True,
+                score=1.0,
+                total_steps=4,
+                duration_s=3.0,
+                finish_reason="completed",
+                trace_path=f"/{t.id}/trace.json",
+                workspace_path=f"/{t.id}/ws",
+            )
+
+        mock_harness.run.side_effect = fake_run
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2), (task3, eval3), (task4, eval4)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+            resume=True,
+        )
+
+        # Only task2 (error) and task3 (rate_limited) should be executed
+        self.assertEqual(factory.call_count, 2)
+        executed_task_ids = [call.args[0].id for call in mock_harness.run.call_args_list]
+        self.assertEqual(executed_task_ids, [task2.id, task3.id])
+
+        # Task 1 retained its non-passing score and max_steps_exceeded reason
+        t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
+        self.assertFalse(t1_rep.passed)
+        self.assertEqual(t1_rep.score, 0.5)
+        self.assertEqual(t1_rep.finish_reason, "max_steps_exceeded")
+
+        # Task 4 retained its passing score and completed reason
+        t4_rep = next(t for t in report.tasks if t.task_id == task4.id)
+        self.assertTrue(t4_rep.passed)
+        self.assertEqual(t4_rep.score, 1.0)
+        self.assertEqual(t4_rep.finish_reason, "completed")
+
+        # Task 2 and 3 have the new successful runs
+        t2_rep = next(t for t in report.tasks if t.task_id == task2.id)
+        self.assertTrue(t2_rep.passed)
+        t3_rep = next(t for t in report.tasks if t.task_id == task3.id)
+        self.assertTrue(t3_rep.passed)
+
 
 if __name__ == "__main__":
     unittest.main()

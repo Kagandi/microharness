@@ -104,29 +104,40 @@ def run_benchmark_suite(
     start_time = time.time()
     task_reports: list[TaskReport] = []
 
-    passed_tasks_map: dict[str, TaskReport] = {}
+    retained_tasks_map: dict[str, TaskReport] = {}
     if resume and output_dir:
         report_file = Path(output_dir) / f"{suite_name.lower().replace('-', '_')}_report.json"
         if report_file.is_file():
             try:
                 prev_data = json.loads(report_file.read_text(encoding="utf-8"))
                 for t_dict in prev_data.get("tasks", []):
-                    if t_dict.get("passed"):
-                        passed_tasks_map[t_dict["task_id"]] = TaskReport(
+                    finish_reason = str(t_dict.get("finish_reason", "completed"))
+                    is_passed = bool(t_dict.get("passed", False))
+                    total_steps = int(t_dict.get("total_steps", 0))
+
+                    # Rerun tasks that failed due to infrastructure/API errors or rate limits,
+                    # or aborted before executing any steps.
+                    # Retain tasks that passed, OR completed normal evaluation without an error
+                    # (do not re-run legitimate attempts just because the agent did not pass).
+                    is_error = finish_reason in ("error", "rate_limited") or (
+                        not is_passed and total_steps == 0
+                    )
+                    if is_passed or not is_error:
+                        retained_tasks_map[t_dict["task_id"]] = TaskReport(
                             task_id=t_dict["task_id"],
-                            passed=t_dict["passed"],
-                            score=float(t_dict.get("score", 1.0)),
-                            total_steps=int(t_dict.get("total_steps", 0)),
+                            passed=is_passed,
+                            score=float(t_dict.get("score", 1.0 if is_passed else 0.0)),
+                            total_steps=total_steps,
                             duration_s=float(t_dict.get("duration_s", 0.0)),
-                            finish_reason=str(t_dict.get("finish_reason", "completed")),
+                            finish_reason=finish_reason,
                             trace_path=str(t_dict.get("trace_path", "")),
                             workspace_path=str(t_dict.get("workspace_path", "")),
                             patch_path=t_dict.get("patch_path"),
                             feedback=str(t_dict.get("feedback", "")),
                         )
-                if verbose and passed_tasks_map:
+                if verbose and retained_tasks_map:
                     print(
-                        f"🔄 Resuming {suite_name}: {len(passed_tasks_map)} task(s) already PASSED in previous run."
+                        f"🔄 Resuming {suite_name}: {len(retained_tasks_map)} task(s) already completed in previous run (retaining results)."
                     )
             except Exception as exc:
                 if verbose:
@@ -138,12 +149,14 @@ def run_benchmark_suite(
         print(f"\n🏁 Launching {suite_name} Benchmark ({len(tasks)} tasks)...")
 
     for idx, (task, evaluator) in enumerate(tasks, start=1):
-        if task.id in passed_tasks_map:
+        if task.id in retained_tasks_map:
+            retained = retained_tasks_map[task.id]
             if verbose:
+                status_str = "PASSED" if retained.passed else f"COMPLETED ({retained.finish_reason})"
                 print(
-                    f"\n[{idx}/{len(tasks)}] ⏭️ Task '{task.id}' already PASSED in previous run. Skipping."
+                    f"\n[{idx}/{len(tasks)}] ⏭️ Task '{task.id}' already {status_str} in previous run (score={retained.score:.2f}). Skipping."
                 )
-            task_reports.append(passed_tasks_map[task.id])
+            task_reports.append(retained)
             continue
 
         if verbose:
@@ -178,6 +191,20 @@ def run_benchmark_suite(
             _save_report_json(cur_report, output_dir, suite_name)
 
         if run_result.finish_reason == "rate_limited":
+            # Preserve any remaining retained tasks from previous run so they are not lost
+            seen_ids = {t.task_id for t in task_reports}
+            for rem_task, _ in tasks[idx:]:
+                if rem_task.id in retained_tasks_map and rem_task.id not in seen_ids:
+                    task_reports.append(retained_tasks_map[rem_task.id])
+            if output_dir:
+                cur_report = _build_report(
+                    suite_name=suite_name,
+                    total_tasks=len(tasks),
+                    task_reports=task_reports,
+                    duration_s=time.time() - start_time,
+                )
+                _save_report_json(cur_report, output_dir, suite_name)
+
             if verbose:
                 print(
                     f"\n🛑 Benchmark halted due to rate limits on task '{task.id}'.\n"
