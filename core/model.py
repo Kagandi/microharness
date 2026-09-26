@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -23,11 +24,102 @@ class Model(Protocol):
 
 
 class RateLimitError(RuntimeError):
-    """Raised when an LLM provider returns HTTP 429 Too Many Requests."""
+    """Raised when an LLM provider returns HTTP 429 Too Many Requests or quota exhaustion."""
 
     def __init__(self, message: str, retry_after: float | None = None):
         super().__init__(message)
         self.retry_after = retry_after
+
+
+MAX_RETRY_SLEEP_S: float = 120.0
+
+
+def _is_unrecoverable_quota_error(status_code: int, err_body: str) -> bool:
+    """Returns True if the error indicates a prolonged or unrecoverable daily quota or credit limit."""
+    if status_code == 402:
+        return True
+    body_lower = err_body.lower()
+    # Explicit credit exhaustion keywords
+    if any(k in body_lower for k in ("insufficient credits", "credit limit reached", "payment required")):
+        return True
+    # Daily quota exceeded keywords where no short wait is feasible
+    if any(
+        k in body_lower
+        for k in (
+            "daily limit",
+            "daily request limit",
+            "limit reached for today",
+            "quota exceeded for today",
+            "exceeded your daily",
+            "free tier limit exceeded for today",
+        )
+    ):
+        return True
+    return False
+
+
+def extract_retry_delay(err_body: str, retry_header: str | None = None) -> float | None:
+    """Extracts rate limit retry delay in seconds from HTTP headers or response body."""
+    # 1. Standard HTTP header
+    if retry_header:
+        try:
+            val = float(retry_header)
+            if val >= 0:
+                return val
+        except ValueError:
+            pass
+
+    if not err_body:
+        return None
+
+    # 2. JSON structured error response (e.g. Google RPC RetryInfo)
+    try:
+        data = json.loads(err_body)
+        if isinstance(data, list) and data:
+            data = data[0]
+        if isinstance(data, dict):
+            err_dict = data.get("error", data)
+            if isinstance(err_dict, dict):
+                for detail in err_dict.get("details", []):
+                    if isinstance(detail, dict) and "RetryInfo" in str(detail.get("@type", "")):
+                        raw_delay = str(detail.get("retryDelay", "")).strip().rstrip("s")
+                        try:
+                            return float(raw_delay)
+                        except ValueError:
+                            pass
+                if "retry_after" in err_dict:
+                    try:
+                        return float(err_dict["retry_after"])
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+
+    # 3. Regex fallback in error message text
+    # Matches patterns like "Please retry in 55.116226147s." or "retry after 30s"
+    match = re.search(
+        r"retry\s+(?:in|after)\s+([0-9.]+)\s*s(?:ec(?:ond)?s?)?",
+        err_body,
+        re.IGNORECASE,
+    )
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+
+    match2 = re.search(
+        r"(?:try|wait)\s+(?:again\s+)?in\s+([0-9.]+)\s*s(?:ec(?:ond)?s?)?",
+        err_body,
+        re.IGNORECASE,
+    )
+    if match2:
+        try:
+            return float(match2.group(1))
+        except ValueError:
+            pass
+
+    return None
 
 
 @runtime_checkable
@@ -465,26 +557,40 @@ class HttpChatModel(_CacheTelemetryMixin):
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
-                if exc.code == 429:
+                if exc.code in (429, 402):
                     retry_header = exc.headers.get("Retry-After") if exc.headers else None
-                    delay = None
-                    if retry_header:
-                        try:
-                            delay = float(retry_header)
-                        except ValueError:
-                            delay = None
-                    if delay is None or delay <= 0:
+                    delay = extract_retry_delay(err_body, retry_header)
+
+                    # 1. Prolonged or Daily Limit: Delay exceeds maximum wait threshold (120s)
+                    if delay is not None and delay > MAX_RETRY_SLEEP_S:
+                        raise RateLimitError(
+                            f"Model API rate limit retry delay ({delay:.1f}s) exceeds maximum allowed sleep "
+                            f"({MAX_RETRY_SLEEP_S:.0f}s). Daily quota or prolonged limit reached from {self.endpoint}:\n{err_body}",
+                            retry_after=delay,
+                        ) from exc
+
+                    # 2. Daily Quota / Credit Exhaustion with no short wait specified
+                    if delay is None and _is_unrecoverable_quota_error(exc.code, err_body):
+                        raise RateLimitError(
+                            f"Model API quota or credit limit exhausted (HTTP {exc.code}) from {self.endpoint}:\n{err_body}"
+                        ) from exc
+
+                    # 3. Transient Rate Limit: Use extracted delay, or fall back to exponential backoff
+                    if delay is not None and delay >= 0:
+                        if not retry_header:
+                            delay = delay + 1.0
+                    else:
                         delay = min(base_delay * (2**attempt), 60.0)
 
                     self.total_rate_limit_wait_s += delay
                     if attempt < max_retries - 1:
                         print(
-                            f"\n⚠️ [Rate Limit 429]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
+                            f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
                         )
                         time.sleep(delay)
                         continue
                     raise RateLimitError(
-                        f"Model API rate limit (HTTP 429) exceeded after {max_retries} retries from {self.endpoint}:\n{err_body}",
+                        f"Model API rate limit (HTTP {exc.code}) exceeded after {max_retries} retries from {self.endpoint}:\n{err_body}",
                         retry_after=delay,
                     ) from exc
 
