@@ -207,6 +207,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Run a built-in educational benchmark demo (runs sandboxed with evaluation)",
     )
     parser.add_argument(
+        "--provider",
+        choices=["gemini", "google", "openrouter"],
+        default=None,
+        help="Provider preset: 'gemini' (Google AI Studio) or 'openrouter' (sets default endpoint and model)",
+    )
+    parser.add_argument(
         "--endpoint",
         default=None,
         help="HTTP chat completions endpoint (env: MODEL_ENDPOINT or ~/.microharness/config.json)",
@@ -219,7 +225,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--api-key",
         default=None,
-        help="API key (env: MODEL_API_KEY, OPENROUTER_API_KEY, or ~/.microharness/config.json)",
+        help="API key (env: MODEL_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, or ~/.microharness/config.json)",
     )
     parser.add_argument(
         "--runs-dir",
@@ -259,16 +265,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_model(args: argparse.Namespace, config: dict[str, Any], cache_ttl: str) -> Model:
-    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint")
+    provider = (getattr(args, "provider", None) or config.get("provider") or "").lower().strip()
+    default_endpoint = None
+    default_model = "cohere/north-mini-code:free"
+    if provider in ("gemini", "google", "google-ai-studio"):
+        default_endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
+        default_model = "gemini-2.5-flash"
+    elif provider in ("openrouter", "open-router"):
+        default_endpoint = "https://openrouter.ai/api/v1"
+        default_model = "stealth/space-bunny-alpha"
+
+    endpoint = args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint") or default_endpoint
     model_name = (
         args.model
         or os.getenv("MODEL_NAME")
         or config.get("model")
-        or "cohere/north-mini-code:free"
+        or default_model
     )
     api_key = (
         args.api_key
         or os.getenv("MODEL_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
         or os.getenv("OPENROUTER_API_KEY")
         or config.get("api_key")
     )

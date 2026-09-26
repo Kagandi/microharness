@@ -336,6 +336,108 @@ class TestModel(unittest.TestCase):
         self.assertIn("rate limit (HTTP 429) exceeded", str(ctx.exception))
         self.assertTrue(m.total_rate_limit_wait_s > 0)
 
+    @patch("urllib.request.urlopen")
+    def test_http_chat_model_google_ai_studio_endpoint_clean_payload(self, mock_urlopen):
+        """Invariant: When connecting to Google AI Studio endpoint, URL is normalized and
+
+        no unsupported Anthropic cache_control blocks are injected into messages/tools.
+        """
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "Hello from Gemini",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            }
+        ).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        m = HttpChatModel(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            model="gemini-2.5-flash",
+            api_key="fake-gemini-key",
+            cache_ttl="5m",
+        )
+
+        self.assertEqual(
+            m.endpoint, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        )
+
+        messages = [
+            Message(role="system", content="System instruction"),
+            Message(role="user", content="List files"),
+        ]
+        tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+
+        content, tool_calls = m.generate(messages, tools)
+
+        self.assertEqual(content, "Hello from Gemini")
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0].name, "bash")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.headers.get("Authorization"), "Bearer fake-gemini-key")
+
+        payload = json.loads(req.data.decode("utf-8"))
+        # System content must remain clean string, not Anthropic dict
+        self.assertEqual(payload["messages"][0]["content"], "System instruction")
+        # Tool definition must not have cache_control
+        self.assertNotIn("cache_control", payload["tools"][0])
+
+    def test_resolve_model_provider_gemini_defaults(self):
+        """Invariant: Setting provider='gemini' in config or CLI defaults to Google AI Studio."""
+        import argparse
+        from main import _resolve_model
+
+        args = argparse.Namespace(
+            endpoint=None,
+            model=None,
+            api_key=None,
+            provider="gemini",
+        )
+        model = _resolve_model(args, config={}, cache_ttl="off")
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(
+            model.endpoint,
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        )
+        self.assertEqual(model.model, "gemini-2.5-flash")
+
+    def test_resolve_model_picks_up_gemini_api_key_env(self):
+        """Invariant: GEMINI_API_KEY environment variable is detected."""
+        import argparse
+        import os
+        from unittest.mock import patch
+        from main import _resolve_model
+
+        args = argparse.Namespace(
+            endpoint=None,
+            model=None,
+            api_key=None,
+            provider=None,
+        )
+        config = {
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "model": "gemini-2.5-pro",
+        }
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-env-key-gemini"}, clear=False):
+            model = _resolve_model(args, config=config, cache_ttl="off")
+            self.assertIsInstance(model, HttpChatModel)
+            self.assertEqual(model.api_key, "test-env-key-gemini")
+
 
 if __name__ == "__main__":
     unittest.main()

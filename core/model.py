@@ -164,9 +164,10 @@ class HttpChatModel(_CacheTelemetryMixin):
     ) -> dict[str, Any]:
         formatted_messages: list[dict[str, Any]] = []
         system_cached = False
+        supports_cache_ctrl = "openrouter.ai" in self.endpoint or "anthropic" in self.endpoint
         for msg in messages:
             msg_dict = msg.to_dict()
-            if self.cache_ttl and msg.role == "system" and not system_cached:
+            if self.cache_ttl and supports_cache_ctrl and msg.role == "system" and not system_cached:
                 cache_ctrl: dict[str, Any] = {"type": "ephemeral"}
                 if self.cache_ttl == "1h":
                     cache_ctrl["ttl"] = "1h"
@@ -185,7 +186,7 @@ class HttpChatModel(_CacheTelemetryMixin):
             "messages": formatted_messages,
         }
         if tools:
-            if self.cache_ttl:
+            if self.cache_ttl and supports_cache_ctrl:
                 cache_ctrl = {"type": "ephemeral"}
                 if self.cache_ttl == "1h":
                     cache_ctrl["ttl"] = "1h"
