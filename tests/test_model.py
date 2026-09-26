@@ -1,12 +1,10 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import tempfile
-from pathlib import Path
-
 from core.model import (
-    MAX_RETRY_SLEEP_S,
     HttpChatModel,
     MockModel,
     RateLimitError,
@@ -20,6 +18,7 @@ from core.model import (
     normalize_reasoning_effort,
     resolve_provider,
     seed_user_providers,
+    strip_json_comments,
 )
 from core.types import Message, ToolCall
 
@@ -418,6 +417,7 @@ class TestModel(unittest.TestCase):
     def test_resolve_model_provider_gemini_defaults(self):
         """Invariant: Setting provider='gemini' in config or CLI defaults to Google AI Studio."""
         import argparse
+
         from main import _resolve_model
 
         args = argparse.Namespace(
@@ -439,6 +439,7 @@ class TestModel(unittest.TestCase):
         import argparse
         import os
         from unittest.mock import patch
+
         from main import _resolve_model
 
         args = argparse.Namespace(
@@ -935,6 +936,79 @@ class TestModel(unittest.TestCase):
 
         self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
         mock_sleep.assert_not_called()
+
+    def test_load_provider_registry_pure_read_only(self):
+        """Invariant: load_provider_registry is strictly read-only and never writes to disk."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            non_existent_global = Path(tmp_dir) / "sub_global"
+            self.assertFalse(non_existent_global.exists())
+            reg = load_provider_registry(global_dir=non_existent_global)
+            self.assertIn("google", reg)
+            self.assertIn("openrouter", reg)
+            self.assertFalse(non_existent_global.exists())
+
+    def test_strip_json_comments_preserves_strings(self):
+        """Invariant: strip_json_comments strips // and # comments while strictly preserving strings containing # and //."""
+        raw = """// Top level comment
+        {
+            # Hash comment
+            "title": "Issue #42: Check // comment",
+            "url": "https://example.com/api",
+            "nested": {
+                "escaped": "Quote \\"with # and //\\"",
+                "comment_at_end": 123 // inline comment
+            } # inline hash comment
+        }
+        """
+        cleaned = strip_json_comments(raw)
+        data = json.loads(cleaned)
+        self.assertEqual(data["title"], "Issue #42: Check // comment")
+        self.assertEqual(data["url"], "https://example.com/api")
+        self.assertEqual(data["nested"]["escaped"], 'Quote "with # and //"')
+        self.assertEqual(data["nested"]["comment_at_end"], 123)
+
+    def test_extract_retry_delay_reset_header_and_metadata(self):
+        """Invariant: extract_retry_delay parses X-RateLimit-Reset headers (seconds and millis) and JSON metadata."""
+        import time
+        now = time.time()
+        # Reset in 45 seconds (epoch seconds)
+        reset_s = str(now + 45.0)
+        delay = extract_retry_delay("{}", reset_header=reset_s)
+        self.assertIsNotNone(delay)
+        self.assertAlmostEqual(delay, 45.0, delta=1.5)
+
+        # Reset in 50 seconds (epoch millis, e.g. OpenRouter)
+        reset_ms = str((now + 50.0) * 1000.0)
+        delay = extract_retry_delay("{}", reset_header=reset_ms)
+        self.assertIsNotNone(delay)
+        self.assertAlmostEqual(delay, 50.0, delta=1.5)
+
+        # JSON metadata headers (OpenRouter shape)
+        body = json.dumps({
+            "error": {
+                "message": "Provider rate limit exceeded",
+                "metadata": {
+                    "headers": {
+                        "x-ratelimit-reset": str((now + 30.0) * 1000.0)
+                    }
+                }
+            }
+        })
+        delay = extract_retry_delay(body)
+        self.assertIsNotNone(delay)
+        self.assertAlmostEqual(delay, 30.0, delta=1.5)
+
+    def test_in_flight_timeout_bounds_model_request(self):
+        """Invariant: HttpChatModel bounds socket requests against deadline and raises TimeoutError when expired."""
+        import time
+        model = HttpChatModel(
+            base_url="https://api.example.com",
+            model="test-model",
+            timeout=90.0,
+        )
+        model.set_deadline(time.time() - 1.0)
+        with self.assertRaises(TimeoutError):
+            model._send_request({"prompt": "hi"}, {})
 
 
 if __name__ == "__main__":

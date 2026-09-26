@@ -38,31 +38,34 @@ def _is_unrecoverable_quota_error(status_code: int, err_body: str) -> bool:
     """Returns True if the error indicates a prolonged or unrecoverable daily quota or credit limit."""
     if status_code == 402:
         return True
-    body_lower = err_body.lower()
-    # Explicit credit exhaustion keywords
-    if any(k in body_lower for k in ("insufficient credits", "credit limit reached", "payment required")):
-        return True
-    # Daily quota exceeded keywords where no short wait is feasible
-    if any(
-        k in body_lower
-        for k in (
-            "generaterequestsperday",
-            "perday",
-            "daily limit",
-            "daily request limit",
-            "limit reached for today",
-            "quota exceeded for today",
-            "exceeded your daily",
-            "free tier limit exceeded for today",
-        )
-    ):
-        return True
-    return False
+    body_clean = re.sub(r"[\s_\-]+", "", err_body.lower())
+    unrecoverable_tokens = (
+        "perday",
+        "dailylimit",
+        "dailyrequestlimit",
+        "requestsperday",
+        "limitreachedfortoday",
+        "quotaexceededfortoday",
+        "exceededyourdaily",
+        "freetierlimitexceededfortoday",
+        "insufficientcredits",
+        "creditlimitreached",
+        "paymentrequired",
+        "insufficientquota",
+        "creditbalanceistoolow",
+        "outofcredits",
+        "insufficientbalance",
+    )
+    return any(token in body_clean for token in unrecoverable_tokens)
 
 
-def extract_retry_delay(err_body: str, retry_header: str | None = None) -> float | None:
+def extract_retry_delay(
+    err_body: str,
+    retry_header: str | None = None,
+    reset_header: str | None = None,
+) -> float | None:
     """Extracts rate limit retry delay in seconds from HTTP headers or response body."""
-    # 1. Standard HTTP header
+    # 1. Standard HTTP header (Retry-After in seconds)
     if retry_header:
         try:
             val = float(retry_header)
@@ -71,16 +74,45 @@ def extract_retry_delay(err_body: str, retry_header: str | None = None) -> float
         except ValueError:
             pass
 
+    # 2. X-RateLimit-Reset header (epoch seconds or epoch milliseconds)
+    if reset_header:
+        try:
+            val = float(reset_header)
+            now = time.time()
+            reset_s = val / 1000.0 if val > 1e11 else val
+            diff = reset_s - now
+            if diff >= 0:
+                return diff
+        except ValueError:
+            pass
+
     if not err_body:
         return None
 
-    # 2. JSON structured error response (e.g. Google RPC RetryInfo)
+    # 3. JSON structured error response (e.g. Google RPC RetryInfo, OpenRouter metadata headers)
     try:
         data = json.loads(err_body)
         if isinstance(data, list) and data:
             data = data[0]
         if isinstance(data, dict):
-            err_dict = data.get("error", data)
+            err_dict = data.get("error", data) if isinstance(data, dict) else {}
+            # Check metadata headers if embedded in JSON response (e.g. OpenRouter root or error dict)
+            meta = (data.get("metadata") if isinstance(data, dict) else None) or (
+                err_dict.get("metadata") if isinstance(err_dict, dict) else None
+            )
+            if isinstance(meta, dict):
+                meta_hdrs = meta.get("headers", {})
+                if isinstance(meta_hdrs, dict):
+                    reset_val = meta_hdrs.get("X-RateLimit-Reset") or meta_hdrs.get("x-ratelimit-reset")
+                    if reset_val:
+                        try:
+                            val = float(reset_val)
+                            reset_s = val / 1000.0 if val > 1e11 else val
+                            diff = reset_s - time.time()
+                            if diff >= 0:
+                                return diff
+                        except ValueError:
+                            pass
             if isinstance(err_dict, dict):
                 for detail in err_dict.get("details", []):
                     if isinstance(detail, dict) and "RetryInfo" in str(detail.get("@type", "")):
@@ -97,7 +129,7 @@ def extract_retry_delay(err_body: str, retry_header: str | None = None) -> float
     except Exception:
         pass
 
-    # 3. Regex fallback in error message text
+    # 4. Regex fallback in error message text
     # Matches patterns like "Please retry in 55.116226147s." or "retry after 30s"
     match = re.search(
         r"retry\s+(?:in|after)\s+([0-9.]+)\s*s(?:ec(?:ond)?s?)?",
@@ -199,17 +231,51 @@ def get_builtin_providers_path() -> Path:
     return Path(__file__).parent / "providers.json"
 
 
+def strip_json_comments(text: str) -> str:
+    """Strips # and // comments from JSON-like text while preserving string literals."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+
+    while i < n:
+        c = text[i]
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+        else:
+            if c == '"':
+                in_string = True
+                escape = False
+                out.append(c)
+                i += 1
+            elif c == "#":
+                while i < n and text[i] != "\n":
+                    i += 1
+            elif c == "/" and i + 1 < n and text[i + 1] == "/":
+                while i < n and text[i] != "\n":
+                    i += 1
+            else:
+                out.append(c)
+                i += 1
+
+    return "".join(out)
+
+
 def _read_json_with_comments(file_path: Path | None) -> dict[str, Any]:
     if not file_path or not file_path.is_file():
         return {}
     try:
         raw = file_path.read_text(encoding="utf-8")
-        lines = [
-            line
-            for line in raw.splitlines()
-            if not line.strip().startswith("//") and not line.strip().startswith("#")
-        ]
-        data = json.loads("\n".join(lines))
+        clean_json = strip_json_comments(raw)
+        data = json.loads(clean_json)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -250,7 +316,7 @@ def load_provider_registry(
 
     Resolution order (later layers override earlier ones):
     1. Built-in: core/providers.json
-    2. User Global: ~/.microharness/providers.json (seeded on first run if missing)
+    2. User Global: ~/.microharness/providers.json
     3. Project Local: <project_dir>/.microharness/providers.json
     4. Inline Config: config.json 'providers' dictionary
     """
@@ -258,12 +324,12 @@ def load_provider_registry(
 
     # 2. User Global
     if global_dir:
-        seed_user_providers(global_dir)
         user_file = Path(global_dir) / "providers.json"
-        user_data = _read_json_with_comments(user_file)
-        for k, v in user_data.items():
-            if isinstance(v, dict):
-                registry[k] = {**registry.get(k, {}), **v}
+        if user_file.is_file():
+            user_data = _read_json_with_comments(user_file)
+            for k, v in user_data.items():
+                if isinstance(v, dict):
+                    registry[k] = {**registry.get(k, {}), **v}
 
     # 3. Project Local
     if project_dir:
@@ -444,6 +510,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         reasoning_effort: str | None = None,
         reasoning_format: str | None = None,
         cache_strategy: str | None = None,
+        deadline: float | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -463,11 +530,16 @@ class HttpChatModel(_CacheTelemetryMixin):
         # Merge declarative profile headers with explicitly passed headers (explicit wins)
         self.extra_headers = {**default_headers, **(headers or {})}
         self.timeout = timeout
+        self.deadline = deadline
         self.total_rate_limit_wait_s: float = 0.0
         self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self.reasoning_format = (reasoning_format or default_reasoning_format).lower()
         self.cache_strategy = (cache_strategy or default_cache_strategy).lower()
         self._init_cache_telemetry(cache_ttl)
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Sets the task deadline timestamp to strictly bound in-flight HTTP requests."""
+        self.deadline = deadline
 
     def set_reasoning_effort(self, effort: str | None) -> str | None:
         """Dynamically switches reasoning effort level ('low', 'medium', 'high', numeric budget, or 'off'/None)."""
@@ -554,8 +626,18 @@ class HttpChatModel(_CacheTelemetryMixin):
         max_retries = 6
         base_delay = 2.0
         for attempt in range(max_retries):
+            # Check deadline before attempting request
+            req_timeout = self.timeout
+            if self.deadline is not None:
+                remaining = self.deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Task timeout reached before model request attempt {attempt + 1}"
+                    )
+                req_timeout = min(self.timeout, max(remaining, 0.1))
+
             try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as response:
+                with urllib.request.urlopen(req, timeout=req_timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
@@ -567,7 +649,12 @@ class HttpChatModel(_CacheTelemetryMixin):
                         ) from exc
 
                     retry_header = exc.headers.get("Retry-After") if exc.headers else None
-                    delay = extract_retry_delay(err_body, retry_header)
+                    reset_header = (
+                        (exc.headers.get("X-RateLimit-Reset") or exc.headers.get("x-ratelimit-reset"))
+                        if exc.headers
+                        else None
+                    )
+                    delay = extract_retry_delay(err_body, retry_header=retry_header, reset_header=reset_header)
 
                     # 2. Prolonged Limit: Delay exceeds maximum wait threshold (120s)
                     if delay is not None and delay > MAX_RETRY_SLEEP_S:
@@ -579,12 +666,15 @@ class HttpChatModel(_CacheTelemetryMixin):
 
                     # 3. Transient Rate Limit: Use extracted delay, or fall back to exponential backoff
                     if delay is not None and delay >= 0:
-                        if not retry_header:
+                        if not retry_header and not reset_header:
                             delay = delay + 1.0
                     else:
                         delay = min(base_delay * (2**attempt), 60.0)
 
                     self.total_rate_limit_wait_s += delay
+                    if self.deadline is not None:
+                        self.deadline += delay
+
                     if attempt < max_retries - 1:
                         print(
                             f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
@@ -597,14 +687,39 @@ class HttpChatModel(_CacheTelemetryMixin):
                     ) from exc
 
                 if exc.code in (500, 502, 503, 504) and attempt < max_retries - 1:
-                    time.sleep(base_delay * (2**attempt))
+                    sleep_s = min(base_delay * (2**attempt), 60.0)
+                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
+                        raise TimeoutError(
+                            f"Task timeout reached while waiting to retry HTTP {exc.code}"
+                        ) from exc
+                    time.sleep(sleep_s)
                     continue
                 raise RuntimeError(
                     f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
                 ) from exc
-            except urllib.error.URLError as exc:
+            except TimeoutError as exc:
+                if self.deadline is not None and time.time() >= self.deadline:
+                    raise TimeoutError("Task timeout reached during model request") from exc
                 if attempt < max_retries - 1:
-                    time.sleep(base_delay * (2**attempt))
+                    sleep_s = min(base_delay * (2**attempt), 60.0)
+                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
+                        raise TimeoutError(
+                            "Task timeout reached while waiting to retry timed-out request"
+                        ) from exc
+                    time.sleep(sleep_s)
+                    continue
+                raise
+            except urllib.error.URLError as exc:
+                if isinstance(exc.reason, TimeoutError) or str(exc.reason).lower().startswith("timed out"):
+                    if self.deadline is not None and time.time() >= self.deadline:
+                        raise TimeoutError("Task timeout reached during model request") from exc
+                if attempt < max_retries - 1:
+                    sleep_s = min(base_delay * (2**attempt), 60.0)
+                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
+                        raise TimeoutError(
+                            f"Task timeout reached while waiting to retry connection error: {exc.reason}"
+                        ) from exc
+                    time.sleep(sleep_s)
                     continue
                 raise ConnectionError(
                     f"Could not connect to model endpoint at {self.endpoint}.\n"

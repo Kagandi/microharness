@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from benchmarks.mini_swe import (
     MINI_SWE_TASKS,
@@ -16,7 +17,7 @@ from benchmarks.runner import run_benchmark_suite
 from core.environment import Environment
 from core.harness import Harness
 from core.model import MockModel
-from core.types import ToolCall
+from core.types import RunResult, ToolCall
 
 
 class TestMiniSWEBenchmarks(unittest.TestCase):
@@ -556,6 +557,7 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         """Invariant: BenchmarkReport computes aggregate token usage, cache hit rate, and displays them in scorecard."""
         import io
         import sys
+
         from benchmarks.runner import TaskReport, _build_report
 
         t1 = TaskReport(
@@ -616,6 +618,148 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertIn("2,000 / 200", scorecard)
         self.assertIn("50.0%", scorecard)
         self.assertIn("Tokens: 3,000 in (1,800 cached - 60.0% hit rate) | 300 out", scorecard)
+
+    def test_runner_synthesizes_error_row_on_raised_exception(self):
+        """Invariant: When harness.run raises an exception, runner synthesizes an error row, halts, and preserves retained tasks."""
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+        task3, eval3 = create_auth_middleware_task()
+
+        report_file = Path(self.tmp_dir) / "mini_swe_report.json"
+        # Task 3 was retained in a previous run
+        initial_report = {
+            "suite_name": "Mini-SWE",
+            "total_tasks": 3,
+            "tasks": [
+                {
+                    "task_id": task3.id,
+                    "passed": True,
+                    "score": 1.0,
+                    "total_steps": 3,
+                    "duration_s": 2.0,
+                    "finish_reason": "completed",
+                    "feedback": "Passed",
+                }
+            ],
+        }
+        report_file.write_text(json.dumps(initial_report), encoding="utf-8")
+
+        mock_harness = MagicMock()
+
+        def fake_run(t):
+            if t.id == task1.id:
+                return RunResult(
+                    task_id=t.id,
+                    passed=True,
+                    score=1.0,
+                    total_steps=2,
+                    duration_s=1.0,
+                    finish_reason="completed",
+                    trace_path="",
+                    workspace_path="",
+                )
+            if t.id == task2.id:
+                raise RuntimeError("Docker daemon connection failed")
+            return RunResult(
+                task_id=t.id,
+                passed=True,
+                score=1.0,
+                total_steps=1,
+                duration_s=1.0,
+                finish_reason="completed",
+                trace_path="",
+                workspace_path="",
+            )
+
+        mock_harness.run.side_effect = fake_run
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2), (task3, eval3)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+            resume=True,
+        )
+
+        # 3 tasks in report: task1 (passed), task2 (synthesized error), task3 (preserved retained)
+        self.assertEqual(len(report.tasks), 3)
+
+        t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
+        self.assertTrue(t1_rep.passed)
+        self.assertEqual(t1_rep.finish_reason, "completed")
+
+        t2_rep = next(t for t in report.tasks if t.task_id == task2.id)
+        self.assertFalse(t2_rep.passed)
+        self.assertEqual(t2_rep.finish_reason, "error")
+        self.assertIn("Docker daemon connection failed", t2_rep.feedback)
+
+        t3_rep = next(t for t in report.tasks if t.task_id == task3.id)
+        self.assertTrue(t3_rep.passed)
+        self.assertEqual(t3_rep.finish_reason, "completed")
+
+        # Verify disk report was updated with all 3 tasks
+        saved_data = json.loads(report_file.read_text(encoding="utf-8"))
+        saved_ids = [t["task_id"] for t in saved_data["tasks"]]
+        self.assertEqual(saved_ids, [task1.id, task2.id, task3.id])
+
+    def test_runner_resume_skips_malformed_rows_gracefully(self):
+        """Invariant: A malformed resume row missing task_id does not discard valid retained rows."""
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+
+        report_file = Path(self.tmp_dir) / "mini_swe_report.json"
+        initial_report = {
+            "suite_name": "Mini-SWE",
+            "total_tasks": 2,
+            "tasks": [
+                {
+                    "task_id": task1.id,
+                    "passed": True,
+                    "score": 1.0,
+                    "total_steps": 3,
+                    "duration_s": 2.0,
+                    "finish_reason": "completed",
+                },
+                # Malformed row with missing task_id
+                {
+                    "passed": True,
+                    "score": 1.0,
+                    "finish_reason": "completed",
+                },
+            ],
+        }
+        report_file.write_text(json.dumps(initial_report), encoding="utf-8")
+
+        mock_harness = MagicMock()
+        mock_harness.run.return_value = RunResult(
+            task_id=task2.id,
+            passed=True,
+            score=1.0,
+            total_steps=1,
+            duration_s=1.0,
+            finish_reason="completed",
+            trace_path="",
+            workspace_path="",
+        )
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+            resume=True,
+        )
+
+        # Task 1 was retained from valid row, task 2 ran
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(mock_harness.run.call_args[0][0].id, task2.id)
+
+        t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
+        self.assertTrue(t1_rep.passed)
 
 
 if __name__ == "__main__":

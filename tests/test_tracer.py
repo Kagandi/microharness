@@ -157,6 +157,7 @@ class TestTracer(unittest.TestCase):
         """Invariant: Tracer prints token telemetry in step header and exports metrics to JSON and Markdown."""
         import io
         import sys
+
         from core.types import StepTrace
 
         temp_dir = Path(tempfile.mkdtemp(prefix="test_tracer_telemetry_"))

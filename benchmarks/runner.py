@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from core.evaluator import Evaluator
 from core.harness import Harness
-from core.types import RunResult, Task
+from core.types import EvalResult, RunResult, Task
 
 
 @dataclass
@@ -164,6 +164,12 @@ def run_benchmark_suite(
                     effective_config = {**prev_cfg, **effective_config}
 
                 for t_dict in prev_data.get("tasks", []):
+                    if not isinstance(t_dict, dict):
+                        continue
+                    task_id = str(t_dict.get("task_id", "")).strip()
+                    if not task_id:
+                        continue
+
                     finish_reason = str(t_dict.get("finish_reason", "completed"))
                     is_passed = bool(t_dict.get("passed", False))
                     total_steps = int(t_dict.get("total_steps", 0))
@@ -176,8 +182,8 @@ def run_benchmark_suite(
                         not is_passed and total_steps == 0
                     )
                     if is_passed or not is_error:
-                        retained_tasks_map[t_dict["task_id"]] = TaskReport(
-                            task_id=t_dict["task_id"],
+                        retained_tasks_map[task_id] = TaskReport(
+                            task_id=task_id,
                             passed=is_passed,
                             score=float(t_dict.get("score", 1.0 if is_passed else 0.0)),
                             total_steps=total_steps,
@@ -219,8 +225,40 @@ def run_benchmark_suite(
         if verbose:
             print(f"\n[{idx}/{len(tasks)}] Running Task: {task.id}")
 
-        harness = harness_factory(evaluator)
-        run_result: RunResult = harness.run(task)
+        halt_reason: str | None = None
+        try:
+            harness = harness_factory(evaluator)
+            run_result: RunResult = harness.run(task)
+        except KeyboardInterrupt:
+            run_result = RunResult(
+                task_id=task.id,
+                passed=False,
+                score=0.0,
+                total_steps=0,
+                duration_s=0.0,
+                finish_reason="interrupted",
+                trace_path="",
+                workspace_path="",
+                eval_result=EvalResult(
+                    passed=False, score=0.0, feedback="Interrupted by user (Ctrl+C)."
+                ),
+            )
+            halt_reason = "user interruption"
+        except Exception as exc:
+            run_result = RunResult(
+                task_id=task.id,
+                passed=False,
+                score=0.0,
+                total_steps=0,
+                duration_s=0.0,
+                finish_reason="error",
+                trace_path="",
+                workspace_path="",
+                eval_result=EvalResult(
+                    passed=False, score=0.0, feedback=f"Execution error: {exc}"
+                ),
+            )
+            halt_reason = f"error: {exc}"
 
         task_reports.append(
             TaskReport(
@@ -252,7 +290,7 @@ def run_benchmark_suite(
             )
             _save_report_json(cur_report, output_dir, suite_name)
 
-        if run_result.finish_reason == "rate_limited":
+        if run_result.finish_reason == "rate_limited" or halt_reason is not None:
             # Preserve any remaining retained tasks from previous run so they are not lost
             seen_ids = {t.task_id for t in task_reports}
             for rem_task, _ in tasks[idx:]:
@@ -269,10 +307,19 @@ def run_benchmark_suite(
                 _save_report_json(cur_report, output_dir, suite_name)
 
             if verbose:
+                if run_result.finish_reason == "rate_limited":
+                    reason_msg = "rate limits"
+                    tip_msg = "once your rate limits reset"
+                elif halt_reason == "user interruption":
+                    reason_msg = "user interruption"
+                    tip_msg = "to continue"
+                else:
+                    reason_msg = halt_reason or "error"
+                    tip_msg = "to retry or continue"
                 print(
-                    f"\n🛑 Benchmark halted due to rate limits on task '{task.id}'.\n"
+                    f"\n🛑 Benchmark halted due to {reason_msg} on task '{task.id}'.\n"
                     f"Saved {len(task_reports)} task result(s) to report.\n"
-                    f"Tip: Run with --resume to continue remaining tasks once your rate limits reset."
+                    f"Tip: Run with --resume {tip_msg}."
                 )
             break
 

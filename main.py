@@ -33,6 +33,7 @@ from core.model import (
     find_provider_by_endpoint,
     load_provider_registry,
     resolve_provider,
+    seed_user_providers,
 )
 from core.types import RunResult, Task, ToolCall
 
@@ -547,6 +548,7 @@ def main():
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
     target_dir = Path(args.dir).resolve()
     global_dir = Path(args.global_dir).resolve() if args.global_dir else get_default_global_dir()
+    seed_user_providers(global_dir)
     global_config = load_global_config(global_dir)
     project_config = load_project_config(target_dir)
     config = {**global_config, **project_config}

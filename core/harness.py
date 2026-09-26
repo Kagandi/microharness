@@ -18,6 +18,7 @@ from core.model import (
     ReasoningAwareModel,
     normalize_cache_ttl,
     normalize_reasoning_effort,
+    strip_json_comments,
 )
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
@@ -49,11 +50,8 @@ def _load_json_config(config_file: Path | None) -> dict[str, Any]:
         return {}
     try:
         raw = config_file.read_text(encoding="utf-8")
-        lines = [
-            line for line in raw.splitlines()
-            if not line.strip().startswith("//") and not line.strip().startswith("#")
-        ]
-        data = json.loads("\n".join(lines))
+        clean_json = strip_json_comments(raw)
+        data = json.loads(clean_json)
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
@@ -519,6 +517,9 @@ class Harness:
                 tracer.log("\n⚠️ Task reached maximum allowed timeout.")
                 return False, "timeout", step_idx
 
+            if effective_deadline and hasattr(self.model, "set_deadline"):
+                self.model.set_deadline(effective_deadline)
+
             try:
                 is_finished, step_trace = loop.step(step_index=step_idx)
                 tracer.record_step(step_trace)
@@ -533,6 +534,10 @@ class Harness:
             except KeyboardInterrupt:
                 tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
                 return False, "interrupted", step_idx
+
+            except TimeoutError as exc:
+                tracer.log(f"\n⚠️ Task reached maximum allowed timeout: {exc}")
+                return False, "timeout", step_idx
 
             except RateLimitError as exc:
                 tracer.log(
@@ -583,13 +588,17 @@ class Harness:
                 print(f"🐳 Docker Sandbox: ACTIVE ({active_image})")
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
+        task_deadline = (run_start + task.timeout_seconds) if task.timeout_seconds else None
+        if hasattr(self.model, "set_deadline"):
+            self.model.set_deadline(task_deadline)
+
         try:
             is_finished, finish_reason, _ = self._execute_steps(
                 loop=loop,
                 tracer=tracer,
                 start_step=1,
                 max_steps=task.max_steps,
-                deadline=run_start + task.timeout_seconds,
+                deadline=task_deadline,
             )
 
             total_duration = time.time() - run_start
@@ -688,6 +697,8 @@ class Harness:
                 cache_hit_rate_pct=hit_rate,
             )
         finally:
+            if hasattr(self.model, "set_deadline"):
+                self.model.set_deadline(None)
             env.teardown()
 
     def _print_interactive_help(self, custom_commands: dict[str, tuple[str, str, str]]) -> None:

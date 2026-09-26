@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.environment import Environment
 from core.evaluator import FileContentEvaluator
@@ -1534,6 +1534,20 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.completion_tokens, 100)
         self.assertEqual(result.cached_tokens, 750)
         self.assertEqual(result.cache_hit_rate_pct, 75.0)
+
+    def test_harness_in_flight_timeout_terminates_immediately(self):
+        """Invariant: When in-flight request raises TimeoutError, harness terminates immediately with finish_reason='timeout' without step retries."""
+        mock_model = MagicMock()
+        mock_model.generate.side_effect = TimeoutError("Task timeout reached during model request")
+
+        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False, max_step_retries=3)
+        task = Task(id="timeout_task", instruction="Test timeout", timeout_seconds=10.0)
+        result = harness.run(task)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.finish_reason, "timeout")
+        # Should NOT have retried 3 times
+        self.assertEqual(mock_model.generate.call_count, 1)
 
 
 if __name__ == "__main__":
