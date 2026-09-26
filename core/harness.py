@@ -566,6 +566,7 @@ class Harness:
     def run(self, task: Task) -> RunResult:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
         run_start = time.time()
+        start_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
         system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
 
         active_docker = self.docker or bool(task.docker_image)
@@ -680,6 +681,9 @@ class Harness:
                 )
             )
 
+            current_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
+            task_rl_wait = max(0.0, current_rl_wait - start_rl_wait)
+
             return RunResult(
                 task_id=task.id,
                 passed=passed,
@@ -695,6 +699,7 @@ class Harness:
                 completion_tokens=total_comp_tokens,
                 cached_tokens=total_cached_tokens,
                 cache_hit_rate_pct=hit_rate,
+                rate_limit_wait_s=task_rl_wait,
             )
         finally:
             if hasattr(self.model, "set_deadline"):

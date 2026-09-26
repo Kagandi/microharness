@@ -27,6 +27,7 @@ class TaskReport:
     completion_tokens: int = 0
     cached_tokens: int = 0
     cache_hit_rate_pct: float = 0.0
+    rate_limit_wait_s: float = 0.0
 
 
 @dataclass
@@ -42,13 +43,14 @@ class BenchmarkReport:
     total_completion_tokens: int = 0
     total_cached_tokens: int = 0
     cache_hit_rate_pct: float = 0.0
+    total_rate_limit_wait_s: float = 0.0
     config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def print_scorecard(self) -> None:
-        width = 108
+        width = 118
         print("\n" + "=" * width)
         print(f"📊 {self.suite_name.upper()} BENCHMARK SCORECARD".center(width))
         print("=" * width)
@@ -66,7 +68,8 @@ class BenchmarkReport:
                 print(("Config: " + " | ".join(cfg_parts)).center(width))
                 print("-" * width)
         header = (
-            f"{'Task ID':<30} {'Status':<10} {'Score':<7} {'Steps':<6} {'Duration':<9} {'Tokens (In / Out)':<22} {'Cache Hit':<10} {'Trace'}"
+            f"{'Task ID':<28} {'Status':<10} {'Score':<6} {'Steps':<6} {'Duration':<9} "
+            f"{'RL Wait':<9} {'Tokens (In / Out)':<20} {'Cache Hit':<10} {'Trace'}"
         )
         print(header)
         print("-" * width)
@@ -75,9 +78,10 @@ class BenchmarkReport:
             trace_short = Path(t.trace_path).name if t.trace_path else "-"
             tokens_str = f"{t.prompt_tokens:,} / {t.completion_tokens:,}"
             hit_str = f"{t.cache_hit_rate_pct:.1f}%" if t.prompt_tokens > 0 else "-"
+            rl_wait_str = f"{t.rate_limit_wait_s:.1f}s" if t.rate_limit_wait_s > 0 else "-"
             line = (
-                f"{t.task_id:<30} {status_str:<10} {t.score:<7.2f} {t.total_steps:<6} {t.duration_s:<8.1f}s "
-                f"{tokens_str:<22} {hit_str:<10} {trace_short}"
+                f"{t.task_id:<28} {status_str:<10} {t.score:<6.2f} {t.total_steps:<6} {t.duration_s:<8.1f}s "
+                f"{rl_wait_str:<9} {tokens_str:<20} {hit_str:<10} {trace_short}"
             )
             print(line)
         print("-" * width)
@@ -85,6 +89,8 @@ class BenchmarkReport:
             f"Result: {self.passed_tasks}/{self.total_tasks} passed ({self.pass_rate:.1f}%) "
             f"| Mean Score: {self.mean_score:.2f} | Total Time: {self.total_duration_s:.1f}s"
         )
+        if self.total_rate_limit_wait_s > 0:
+            summary += f" (Throttled: {self.total_rate_limit_wait_s:.1f}s)"
         print(summary.center(width))
         if self.total_prompt_tokens > 0 or self.total_completion_tokens > 0:
             token_summary = (
@@ -114,6 +120,7 @@ def _build_report(
     overall_hit_rate = (
         round(total_cached / total_prompt * 100.0, 1) if total_prompt > 0 else 0.0
     )
+    total_rl_wait = round(sum(t.rate_limit_wait_s for t in task_reports), 2)
 
     return BenchmarkReport(
         suite_name=suite_name,
@@ -127,6 +134,7 @@ def _build_report(
         total_completion_tokens=total_comp,
         total_cached_tokens=total_cached,
         cache_hit_rate_pct=overall_hit_rate,
+        total_rate_limit_wait_s=total_rl_wait,
         config=dict(config or {}),
     )
 
@@ -197,6 +205,7 @@ def run_benchmark_suite(
                             completion_tokens=int(t_dict.get("completion_tokens", 0)),
                             cached_tokens=int(t_dict.get("cached_tokens", 0)),
                             cache_hit_rate_pct=float(t_dict.get("cache_hit_rate_pct", 0.0)),
+                            rate_limit_wait_s=float(t_dict.get("rate_limit_wait_s", 0.0)),
                         )
                 if verbose and retained_tasks_map:
                     print(
@@ -276,6 +285,7 @@ def run_benchmark_suite(
                 completion_tokens=run_result.completion_tokens,
                 cached_tokens=run_result.cached_tokens,
                 cache_hit_rate_pct=run_result.cache_hit_rate_pct,
+                rate_limit_wait_s=run_result.rate_limit_wait_s,
             )
         )
 

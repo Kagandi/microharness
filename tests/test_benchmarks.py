@@ -573,6 +573,7 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
             completion_tokens=100,
             cached_tokens=800,
             cache_hit_rate_pct=80.0,
+            rate_limit_wait_s=12.5,
         )
         t2 = TaskReport(
             task_id="task_2",
@@ -587,6 +588,7 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
             completion_tokens=200,
             cached_tokens=1000,
             cache_hit_rate_pct=50.0,
+            rate_limit_wait_s=0.0,
         )
 
         report = _build_report(
@@ -601,8 +603,9 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertEqual(report.total_cached_tokens, 1800)
         # 1800 / 3000 = 60.0%
         self.assertEqual(report.cache_hit_rate_pct, 60.0)
+        self.assertEqual(report.total_rate_limit_wait_s, 12.5)
 
-        # Verify print_scorecard output contains the tokens data and hit rate
+        # Verify print_scorecard output contains the tokens data, hit rate, and rate-limit wait
         captured = io.StringIO()
         orig = sys.stdout
         try:
@@ -613,6 +616,9 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
 
         scorecard = captured.getvalue()
         self.assertIn("MINI-SWE BENCHMARK SCORECARD", scorecard)
+        self.assertIn("RL Wait", scorecard)
+        self.assertIn("12.5s", scorecard)
+        self.assertIn("(Throttled: 12.5s)", scorecard)
         self.assertIn("1,000 / 100", scorecard)
         self.assertIn("80.0%", scorecard)
         self.assertIn("2,000 / 200", scorecard)

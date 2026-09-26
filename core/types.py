@@ -111,3 +111,4 @@ class RunResult:
     completion_tokens: int = 0
     cached_tokens: int = 0
     cache_hit_rate_pct: float = 0.0
+    rate_limit_wait_s: float = 0.0

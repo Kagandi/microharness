@@ -915,8 +915,7 @@ class TestModel(unittest.TestCase):
                             "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
                             "quotaValue": "20"
                         }]
-                    },
-                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "59s"}
+                    }
                 ]
             }
         }]).encode("utf-8")
@@ -933,6 +932,63 @@ class TestModel(unittest.TestCase):
         m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini-3.8-flash")
         with self.assertRaises(RateLimitError) as ctx:
             m._send_request(payload={"model": "gemini-3.8-flash"}, headers={})
+
+        self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
+        mock_sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_send_request_daily_limit_with_short_reset_retries(self, mock_urlopen, mock_sleep):
+        """Invariant: A daily limit 429 error providing an explicit short reset delay is retried instead of failing fast."""
+        import urllib.error
+        err = urllib.error.HTTPError(
+            url="https://api.example.com/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=b'{"error":{"message":"Daily limit reached. Resets in 5 seconds."}}')),
+        )
+        success_resp = MagicMock()
+        success_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode("utf-8")
+        success_resp.__enter__.return_value = success_resp
+        success_resp.__exit__.return_value = None
+
+        mock_urlopen.side_effect = [err, success_resp]
+
+        m = HttpChatModel(base_url="https://api.example.com", model="test-model")
+        result = m._send_request(payload={"prompt": "hi"}, headers={})
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
+        # 5.0s extracted + 1.0s safety buffer = 6.0s
+        mock_sleep.assert_called_once_with(6.0)
+        self.assertEqual(m.total_rate_limit_wait_s, 6.0)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_send_request_openai_canonical_quota_exhaustion_fails_fast(self, mock_urlopen, mock_sleep):
+        """Invariant: OpenAI canonical quota message fails fast without burning retries or sleeping."""
+        import urllib.error
+        openai_quota_body = json.dumps({
+            "error": {
+                "message": "You exceeded your current quota, please check your plan and billing details.",
+                "type": "insufficient_quota",
+                "param": None,
+                "code": "insufficient_quota"
+            }
+        }).encode("utf-8")
+
+        err = urllib.error.HTTPError(
+            url="https://api.openai.com/v1/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=openai_quota_body)),
+        )
+        mock_urlopen.side_effect = err
+
+        m = HttpChatModel(base_url="https://api.openai.com/v1", model="gpt-4o")
+        with self.assertRaises(RateLimitError) as ctx:
+            m._send_request(payload={"prompt": "hi"}, headers={})
 
         self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
         mock_sleep.assert_not_called()

@@ -1526,6 +1526,14 @@ class TestHarnessIntegration(unittest.TestCase):
             "prompt_tokens_details": {"cached_tokens": 750},
         })
 
+        orig_generate = mock_model.generate
+
+        def fake_generate(messages, tools):
+            mock_model.total_rate_limit_wait_s = 7.5
+            return orig_generate(messages, tools)
+
+        mock_model.generate = fake_generate
+
         harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
         task = Task(id="token_task", instruction="Test tokens")
         result = harness.run(task)
@@ -1534,6 +1542,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.completion_tokens, 100)
         self.assertEqual(result.cached_tokens, 750)
         self.assertEqual(result.cache_hit_rate_pct, 75.0)
+        self.assertEqual(result.rate_limit_wait_s, 7.5)
 
     def test_harness_in_flight_timeout_terminates_immediately(self):
         """Invariant: When in-flight request raises TimeoutError, harness terminates immediately with finish_reason='timeout' without step retries."""
