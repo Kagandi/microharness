@@ -461,6 +461,14 @@ class _CacheTelemetryMixin:
             "cache_hit_rate_pct": round(hit_rate, 1),
         }
 
+    def reset(self) -> None:
+        """Resets per-task token telemetry and usage counters."""
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_cached_tokens = 0
+        self.last_usage = {}
+
+
     def _update_usage(self, usage: dict[str, Any]) -> None:
         self.last_usage = usage
         prompt_toks = int(

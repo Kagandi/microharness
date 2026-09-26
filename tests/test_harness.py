@@ -1593,6 +1593,42 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result2.rate_limit_wait_s, 3.0)
         self.assertEqual(mock_model.total_rate_limit_wait_s, 8.0)
 
+    def test_harness_token_telemetry_isolates_per_task_tokens_across_consecutive_tasks(self):
+        """Invariant: Harness computes per-task token metrics without cumulative leakage across tasks."""
+        mock_model = MockModel([("Task 1 done", [])])
+        mock_model._update_usage({
+            "prompt_tokens": 500,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 250},
+        })
+
+        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
+        task1 = Task(id="task_1", instruction="Run task 1")
+        result1 = harness.run(task1)
+
+        self.assertEqual(result1.prompt_tokens, 500)
+        self.assertEqual(result1.completion_tokens, 50)
+        self.assertEqual(result1.cached_tokens, 250)
+        self.assertEqual(result1.cache_hit_rate_pct, 50.0)
+
+        # Task 2 on the same model/harness with its own step usage
+        mock_model._script = [("Task 2 done", [])]
+        mock_model._step_idx = 0
+        mock_model._update_usage({
+            "prompt_tokens": 300,
+            "completion_tokens": 30,
+            "prompt_tokens_details": {"cached_tokens": 150},
+        })
+
+        task2 = Task(id="task_2", instruction="Run task 2")
+        result2 = harness.run(task2)
+
+        # Invariant: task2 prompt tokens must be 300 (per-task), NOT 800 (cumulative)
+        self.assertEqual(result2.prompt_tokens, 300)
+        self.assertEqual(result2.completion_tokens, 30)
+        self.assertEqual(result2.cached_tokens, 150)
+        self.assertEqual(result2.cache_hit_rate_pct, 50.0)
+
 
 if __name__ == "__main__":
     unittest.main()

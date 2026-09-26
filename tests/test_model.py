@@ -1105,6 +1105,20 @@ class TestModel(unittest.TestCase):
         # Strictly verify it did NOT pass default self.timeout (90.0)
         self.assertNotEqual(passed_timeout, 90.0)
 
+    def test_http_chat_model_reset(self):
+        """Invariant: HttpChatModel.reset() zeroes cumulative token counters and clears last_usage."""
+        m = HttpChatModel(base_url="https://api.example.com", model="test")
+        m._update_usage({"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 50})
+        self.assertEqual(m.total_prompt_tokens, 100)
+        self.assertEqual(m.total_completion_tokens, 20)
+        self.assertEqual(m.total_cached_tokens, 50)
+        self.assertTrue(bool(m.last_usage))
+
+        m.reset()
+        self.assertEqual(m.total_prompt_tokens, 0)
+        self.assertEqual(m.total_completion_tokens, 0)
+        self.assertEqual(m.total_cached_tokens, 0)
+        self.assertEqual(m.last_usage, {})
 
 
 if __name__ == "__main__":

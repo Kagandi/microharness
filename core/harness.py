@@ -644,42 +644,43 @@ class Harness:
             raw_cached = c_stats.get("total_cached_tokens")
             raw_hit = c_stats.get("cache_hit_rate_pct")
 
+            step_prompt = sum(
+                int(s.usage.get("prompt_tokens", 0) or 0)
+                for s in tracer.steps
+                if isinstance(s.usage, dict)
+            )
+            step_comp = sum(
+                int(s.usage.get("completion_tokens", 0) or 0)
+                for s in tracer.steps
+                if isinstance(s.usage, dict)
+            )
+            step_cached = sum(
+                int(s.usage.get("cached_tokens", 0) or 0)
+                for s in tracer.steps
+                if isinstance(s.usage, dict)
+            )
+
             total_prompt_tokens = (
-                int(raw_prompt)
-                if isinstance(raw_prompt, (int, float)) and raw_prompt
-                else sum(
-                    int(s.usage.get("prompt_tokens", 0) or 0)
-                    for s in tracer.steps
-                    if isinstance(s.usage, dict)
-                )
+                step_prompt
+                if step_prompt > 0
+                else (int(raw_prompt) if isinstance(raw_prompt, (int, float)) and raw_prompt else 0)
             )
             total_comp_tokens = (
-                int(raw_comp)
-                if isinstance(raw_comp, (int, float)) and raw_comp
-                else sum(
-                    int(s.usage.get("completion_tokens", 0) or 0)
-                    for s in tracer.steps
-                    if isinstance(s.usage, dict)
-                )
+                step_comp
+                if step_comp > 0
+                else (int(raw_comp) if isinstance(raw_comp, (int, float)) and raw_comp else 0)
             )
             total_cached_tokens = (
-                int(raw_cached)
-                if isinstance(raw_cached, (int, float)) and raw_cached
-                else sum(
-                    int(s.usage.get("cached_tokens", 0) or 0)
-                    for s in tracer.steps
-                    if isinstance(s.usage, dict)
-                )
+                step_cached
+                if step_cached > 0
+                else (int(raw_cached) if isinstance(raw_cached, (int, float)) and raw_cached else 0)
             )
             hit_rate = (
-                float(raw_hit)
-                if isinstance(raw_hit, (int, float))
-                else (
-                    round(total_cached_tokens / total_prompt_tokens * 100, 1)
-                    if total_prompt_tokens > 0
-                    else 0.0
-                )
+                round(total_cached_tokens / total_prompt_tokens * 100.0, 1)
+                if total_prompt_tokens > 0
+                else (float(raw_hit) if isinstance(raw_hit, (int, float)) and raw_hit else 0.0)
             )
+
 
             current_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
             task_rl_wait = max(0.0, current_rl_wait - start_rl_wait)
