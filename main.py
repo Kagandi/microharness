@@ -196,6 +196,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Filter to a specific task ID in the benchmark suite (e.g. 'rate_limiter')",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume previous benchmark execution from runs-dir, skipping tasks that already passed",
+    )
+    parser.add_argument(
         "--demo",
         choices=["calculator", "greeting"],
         default=None,
@@ -375,6 +380,7 @@ def _dispatch_benchmark(
             suite_name="Mini-SWE",
             output_dir=runs_dir,
             verbose=True,
+            resume=args.resume,
         )
         return True
 
@@ -412,6 +418,7 @@ def _dispatch_benchmark(
             suite_name="DeepSWE-mini",
             output_dir=runs_dir,
             verbose=True,
+            resume=args.resume,
         )
         return True
 

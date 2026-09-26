@@ -109,7 +109,7 @@ def create_rate_limiter_task() -> tuple[Task, Evaluator]:
         ),
         initial_files=initial_files,
         max_steps=8,
-        timeout_seconds=60.0,
+        timeout_seconds=180.0,
     )
 
     evaluator = PristineTestEvaluator(
@@ -195,7 +195,7 @@ def create_circular_serializer_task() -> tuple[Task, Evaluator]:
         ),
         initial_files=initial_files,
         max_steps=8,
-        timeout_seconds=60.0,
+        timeout_seconds=180.0,
     )
 
     evaluator = PristineTestEvaluator(
@@ -289,7 +289,7 @@ def create_auth_middleware_task() -> tuple[Task, Evaluator]:
         ),
         initial_files=initial_files,
         max_steps=8,
-        timeout_seconds=60.0,
+        timeout_seconds=180.0,
     )
 
     evaluator = PristineTestEvaluator(
@@ -386,7 +386,7 @@ def create_lru_ttl_cache_task() -> tuple[Task, Evaluator]:
         ),
         initial_files=initial_files,
         max_steps=8,
-        timeout_seconds=60.0,
+        timeout_seconds=180.0,
     )
 
     evaluator = PristineTestEvaluator(
@@ -485,7 +485,7 @@ def create_query_builder_task() -> tuple[Task, Evaluator]:
         ),
         initial_files=initial_files,
         max_steps=8,
-        timeout_seconds=60.0,
+        timeout_seconds=180.0,
     )
 
     evaluator = PristineTestEvaluator(

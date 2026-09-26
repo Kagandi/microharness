@@ -98,15 +98,54 @@ def run_benchmark_suite(
     suite_name: str = "Mini-SWE",
     output_dir: Path | str | None = None,
     verbose: bool = True,
+    resume: bool = False,
 ) -> BenchmarkReport:
     """Executes a list of (Task, Evaluator) instances sequentially and aggregates results."""
     start_time = time.time()
     task_reports: list[TaskReport] = []
 
+    passed_tasks_map: dict[str, TaskReport] = {}
+    if resume and output_dir:
+        report_file = Path(output_dir) / f"{suite_name.lower().replace('-', '_')}_report.json"
+        if report_file.is_file():
+            try:
+                prev_data = json.loads(report_file.read_text(encoding="utf-8"))
+                for t_dict in prev_data.get("tasks", []):
+                    if t_dict.get("passed"):
+                        passed_tasks_map[t_dict["task_id"]] = TaskReport(
+                            task_id=t_dict["task_id"],
+                            passed=t_dict["passed"],
+                            score=float(t_dict.get("score", 1.0)),
+                            total_steps=int(t_dict.get("total_steps", 0)),
+                            duration_s=float(t_dict.get("duration_s", 0.0)),
+                            finish_reason=str(t_dict.get("finish_reason", "completed")),
+                            trace_path=str(t_dict.get("trace_path", "")),
+                            workspace_path=str(t_dict.get("workspace_path", "")),
+                            patch_path=t_dict.get("patch_path"),
+                            feedback=str(t_dict.get("feedback", "")),
+                        )
+                if verbose and passed_tasks_map:
+                    print(
+                        f"🔄 Resuming {suite_name}: {len(passed_tasks_map)} task(s) already PASSED in previous run."
+                    )
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"⚠️ Could not load previous report for resume ({exc}). Running all tasks."
+                    )
+
     if verbose:
         print(f"\n🏁 Launching {suite_name} Benchmark ({len(tasks)} tasks)...")
 
     for idx, (task, evaluator) in enumerate(tasks, start=1):
+        if task.id in passed_tasks_map:
+            if verbose:
+                print(
+                    f"\n[{idx}/{len(tasks)}] ⏭️ Task '{task.id}' already PASSED in previous run. Skipping."
+                )
+            task_reports.append(passed_tasks_map[task.id])
+            continue
+
         if verbose:
             print(f"\n[{idx}/{len(tasks)}] Running Task: {task.id}")
 
@@ -137,6 +176,15 @@ def run_benchmark_suite(
                 duration_s=time.time() - start_time,
             )
             _save_report_json(cur_report, output_dir, suite_name)
+
+        if run_result.finish_reason == "rate_limited":
+            if verbose:
+                print(
+                    f"\n🛑 Benchmark halted due to rate limits on task '{task.id}'.\n"
+                    f"Saved {len(task_reports)} task result(s) to report.\n"
+                    f"Tip: Run with --resume to continue remaining tasks once your rate limits reset."
+                )
+            break
 
     report = _build_report(
         suite_name=suite_name,

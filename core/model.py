@@ -21,6 +21,14 @@ class Model(Protocol):
     ) -> tuple[str, list[ToolCall]]: ...
 
 
+class RateLimitError(RuntimeError):
+    """Raised when an LLM provider returns HTTP 429 Too Many Requests."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @runtime_checkable
 class ResettableModel(Model, Protocol):
     """Protocol for models that can be reset between benchmark tasks or test runs."""
@@ -134,6 +142,7 @@ class HttpChatModel(_CacheTelemetryMixin):
             if "X-Title" not in self.extra_headers:
                 self.extra_headers["X-Title"] = "microharness"
         self.timeout = timeout
+        self.total_rate_limit_wait_s: float = 0.0
         self._init_cache_telemetry(cache_ttl)
 
     def _build_headers(self) -> dict[str, str]:
@@ -195,7 +204,7 @@ class HttpChatModel(_CacheTelemetryMixin):
             headers=headers,
             method="POST",
         )
-        max_retries = 4
+        max_retries = 6
         base_delay = 2.0
         for attempt in range(max_retries):
             try:
@@ -203,7 +212,30 @@ class HttpChatModel(_CacheTelemetryMixin):
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
-                if exc.code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                if exc.code == 429:
+                    retry_header = exc.headers.get("Retry-After") if exc.headers else None
+                    delay = None
+                    if retry_header:
+                        try:
+                            delay = float(retry_header)
+                        except ValueError:
+                            delay = None
+                    if delay is None or delay <= 0:
+                        delay = min(base_delay * (2**attempt), 60.0)
+
+                    self.total_rate_limit_wait_s += delay
+                    if attempt < max_retries - 1:
+                        print(
+                            f"\n⚠️ [Rate Limit 429]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise RateLimitError(
+                        f"Model API rate limit (HTTP 429) exceeded after {max_retries} retries from {self.endpoint}:\n{err_body}",
+                        retry_after=delay,
+                    ) from exc
+
+                if exc.code in (500, 502, 503, 504) and attempt < max_retries - 1:
                     time.sleep(base_delay * (2**attempt))
                     continue
                 raise RuntimeError(

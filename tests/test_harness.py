@@ -1479,6 +1479,22 @@ class TestHarnessIntegration(unittest.TestCase):
         harness = Harness(model=bare_model, verbose=False)
         self.assertEqual(harness.get_cache_stats(), {"cache_ttl": "5m"})
 
+    def test_harness_rate_limit_finish_reason(self):
+        """Invariant: When model raises RateLimitError, Harness finishes with finish_reason='rate_limited'."""
+        from unittest.mock import MagicMock
+
+        from core.model import RateLimitError
+
+        mock_model = MagicMock()
+        mock_model.generate.side_effect = RateLimitError("Rate limit reached", retry_after=30.0)
+
+        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
+        task = Task(id="rate_limit_task", instruction="Do task")
+        res = harness.run(task)
+
+        self.assertEqual(res.finish_reason, "rate_limited")
+        self.assertFalse(res.passed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.model import CacheAwareModel, Model, normalize_cache_ttl
+from core.model import CacheAwareModel, Model, RateLimitError, normalize_cache_ttl
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
     DEFAULT_MAX_TOOL_CHARS,
@@ -474,7 +474,13 @@ class Harness:
         finish_reason = "max_steps_exceeded"
 
         while (step_idx - start_step) < max_steps:
-            if deadline and time.time() > deadline:
+            raw_wait = getattr(self.model, "total_rate_limit_wait_s", 0.0)
+            try:
+                rate_limit_wait = float(raw_wait)
+            except (TypeError, ValueError):
+                rate_limit_wait = 0.0
+            effective_deadline = (deadline + rate_limit_wait) if deadline else None
+            if effective_deadline and time.time() > effective_deadline:
                 tracer.log("\n⚠️ Task reached maximum allowed timeout.")
                 return False, "timeout", step_idx
 
@@ -492,6 +498,13 @@ class Harness:
             except KeyboardInterrupt:
                 tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
                 return False, "interrupted", step_idx
+
+            except RateLimitError as exc:
+                tracer.log(
+                    f"\n🛑 Step {step_idx} rate limited (HTTP 429): {exc}\n"
+                    "Progress has been saved. You can resume this benchmark with --resume once rate limits reset."
+                )
+                return False, "rate_limited", step_idx
 
             except Exception as exc:
                 step_attempts += 1

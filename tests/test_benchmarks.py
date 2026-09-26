@@ -320,6 +320,114 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0][0].id, "mini_swe_rate_limiter")
 
+    def test_benchmark_suite_resume_skips_passed_tasks(self):
+        """Invariant: When resume=True, tasks already passed in report JSON are skipped."""
+        from unittest.mock import MagicMock
+
+        from core.types import RunResult
+
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+
+        report_file = Path(self.tmp_dir) / "mini_swe_report.json"
+        initial_report_data = {
+            "suite_name": "Mini-SWE",
+            "total_tasks": 2,
+            "passed_tasks": 1,
+            "pass_rate": 50.0,
+            "mean_score": 0.5,
+            "total_duration_s": 10.0,
+            "tasks": [
+                {
+                    "task_id": task1.id,
+                    "passed": True,
+                    "score": 1.0,
+                    "total_steps": 2,
+                    "duration_s": 5.0,
+                    "finish_reason": "completed",
+                    "trace_path": "/path/trace.json",
+                    "workspace_path": "/path/ws",
+                    "patch_path": None,
+                    "feedback": "Passed",
+                },
+                {
+                    "task_id": task2.id,
+                    "passed": False,
+                    "score": 0.0,
+                    "total_steps": 1,
+                    "duration_s": 5.0,
+                    "finish_reason": "rate_limited",
+                    "trace_path": "/path2/trace.json",
+                    "workspace_path": "/path2/ws",
+                    "patch_path": None,
+                    "feedback": "Rate limited",
+                },
+            ],
+        }
+        report_file.write_text(json.dumps(initial_report_data), encoding="utf-8")
+
+        mock_harness = MagicMock()
+        mock_harness.run.return_value = RunResult(
+            task_id=task2.id,
+            passed=True,
+            score=1.0,
+            total_steps=3,
+            duration_s=4.0,
+            finish_reason="completed",
+            trace_path="/new/trace.json",
+            workspace_path="/new/ws",
+        )
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+            resume=True,
+        )
+
+        self.assertEqual(factory.call_count, 1)
+        mock_harness.run.assert_called_once_with(task2)
+        self.assertEqual(report.total_tasks, 2)
+        self.assertEqual(report.passed_tasks, 2)
+        self.assertEqual(report.pass_rate, 100.0)
+
+    def test_benchmark_suite_halts_on_rate_limit(self):
+        """Invariant: If a task encounters finish_reason='rate_limited', runner halts remaining tasks."""
+        from unittest.mock import MagicMock
+
+        from core.types import RunResult
+
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+
+        mock_harness = MagicMock()
+        mock_harness.run.return_value = RunResult(
+            task_id=task1.id,
+            passed=False,
+            score=0.0,
+            total_steps=1,
+            duration_s=2.0,
+            finish_reason="rate_limited",
+            trace_path="",
+            workspace_path="",
+        )
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+        )
+
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(len(report.tasks), 1)
+        self.assertEqual(report.tasks[0].finish_reason, "rate_limited")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -281,6 +281,61 @@ class TestModel(unittest.TestCase):
         stats = mock.get_cache_stats()
         self.assertEqual(stats["cache_ttl"], "1h")
 
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_http_chat_model_429_retry_after_success(self, mock_urlopen, mock_sleep):
+        """Invariant: HTTP 429 parses Retry-After header and retries successfully."""
+        import io
+        import urllib.error
+
+        # First call raises 429 with Retry-After: 5
+        http_err = urllib.error.HTTPError(
+            url="http://test",
+            code=429,
+            msg="Rate limit",
+            hdrs={"Retry-After": "5"},
+            fp=io.BytesIO(b'{"error": "rate limit"}'),
+        )
+        mock_success = MagicMock()
+        mock_success.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "recovered"}}]}
+        ).encode("utf-8")
+        mock_success.__enter__.return_value = mock_success
+
+        mock_urlopen.side_effect = [http_err, mock_success]
+
+        m = HttpChatModel(base_url="http://test/v1", model="test")
+        content, _ = m.generate([Message(role="user", content="hi")], [])
+
+        self.assertEqual(content, "recovered")
+        mock_sleep.assert_called_once_with(5.0)
+        self.assertEqual(m.total_rate_limit_wait_s, 5.0)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_http_chat_model_429_exhausted_raises_rate_limit_error(self, mock_urlopen, mock_sleep):
+        """Invariant: When HTTP 429 persists across all retries, RateLimitError is raised."""
+        import io
+        import urllib.error
+
+        from core.model import RateLimitError
+
+        http_err = urllib.error.HTTPError(
+            url="http://test",
+            code=429,
+            msg="Rate limit",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "rate limit quota exceeded"}'),
+        )
+        mock_urlopen.side_effect = http_err
+
+        m = HttpChatModel(base_url="http://test/v1", model="test")
+        with self.assertRaises(RateLimitError) as ctx:
+            m.generate([Message(role="user", content="hi")], [])
+
+        self.assertIn("rate limit (HTTP 429) exceeded", str(ctx.exception))
+        self.assertTrue(m.total_rate_limit_wait_s > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
