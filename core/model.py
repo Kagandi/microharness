@@ -147,6 +147,21 @@ def extract_retry_delay(
     return None
 
 
+def _format_delay(delay: float) -> str:
+    """Format a retry delay in seconds into a concise, human-friendly representation."""
+    if delay < 3600.0:
+        return f"{delay:.1f}s"
+    hours = delay / 3600.0
+    if hours >= 1_000_000.0:
+        return f"~{hours / 1_000_000.0:.1f}M hours"
+    if hours >= 1_000.0:
+        return f"~{hours / 1_000.0:.1f}k hours"
+    if hours >= 24.0:
+        return f"{hours / 24.0:.1f}d ({hours:.1f} hours)"
+    return f"{hours:.1f} hours"
+
+
+
 @runtime_checkable
 class ResettableModel(Model, Protocol):
     """Protocol for models that can be reset between benchmark tasks or test runs."""
@@ -652,7 +667,7 @@ class HttpChatModel(_CacheTelemetryMixin):
                     # 2. Prolonged Limit: Delay exceeds maximum wait threshold (120s)
                     if delay is not None and delay > MAX_RETRY_SLEEP_S:
                         raise RateLimitError(
-                            f"Model API rate limit retry delay ({delay:.1f}s) exceeds maximum allowed sleep "
+                            f"Model API rate limit retry delay ({_format_delay(delay)}) exceeds maximum allowed sleep "
                             f"({MAX_RETRY_SLEEP_S:.0f}s). Daily quota or prolonged limit reached from {self.endpoint}:\n{err_body}",
                             retry_after=delay,
                         ) from exc

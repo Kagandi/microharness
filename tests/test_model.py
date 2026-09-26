@@ -9,6 +9,7 @@ from core.model import (
     MockModel,
     RateLimitError,
     ReasoningAwareModel,
+    _format_delay,
     _is_unrecoverable_quota_error,
     extract_retry_delay,
     find_provider_by_endpoint,
@@ -1065,6 +1066,45 @@ class TestModel(unittest.TestCase):
         model.set_deadline(time.time() - 1.0)
         with self.assertRaises(TimeoutError):
             model._send_request({"prompt": "hi"}, {})
+
+    def test_format_delay(self):
+        """Invariant: _format_delay formats small and unbounded/bogus delays into human-readable strings."""
+        self.assertEqual(_format_delay(5.0), "5.0s")
+        self.assertEqual(_format_delay(120.0), "120.0s")
+        self.assertEqual(_format_delay(3599.0), "3599.0s")
+        self.assertEqual(_format_delay(3600.0), "1.0 hours")
+        self.assertEqual(_format_delay(7200.0), "2.0 hours")
+        self.assertEqual(_format_delay(86400.0), "1.0d (24.0 hours)")
+        self.assertEqual(_format_delay(3600000.0), "~1.0k hours")
+        self.assertEqual(_format_delay(9820956445.2), "~2.7M hours")
+
+    @patch("urllib.request.urlopen")
+    def test_send_request_clamps_socket_timeout_to_remaining_deadline(self, mock_urlopen):
+        """Invariant: In-flight socket timeout is clamped to remaining task deadline when deadline < timeout."""
+        import time
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+        mock_urlopen.return_value = mock_resp
+
+        model = HttpChatModel(
+            base_url="https://api.example.com",
+            model="test-model",
+            timeout=90.0,
+        )
+        # Set deadline 3.0 seconds in the future
+        model.set_deadline(time.time() + 3.0)
+        model._send_request(payload={"prompt": "hi"}, headers={})
+
+        mock_urlopen.assert_called_once()
+        passed_timeout = mock_urlopen.call_args.kwargs.get("timeout")
+        self.assertIsNotNone(passed_timeout)
+        self.assertLessEqual(passed_timeout, 3.0)
+        self.assertGreater(passed_timeout, 0.0)
+        # Strictly verify it did NOT pass default self.timeout (90.0)
+        self.assertNotEqual(passed_timeout, 90.0)
+
 
 
 if __name__ == "__main__":

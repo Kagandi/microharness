@@ -767,6 +767,50 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
         self.assertTrue(t1_rep.passed)
 
+    def test_run_benchmark_suite_propagates_rate_limit_wait_s(self):
+        """Invariant: run_benchmark_suite propagates RunResult rate_limit_wait_s to TaskReport and aggregates total."""
+        task1, eval1 = create_rate_limiter_task()
+        task2, eval2 = create_circular_serializer_task()
+
+        mock_harness = MagicMock()
+        mock_harness.run.side_effect = [
+            RunResult(
+                task_id=task1.id,
+                passed=True,
+                score=1.0,
+                total_steps=2,
+                duration_s=5.0,
+                finish_reason="completed",
+                trace_path="",
+                workspace_path="",
+                rate_limit_wait_s=7.5,
+            ),
+            RunResult(
+                task_id=task2.id,
+                passed=True,
+                score=1.0,
+                total_steps=2,
+                duration_s=6.0,
+                finish_reason="completed",
+                trace_path="",
+                workspace_path="",
+                rate_limit_wait_s=3.5,
+            ),
+        ]
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1), (task2, eval2)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+        )
+
+        self.assertEqual(report.tasks[0].rate_limit_wait_s, 7.5)
+        self.assertEqual(report.tasks[1].rate_limit_wait_s, 3.5)
+        self.assertEqual(report.total_rate_limit_wait_s, 11.0)
+
 
 if __name__ == "__main__":
     unittest.main()

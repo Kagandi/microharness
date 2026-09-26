@@ -1558,6 +1558,41 @@ class TestHarnessIntegration(unittest.TestCase):
         # Should NOT have retried 3 times
         self.assertEqual(mock_model.generate.call_count, 1)
 
+    def test_harness_rate_limit_wait_computes_delta_across_consecutive_tasks(self):
+        """Invariant: Harness computes per-task rate limit wait delta across consecutive tasks on the same model."""
+        mock_model = MockModel([("Task 1 done", [])])
+        mock_model.total_rate_limit_wait_s = 0.0
+
+        orig_generate = mock_model.generate
+
+        def step_with_5s_wait(messages, tools):
+            mock_model.total_rate_limit_wait_s += 5.0
+            return orig_generate(messages, tools)
+
+        mock_model.generate = step_with_5s_wait
+        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
+
+        task1 = Task(id="task_1", instruction="Run task 1")
+        result1 = harness.run(task1)
+        self.assertEqual(result1.rate_limit_wait_s, 5.0)
+
+        # For task 2, script another step and accumulate 3.0s more wait (model total now 8.0s)
+        mock_model._script = [("Task 2 done", [])]
+        mock_model._step_idx = 0
+
+        def step_with_3s_wait(messages, tools):
+            mock_model.total_rate_limit_wait_s += 3.0
+            return orig_generate(messages, tools)
+
+        mock_model.generate = step_with_3s_wait
+
+        task2 = Task(id="task_2", instruction="Run task 2")
+        result2 = harness.run(task2)
+
+        # Invariant: task2 rate_limit_wait_s must be the 3.0s delta, NOT 8.0s cumulative
+        self.assertEqual(result2.rate_limit_wait_s, 3.0)
+        self.assertEqual(mock_model.total_rate_limit_wait_s, 8.0)
+
 
 if __name__ == "__main__":
     unittest.main()
