@@ -25,7 +25,15 @@ from core.harness import (
     load_global_config,
     load_project_config,
 )
-from core.model import HttpChatModel, MockModel, Model, ResettableModel
+from core.model import (
+    HttpChatModel,
+    MockModel,
+    Model,
+    ResettableModel,
+    find_provider_by_endpoint,
+    load_provider_registry,
+    resolve_provider,
+)
 from core.types import RunResult, Task, ToolCall
 
 
@@ -208,9 +216,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=["gemini", "google", "openrouter"],
         default=None,
-        help="Provider preset: 'gemini' (Google AI Studio) or 'openrouter' (sets default endpoint and model)",
+        help="Provider preset (e.g. 'google', 'openrouter', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', or custom from providers.json)",
     )
     parser.add_argument(
         "--endpoint",
@@ -274,48 +281,89 @@ def _resolve_model(
     config: dict[str, Any],
     cache_ttl: str,
     reasoning_effort: str | None = None,
+    global_dir: Path | None = None,
+    target_dir: Path | None = None,
 ) -> Model:
-    provider = (getattr(args, "provider", None) or config.get("provider") or "").lower().strip()
-    default_endpoint = None
-    default_model = "cohere/north-mini-code:free"
-    if provider in ("gemini", "google", "google-ai-studio"):
-        default_endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
-        default_model = "gemini-2.5-flash"
-    elif provider in ("openrouter", "open-router"):
-        default_endpoint = "https://openrouter.ai/api/v1"
-        default_model = "stealth/space-bunny-alpha"
+    registry = load_provider_registry(
+        global_dir=global_dir,
+        project_dir=target_dir,
+        inline_providers=config.get("providers"),
+    )
+    provider_arg = getattr(args, "provider", None) or config.get("provider")
+    resolved_name, profile = resolve_provider(registry, provider_arg)
+
+    # If provider wasn't explicitly named, attempt to detect by endpoint
+    endpoint_candidate = (
+        getattr(args, "endpoint", None)
+        or os.getenv("MODEL_ENDPOINT")
+        or config.get("endpoint")
+    )
+    if not profile and endpoint_candidate:
+        detected_name, detected_profile = find_provider_by_endpoint(registry, endpoint_candidate)
+        if detected_profile:
+            resolved_name = detected_name
+            profile = detected_profile
+
+    default_endpoint = profile.get("endpoint")
+    default_model = profile.get("default_model", "cohere/north-mini-code:free")
 
     endpoint = (
-        args.endpoint
+        getattr(args, "endpoint", None)
         or os.getenv("MODEL_ENDPOINT")
         or config.get("endpoint")
         or default_endpoint
     )
     model_name = (
-        args.model
+        getattr(args, "model", None)
         or os.getenv("MODEL_NAME")
         or config.get("model")
         or default_model
     )
-    api_key = (
-        args.api_key
-        or os.getenv("MODEL_API_KEY")
-        or os.getenv("GEMINI_API_KEY")
-        or os.getenv("GOOGLE_API_KEY")
-        or os.getenv("OPENROUTER_API_KEY")
-        or config.get("api_key")
-    )
+
+    api_key = getattr(args, "api_key", None) or os.getenv("MODEL_API_KEY")
+    if not api_key and profile.get("env_keys"):
+        for env_k in profile["env_keys"]:
+            if val := os.getenv(env_k):
+                api_key = val
+                break
+    if not api_key:
+        fallback_env_keys = [
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GROQ_API_KEY",
+        ]
+        for env_k in fallback_env_keys:
+            if val := os.getenv(env_k):
+                api_key = val
+                break
+    if not api_key:
+        api_key = config.get("api_key")
+
+    headers = dict(profile.get("headers") or {})
+    if isinstance(config.get("headers"), dict):
+        headers.update(config["headers"])
+
+    reasoning_format = profile.get("reasoning_format", "standard")
+    cache_strategy = profile.get("cache_strategy", "implicit")
 
     if endpoint:
         cache_lbl = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
         reasoning_lbl = f", reasoning: {reasoning_effort.upper()}" if reasoning_effort else ""
-        print(f"🔌 Connected to: {endpoint} (model: {model_name}, cache: {cache_lbl}{reasoning_lbl})")
+        prov_lbl = f" [{resolved_name}]" if resolved_name else ""
+        print(f"🔌 Connected to{prov_lbl}: {endpoint} (model: {model_name}, cache: {cache_lbl}{reasoning_lbl})")
         return HttpChatModel(
             base_url=endpoint,
             model=model_name,
             api_key=api_key,
+            headers=headers,
             cache_ttl=cache_ttl,
             reasoning_effort=reasoning_effort,
+            reasoning_format=reasoning_format,
+            cache_strategy=cache_strategy,
         )
 
     print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
@@ -521,7 +569,14 @@ def main():
     docker_image = args.docker_image or config.get("docker_image", "python:3.11")
 
     # 1. Select Model
-    model = _resolve_model(args, config, cache_ttl, reasoning_effort)
+    model = _resolve_model(
+        args,
+        config,
+        cache_ttl,
+        reasoning_effort,
+        global_dir=global_dir,
+        target_dir=target_dir,
+    )
 
     # 2. Benchmark Suite Mode (e.g. --benchmark mini-swe or --demo calculator)
     if args.benchmark or args.demo:

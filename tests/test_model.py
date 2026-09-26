@@ -2,12 +2,20 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
+import tempfile
+from pathlib import Path
+
 from core.model import (
     HttpChatModel,
     MockModel,
     ReasoningAwareModel,
+    find_provider_by_endpoint,
+    load_builtin_providers,
+    load_provider_registry,
     normalize_cache_ttl,
     normalize_reasoning_effort,
+    resolve_provider,
+    seed_user_providers,
 )
 from core.types import Message, ToolCall
 
@@ -557,6 +565,205 @@ class TestModel(unittest.TestCase):
         self.assertEqual(step_usage4["completion_tokens"], 0)
         self.assertEqual(step_usage4["cached_tokens"], 0)
         self.assertEqual(step_usage4["cache_hit_rate_pct"], 0.0)
+
+    def test_load_builtin_providers(self):
+        """Invariant: Built-in providers.json loads correctly and defines standard providers."""
+        builtin = load_builtin_providers()
+        self.assertIsInstance(builtin, dict)
+        self.assertIn("google", builtin)
+        self.assertIn("openrouter", builtin)
+        self.assertIn("openai", builtin)
+        self.assertIn("anthropic", builtin)
+        self.assertIn("ollama", builtin)
+        self.assertIn("deepseek", builtin)
+        self.assertIn("groq", builtin)
+
+        # Check strict equality of properties
+        self.assertEqual(builtin["google"]["default_model"], "gemini-2.5-flash")
+        self.assertEqual(builtin["google"]["reasoning_format"], "standard")
+        self.assertEqual(builtin["google"]["cache_strategy"], "implicit")
+        self.assertEqual(builtin["openrouter"]["reasoning_format"], "openrouter")
+        self.assertEqual(builtin["openrouter"]["cache_strategy"], "anthropic_block")
+
+    def test_seed_user_providers(self):
+        """Invariant: seed_user_providers creates providers.json in target global directory."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            global_path = Path(tmp_dir)
+            created = seed_user_providers(global_path)
+            self.assertIsNotNone(created)
+            self.assertTrue((global_path / "providers.json").is_file())
+
+            # Second call should not overwrite or error
+            second = seed_user_providers(global_path)
+            self.assertIsNone(second)
+
+        # Negative case: None path returns None
+        self.assertIsNone(seed_user_providers(None))
+
+    def test_load_provider_registry_precedence_and_comments(self):
+        """Invariant: Providers merge properly across built-in, global, project, and inline config."""
+        with tempfile.TemporaryDirectory() as tmp_global, tempfile.TemporaryDirectory() as tmp_proj:
+            global_dir = Path(tmp_global)
+            proj_dir = Path(tmp_proj)
+
+            # 1. Global override: customize google default model and add a custom proxy
+            global_file = global_dir / "providers.json"
+            global_file.write_text(
+                """// Comment test
+{
+  "google": {
+    "default_model": "gemini-custom-global"
+  },
+  "custom-proxy": {
+    "endpoint": "https://proxy.example.com/v1",
+    "default_model": "custom-v1",
+    "reasoning_format": "standard",
+    "cache_strategy": "implicit"
+  }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # 2. Project override: project-specific .microharness/providers.json
+            proj_micro = proj_dir / ".microharness"
+            proj_micro.mkdir()
+            (proj_micro / "providers.json").write_text(
+                """# Project comment
+{
+  "google": {
+    "default_model": "gemini-custom-project"
+  }
+}
+""",
+                encoding="utf-8",
+            )
+
+            # 3. Inline config: config.json 'providers'
+            inline = {
+                "google": {"default_model": "gemini-inline"},
+                "inline-only": {"endpoint": "https://inline.example.com/v1"}
+            }
+
+            registry = load_provider_registry(
+                global_dir=global_dir,
+                project_dir=proj_dir,
+                inline_providers=inline,
+            )
+
+            # Inline should win for google default_model
+            self.assertEqual(registry["google"]["default_model"], "gemini-inline")
+            # Google endpoint from built-in should be preserved
+            self.assertEqual(
+                registry["google"]["endpoint"],
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            )
+            # Custom proxy from global is retained
+            self.assertEqual(registry["custom-proxy"]["default_model"], "custom-v1")
+            # Inline only provider is present
+            self.assertEqual(registry["inline-only"]["endpoint"], "https://inline.example.com/v1")
+
+    def test_resolve_provider_aliases_and_case_insensitivity(self):
+        """Invariant: Provider names resolve aliases and case-insensitivity cleanly."""
+        registry = load_builtin_providers()
+
+        # Exact match
+        name, prof = resolve_provider(registry, "google")
+        self.assertEqual(name, "google")
+        self.assertEqual(prof["default_model"], "gemini-2.5-flash")
+
+        # Alias: gemini -> google
+        name_gemini, prof_gemini = resolve_provider(registry, "gemini")
+        self.assertEqual(name_gemini, "google")
+        self.assertEqual(prof_gemini["default_model"], "gemini-2.5-flash")
+
+        # Alias: open-router -> openrouter
+        name_or, prof_or = resolve_provider(registry, "open-router")
+        self.assertEqual(name_or, "openrouter")
+
+        # Case-insensitivity
+        name_case, prof_case = resolve_provider(registry, "GoOgLe")
+        self.assertEqual(name_case, "google")
+
+        # Unknown provider returns canonical with empty dict
+        unk_name, unk_prof = resolve_provider(registry, "unknown-vendor")
+        self.assertEqual(unk_name, "unknown-vendor")
+        self.assertEqual(unk_prof, {})
+
+        # None returns None, {}
+        none_name, none_prof = resolve_provider(registry, None)
+        self.assertIsNone(none_name)
+        self.assertEqual(none_prof, {})
+
+    def test_find_provider_by_endpoint(self):
+        """Invariant: Matching endpoint finds provider profile regardless of trailing slash."""
+        registry = load_builtin_providers()
+
+        name, prof = find_provider_by_endpoint(registry, "https://openrouter.ai/api/v1")
+        self.assertEqual(name, "openrouter")
+
+        name_slash, prof_slash = find_provider_by_endpoint(registry, "https://openrouter.ai/api/v1/")
+        self.assertEqual(name_slash, "openrouter")
+
+        name_chat, prof_chat = find_provider_by_endpoint(
+            registry, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        )
+        self.assertEqual(name_chat, "google")
+
+        # Negative case: unknown endpoint
+        unk_name, unk_prof = find_provider_by_endpoint(registry, "https://unknown.ai/v1")
+        self.assertIsNone(unk_name)
+        self.assertEqual(unk_prof, {})
+
+    def test_http_chat_model_explicit_capabilities_without_url_sniffing(self):
+        """Invariant: HttpChatModel obeys explicit capability flags on arbitrary proxy URLs."""
+        # Custom internal proxy URL with explicit openrouter reasoning and anthropic cache block
+        proxy_url = "https://internal-ai-gateway.corp.net/v1"
+        m = HttpChatModel(
+            base_url=proxy_url,
+            model="custom-model",
+            reasoning_effort="high",
+            reasoning_format="openrouter",
+            cache_strategy="anthropic_block",
+            cache_ttl="1h",
+            headers={"X-Custom-Auth": "token123"},
+        )
+
+        messages = [
+            Message(role="system", content="Be helpful"),
+            Message(role="user", content="Test query"),
+        ]
+        payload = m._build_payload(messages, tools=[])
+
+        # Verifies openrouter reasoning structure applied to arbitrary corporate gateway URL
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["reasoning"], {"effort": "high"})
+
+        # Verifies anthropic cache_control block injected without checking URL string
+        self.assertIsInstance(payload["messages"][0]["content"], list)
+        self.assertEqual(
+            payload["messages"][0]["content"][0]["cache_control"],
+            {"type": "ephemeral", "ttl": "1h"},
+        )
+
+        # Verifies headers
+        hdrs = m._build_headers()
+        self.assertEqual(hdrs["X-Custom-Auth"], "token123")
+        self.assertEqual(hdrs["anthropic-beta"], "extended-cache-ttl-2025-04-11")
+        self.assertEqual(hdrs["X-OpenRouter-Cache-TTL"], "3600")
+
+        # Negative case: reasoning_format='none' suppresses reasoning fields completely
+        m_none = HttpChatModel(
+            base_url=proxy_url,
+            model="custom-model",
+            reasoning_effort="high",
+            reasoning_format="none",
+            cache_strategy="none",
+        )
+        payload_none = m_none._build_payload(messages, tools=[])
+        self.assertNotIn("reasoning_effort", payload_none)
+        self.assertNotIn("reasoning", payload_none)
+        self.assertEqual(payload_none["messages"][0]["content"], "Be helpful")
 
 
 if __name__ == "__main__":

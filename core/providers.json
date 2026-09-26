@@ -1,0 +1,58 @@
+{
+  "google": {
+    "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "default_model": "gemini-2.5-flash",
+    "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    "reasoning_format": "standard",
+    "cache_strategy": "implicit"
+  },
+  "openrouter": {
+    "endpoint": "https://openrouter.ai/api/v1",
+    "default_model": "stealth/space-bunny-alpha",
+    "env_keys": ["OPENROUTER_API_KEY"],
+    "headers": {
+      "HTTP-Referer": "https://github.com/microharness",
+      "X-Title": "microharness"
+    },
+    "reasoning_format": "openrouter",
+    "cache_strategy": "anthropic_block"
+  },
+  "openai": {
+    "endpoint": "https://api.openai.com/v1",
+    "default_model": "gpt-4o",
+    "env_keys": ["OPENAI_API_KEY"],
+    "reasoning_format": "standard",
+    "cache_strategy": "implicit"
+  },
+  "anthropic": {
+    "endpoint": "https://api.anthropic.com/v1",
+    "default_model": "claude-3-5-sonnet-20241022",
+    "env_keys": ["ANTHROPIC_API_KEY"],
+    "headers": {
+      "anthropic-version": "2023-06-01"
+    },
+    "reasoning_format": "standard",
+    "cache_strategy": "anthropic_block"
+  },
+  "deepseek": {
+    "endpoint": "https://api.deepseek.com/v1",
+    "default_model": "deepseek-chat",
+    "env_keys": ["DEEPSEEK_API_KEY"],
+    "reasoning_format": "standard",
+    "cache_strategy": "implicit"
+  },
+  "ollama": {
+    "endpoint": "http://localhost:11434/v1",
+    "default_model": "qwen2.5-coder:7b",
+    "env_keys": [],
+    "reasoning_format": "none",
+    "cache_strategy": "none"
+  },
+  "groq": {
+    "endpoint": "https://api.groq.com/openai/v1",
+    "default_model": "llama-3.3-70b-versatile",
+    "env_keys": ["GROQ_API_KEY"],
+    "reasoning_format": "standard",
+    "cache_strategy": "none"
+  }
+}

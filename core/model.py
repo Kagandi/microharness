@@ -4,6 +4,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from core.types import Message, ToolCall
@@ -90,6 +91,136 @@ def normalize_reasoning_effort(effort: str | None) -> str | None:
     raise ValueError(
         f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', numeric token budget, or 'off'."
     )
+
+
+PROVIDER_ALIASES: dict[str, str] = {
+    "gemini": "google",
+    "google-ai-studio": "google",
+    "open-router": "openrouter",
+}
+
+
+def get_builtin_providers_path() -> Path:
+    """Returns the path to the repository's built-in providers.json file."""
+    return Path(__file__).parent / "providers.json"
+
+
+def _read_json_with_comments(file_path: Path | None) -> dict[str, Any]:
+    if not file_path or not file_path.is_file():
+        return {}
+    try:
+        raw = file_path.read_text(encoding="utf-8")
+        lines = [
+            line
+            for line in raw.splitlines()
+            if not line.strip().startswith("//") and not line.strip().startswith("#")
+        ]
+        data = json.loads("\n".join(lines))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def load_builtin_providers() -> dict[str, dict[str, Any]]:
+    """Loads declarative provider definitions from the committed core/providers.json file."""
+    path = get_builtin_providers_path()
+    data = _read_json_with_comments(path)
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def seed_user_providers(global_dir: Path | None = None) -> Path | None:
+    """Seeds ~/.microharness/providers.json if global_dir exists and providers.json is missing."""
+    if not global_dir:
+        return None
+    try:
+        global_path = Path(global_dir)
+        if not global_path.exists():
+            global_path.mkdir(parents=True, exist_ok=True)
+        dest = global_path / "providers.json"
+        if not dest.exists():
+            builtin_path = get_builtin_providers_path()
+            if builtin_path.is_file():
+                dest.write_text(builtin_path.read_text(encoding="utf-8"), encoding="utf-8")
+                return dest
+    except Exception:
+        pass
+    return None
+
+
+def load_provider_registry(
+    global_dir: Path | None = None,
+    project_dir: Path | None = None,
+    inline_providers: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Loads and deep-merges providers across built-in, user global, project, and inline sources.
+
+    Resolution order (later layers override earlier ones):
+    1. Built-in: core/providers.json
+    2. User Global: ~/.microharness/providers.json (seeded on first run if missing)
+    3. Project Local: <project_dir>/.microharness/providers.json
+    4. Inline Config: config.json 'providers' dictionary
+    """
+    registry: dict[str, dict[str, Any]] = load_builtin_providers()
+
+    # 2. User Global
+    if global_dir:
+        seed_user_providers(global_dir)
+        user_file = Path(global_dir) / "providers.json"
+        user_data = _read_json_with_comments(user_file)
+        for k, v in user_data.items():
+            if isinstance(v, dict):
+                registry[k] = {**registry.get(k, {}), **v}
+
+    # 3. Project Local
+    if project_dir:
+        proj_dir = Path(project_dir)
+        proj_file = proj_dir / ".microharness" / "providers.json"
+        if not proj_file.is_file():
+            proj_file = proj_dir / "providers.json"
+        proj_data = _read_json_with_comments(proj_file)
+        for k, v in proj_data.items():
+            if isinstance(v, dict):
+                registry[k] = {**registry.get(k, {}), **v}
+
+    # 4. Inline Config
+    if inline_providers and isinstance(inline_providers, dict):
+        for k, v in inline_providers.items():
+            if isinstance(v, dict):
+                registry[k] = {**registry.get(k, {}), **v}
+
+    return registry
+
+
+def resolve_provider(
+    registry: dict[str, dict[str, Any]],
+    provider_name: str | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Resolves provider profile from registry considering case-insensitivity and aliases."""
+    if not provider_name:
+        return None, {}
+    clean_name = str(provider_name).strip().lower()
+    canonical = PROVIDER_ALIASES.get(clean_name, clean_name)
+    if canonical in registry:
+        return canonical, dict(registry[canonical])
+    for k, v in registry.items():
+        if k.lower() == canonical:
+            return k, dict(v)
+    return canonical, {}
+
+
+def find_provider_by_endpoint(
+    registry: dict[str, dict[str, Any]],
+    endpoint: str | None,
+) -> tuple[str | None, dict[str, Any]]:
+    """Finds provider profile by matching an endpoint URL prefix."""
+    if not endpoint:
+        return None, {}
+    clean_ep = endpoint.rstrip("/").lower()
+    for name, prof in registry.items():
+        prof_ep = (prof.get("endpoint") or "").rstrip("/").lower()
+        if prof_ep and (clean_ep == prof_ep or clean_ep.startswith(prof_ep)):
+            return name, dict(prof)
+    return None, {}
 
 
 class _CacheTelemetryMixin:
@@ -217,6 +348,8 @@ class HttpChatModel(_CacheTelemetryMixin):
         timeout: float = 90.0,
         cache_ttl: str | None = None,
         reasoning_effort: str | None = None,
+        reasoning_format: str | None = None,
+        cache_strategy: str | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -225,18 +358,21 @@ class HttpChatModel(_CacheTelemetryMixin):
         else:
             self.endpoint = clean_url
 
+        # Declarative defaults from registry if capability flags are not explicitly passed
+        prov_name, profile = find_provider_by_endpoint(load_builtin_providers(), clean_url)
+        default_headers = dict(profile.get("headers") or {})
+        default_reasoning_format = profile.get("reasoning_format", "standard")
+        default_cache_strategy = profile.get("cache_strategy", "implicit")
+
         self.model = model
         self.api_key = api_key
-        self.extra_headers = headers or {}
-        # OpenRouter recommends HTTP-Referer and X-Title
-        if "openrouter.ai" in self.endpoint:
-            if "HTTP-Referer" not in self.extra_headers:
-                self.extra_headers["HTTP-Referer"] = "https://github.com/microharness"
-            if "X-Title" not in self.extra_headers:
-                self.extra_headers["X-Title"] = "microharness"
+        # Merge declarative profile headers with explicitly passed headers (explicit wins)
+        self.extra_headers = {**default_headers, **(headers or {})}
         self.timeout = timeout
         self.total_rate_limit_wait_s: float = 0.0
         self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
+        self.reasoning_format = (reasoning_format or default_reasoning_format).lower()
+        self.cache_strategy = (cache_strategy or default_cache_strategy).lower()
         self._init_cache_telemetry(cache_ttl)
 
     def set_reasoning_effort(self, effort: str | None) -> str | None:
@@ -255,11 +391,15 @@ class HttpChatModel(_CacheTelemetryMixin):
         }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        if self.cache_ttl == "1h":
-            headers["anthropic-beta"] = "extended-cache-ttl-2025-04-11"
-            headers["X-OpenRouter-Cache-TTL"] = "3600"
-        elif self.cache_ttl == "5m":
-            headers["X-OpenRouter-Cache-TTL"] = "300"
+        if self.cache_ttl:
+            if self.cache_strategy == "anthropic_block":
+                if self.cache_ttl == "1h":
+                    headers.setdefault("anthropic-beta", "extended-cache-ttl-2025-04-11")
+            if self.reasoning_format == "openrouter":
+                if self.cache_ttl == "1h":
+                    headers.setdefault("X-OpenRouter-Cache-TTL", "3600")
+                elif self.cache_ttl == "5m":
+                    headers.setdefault("X-OpenRouter-Cache-TTL", "300")
         return headers
 
     def _build_payload(
@@ -267,7 +407,7 @@ class HttpChatModel(_CacheTelemetryMixin):
     ) -> dict[str, Any]:
         formatted_messages: list[dict[str, Any]] = []
         system_cached = False
-        supports_cache_ctrl = "openrouter.ai" in self.endpoint or "anthropic" in self.endpoint
+        supports_cache_ctrl = self.cache_strategy == "anthropic_block"
         for msg in messages:
             msg_dict = msg.to_dict()
             if self.cache_ttl and supports_cache_ctrl and msg.role == "system" and not system_cached:
@@ -288,13 +428,13 @@ class HttpChatModel(_CacheTelemetryMixin):
             "model": self.model,
             "messages": formatted_messages,
         }
-        if self.reasoning_effort:
+        if self.reasoning_effort and self.reasoning_format != "none":
             effort = self.reasoning_effort.lower()
             if effort in ("low", "medium", "high"):
                 payload["reasoning_effort"] = effort
-                if "openrouter.ai" in self.endpoint:
+                if self.reasoning_format == "openrouter":
                     payload["reasoning"] = {"effort": effort}
-            elif effort.isdigit() and "openrouter.ai" in self.endpoint:
+            elif effort.isdigit() and self.reasoning_format == "openrouter":
                 payload["reasoning"] = {"max_tokens": int(effort)}
 
         if tools:
