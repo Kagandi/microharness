@@ -392,6 +392,16 @@ def parse_markdown_to_tui_lines(text: str, max_width: int = 80) -> list[TUILine]
     return result
 
 
+def _resource_field(info: Any, index: int, name: str, default: Any) -> Any:
+    """Reads a field from a Command/Skill dataclass, falling back to a legacy tuple shape."""
+    value = getattr(info, name, None)
+    if value is not None:
+        return value
+    if isinstance(info, (tuple, list)) and len(info) > index:
+        return info[index]
+    return default
+
+
 @dataclass
 class TUILine:
     text: str
@@ -447,26 +457,16 @@ class TUIState:
         """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
         catalog = list(DEFAULT_COMMANDS)
         for cmd_name, cmd_info in sorted(self.custom_commands.items()):
-            desc = f"Custom command: /{cmd_name}"
-            if isinstance(cmd_info, (tuple, list)) and len(cmd_info) >= 3:
-                scope = cmd_info[2]
-                desc = f"Custom command [{scope}]"
+            scope = _resource_field(cmd_info, 2, "scope", "")
+            desc = f"Custom command [{scope}]" if scope else f"Custom command: /{cmd_name}"
             catalog.append((f"/{cmd_name}", desc))
 
         existing_cmds = {cmd.lower() for cmd, _ in catalog}
         for s_name, s_info in sorted(self.skills.items()):
             slash_skill = f"/{s_name}"
             if slash_skill.lower() not in existing_cmds:
-                summary = (
-                    s_info[0]
-                    if isinstance(s_info, (tuple, list)) and len(s_info) > 0
-                    else s_name
-                )
-                scope = (
-                    s_info[2]
-                    if isinstance(s_info, (tuple, list)) and len(s_info) > 2
-                    else "project"
-                )
+                summary = _resource_field(s_info, 0, "summary", s_name)
+                scope = _resource_field(s_info, 2, "scope", "project")
                 catalog.append((slash_skill, f"Skill [{scope}] {summary}"))
                 existing_cmds.add(slash_skill.lower())
 

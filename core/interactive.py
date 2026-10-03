@@ -56,6 +56,9 @@ class SessionUI(Protocol):
     def status(self, text: str) -> None:
         """Reports one undecorated line, used for lists and footers."""
 
+    def echo(self, text: str) -> None:
+        """Records what the user typed, for frontends that do not echo natively."""
+
     def refresh(self) -> None:
         """Re-renders any live status display."""
 
@@ -79,6 +82,9 @@ class ConsoleUI:
 
     def status(self, text: str) -> None:
         print(text)
+
+    def echo(self, text: str) -> None:
+        """A terminal already echoes typed input."""
 
     def refresh(self) -> None:
         """Nothing to refresh on a plain-text console."""
@@ -107,6 +113,9 @@ class TuiUI:
 
     def status(self, text: str) -> None:
         self.state.add_system(text)
+
+    def echo(self, text: str) -> None:
+        self.state.add_user(text)
 
     def refresh(self) -> None:
         self._redraw()
@@ -323,7 +332,7 @@ class CommandRouter:
         stripped = user_input.strip()
         spec = next((s for s in self.specs if s.matches(stripped.lower())), None)
         if spec is not None:
-            return getattr(self, spec.handler)(command_argument(stripped))
+            return getattr(self, spec.handler)(command_argument(stripped), echo=stripped)
         return self._handle_input(stripped)
 
     def _handle_input(self, user_input: str) -> str:
@@ -343,11 +352,12 @@ class CommandRouter:
             outcome = SlashOutcome(TURN, "", False, user_input)
 
         self.ctx.ui.refresh()
-        return self._add_user_prompt(outcome.prompt or "")
+        return self._add_user_prompt(outcome.prompt or "", echo=user_input)
 
-    def _add_user_prompt(self, prompt: str) -> str:
+    def _add_user_prompt(self, prompt: str, echo: str = "") -> str:
         """Expands ``@file`` tags in a prompt and appends it to memory."""
         effective_prompt, attached = expand_tagged_files(prompt, self.ctx.workspace)
+        self.ctx.ui.echo(echo or prompt)
         if attached:
             names = ", ".join(f"@{name}" for name in attached)
             self.ctx.ui.info(f"⚡ Attached {len(attached)} file(s): {names}")
@@ -356,17 +366,17 @@ class CommandRouter:
 
     # --- handlers -------------------------------------------------------
 
-    def _cmd_exit(self, _arg: str) -> str:
+    def _cmd_exit(self, _arg: str, echo: str = "") -> str:
         self.ctx.ui.info("Ending session.")
         return EXIT
 
-    def _cmd_help(self, _arg: str) -> str:
+    def _cmd_help(self, _arg: str, echo: str = "") -> str:
         for line in render_help_lines(self.ctx.commands, self.ctx.skills):
             self.ctx.ui.status(line)
         self.ctx.ui.status("")
         return SKIP
 
-    def _cmd_status(self, _arg: str) -> str:
+    def _cmd_status(self, _arg: str, echo: str = "") -> str:
         ui = self.ctx.ui
         for line in ui.render_context(
             self.ctx.memory.stats(),
@@ -377,7 +387,7 @@ class CommandRouter:
         ui.refresh()
         return SKIP
 
-    def _cmd_compact(self, _arg: str) -> str:
+    def _cmd_compact(self, _arg: str, echo: str = "") -> str:
         memory = self.ctx.memory
         before = memory.total_chars() // CHARS_PER_TOKEN
         compacted = memory.compact_if_needed(force=True)
@@ -393,13 +403,13 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_new(self, _arg: str) -> str:
+    def _cmd_new(self, _arg: str, echo: str = "") -> str:
         self.ctx.memory.reset()
         self.ctx.ui.info("✨ Started a fresh conversation context (workspace files preserved).")
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_model(self, arg: str) -> str:
+    def _cmd_model(self, arg: str, echo: str = "") -> str:
         if not arg:
             harness = self.ctx.harness
             self.ctx.ui.info("🤖 Available Models (from config):")
@@ -413,7 +423,7 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_resume(self, arg: str) -> str:
+    def _cmd_resume(self, arg: str, echo: str = "") -> str:
         if not arg:
             self.ctx.ui.info("📂 Recent Sessions:")
             for line in render_session_lines(self.ctx.harness.find_recent_sessions(limit=8)):
@@ -439,7 +449,7 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_skill(self, arg: str) -> str:
+    def _cmd_skill(self, arg: str, echo: str = "") -> str:
         outcome = resolve_skill_command(f"/skill {arg}".strip(), self.ctx.skills)
         if outcome.is_error:
             self.ctx.ui.error(outcome.message)
@@ -450,9 +460,9 @@ class CommandRouter:
 
         self.ctx.ui.info(f"⚡ {outcome.message} ...")
         self.ctx.ui.refresh()
-        return self._add_user_prompt(outcome.prompt or "")
+        return self._add_user_prompt(outcome.prompt or "", echo=echo)
 
-    def _cmd_reasoning(self, arg: str) -> str:
+    def _cmd_reasoning(self, arg: str, echo: str = "") -> str:
         harness = self.ctx.harness
         if not arg:
             current = harness.get_reasoning_effort()
@@ -477,7 +487,7 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_cache(self, arg: str) -> str:
+    def _cmd_cache(self, arg: str, echo: str = "") -> str:
         harness = self.ctx.harness
         if not arg:
             self._show_cache()

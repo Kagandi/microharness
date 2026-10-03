@@ -26,7 +26,7 @@ from core.config import (
     normalize_reasoning_effort,
     resolve_project_tool_trust,
 )
-from core.discovery import discover_workspace_files, expand_tagged_files
+from core.discovery import discover_workspace_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.interactive import (
@@ -37,17 +37,15 @@ from core.interactive import (
     CommandRouter,
     ConsoleUI,
     SessionUI,
+    TuiUI,
     TurnState,
 )
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import (
     CacheAwareModel,
-    CancellableModel,
     DeadlineAwareModel,
     Model,
-    ModelCancelledError,
-    NamedModel,
     ProviderAwareModel,
     ReasoningAwareModel,
 )
@@ -83,6 +81,7 @@ from core.tools import (
     discover_tool_plugins,
 )
 from core.tracer import ActionFormatter, Tracer, _dim
+from core.tui_session import TuiTurnRunner, replay_messages
 from core.types import EvalResult, Message, RunResult, Task
 from core.usage import summarize_run_usage
 
@@ -829,8 +828,7 @@ class Harness:
         resume: bool | str | Path | None = None,
     ) -> None:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
-        from core.tracer import _format_action_summary, _pair_calls_with_results
-        from core.tui import CursesTUI, TUIState, compact_path, get_git_branch
+        from core.tui import CursesTUI, TUIState
 
         env, _, memory, tracer, loop, run_dir = self._setup_run(
             task_id=task_id,
@@ -841,334 +839,90 @@ class Harness:
         tracer.verbose = False
         tracer.compact = True
 
-        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
-        skills = _discover_skills(env.workspace_dir, self.global_dir)
+        commands = discover_commands(env.workspace_dir, self.global_dir)
+        skills = discover_skills(env.workspace_dir, self.global_dir)
+        state = self._build_tui_state(TUIState(title="microharness"), env, commands, skills)
+        turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
-        state = TUIState(title="microharness")
-        if isinstance(self.model, ProviderAwareModel):
-            state.provider_name = self.model.provider or ""
-        else:
-            state.provider_name = getattr(self.model, "provider", "") or ""
+        tui = CursesTUI(state)
+        ui = TuiUI(state, redraw=lambda: tui.draw(tui.stdscr) if tui.stdscr else None)
+        router = self._make_router(
+            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=False
+        )
+        runner = TuiTurnRunner(
+            model=self.model,
+            loop=loop,
+            memory=memory,
+            tracer=tracer,
+            state=state,
+            tui=tui,
+            cache_stats=self.get_cache_stats,
+            step_index=turns.step_index,
+        )
 
-        if isinstance(self.model, NamedModel):
-            state.model_name = self.model.model or ""
-        else:
-            state.model_name = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+        def on_user_submit(user_text: str) -> None:
+            """Handles one submitted line, running a turn when a prompt was queued."""
+            if not user_text.strip():
+                return
+            runner.step_index = turns.step_index
+            if router.dispatch(user_text) == TURN:
+                runner.run_turn()
+                turns.step_index = runner.step_index
 
+        state.update_status(memory.stats(), self.get_cache_stats())
+        try:
+            tui.run(on_user_submit=on_user_submit, initial_instruction=initial_instruction)
+        finally:
+            env.teardown()
+            _, md_path = tracer.finalize(
+                finish_reason="session_ended",
+                patch_diff=env.get_git_patch(),
+                telemetry=self.get_cache_stats(),
+            )
+            print(f"\nComplete session trace saved to:\n   {md_path}\n")
+
+    def _build_tui_state(
+        self,
+        state: Any,
+        env: Environment,
+        commands: dict[str, Command],
+        skills: dict[str, Skill],
+    ) -> Any:
+        """Seeds the TUI state with session metadata and autocomplete catalogues."""
+        state.provider_name = (
+            self.model.provider if isinstance(self.model, ProviderAwareModel) else ""
+        ) or getattr(self.model, "provider", "") or ""
+        state.model_name = self.active_model_name()
         state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
-        curr_reasoning = self.get_reasoning_effort()
-        state.reasoning = curr_reasoning.upper() if curr_reasoning else ""
+        reasoning = self.get_reasoning_effort()
+        state.reasoning = reasoning.upper() if reasoning else ""
+        from core.tui import compact_path, get_git_branch
+
         state.cwd = compact_path(str(env.workspace_dir))
         state.git_branch = get_git_branch(env.workspace_dir)
-        state.set_custom_commands(custom_commands)
+        state.set_custom_commands(commands)
         state.set_skills(skills)
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.set_available_models(self.get_available_models())
         state.set_available_sessions(self.find_recent_sessions(limit=15))
+        return state
 
-        step_idx = 1
-        if resume:
-            res_target = None if resume is True else resume
-            res_msgs, res_meta = self.load_session(res_target)
-            if res_msgs:
-                memory.restore_messages(res_msgs, refresh_system_prompt=memory.system_prompt)
-                step_idx = res_meta.get("total_steps", 0) + 1
-                for m in res_msgs:
-                    if m.role == "user" and m.content:
-                        state.add_user(m.content)
-                    elif m.role == "assistant":
-                        if m.content:
-                            state.add_agent(m.content)
-                        if m.tool_calls:
-                            for tc in m.tool_calls:
-                                act = _format_action_summary(tc.name, tc.arguments, color=False)
-                                state.add_action(act)
-                state.add_system(
-                    f"🔄 Resumed session '{res_meta.get('run_id')}' ({len(res_msgs)} messages loaded, continuing at step {step_idx})."
-                )
-            else:
-                state.add_system(
-                    f"⚠️ Could not resume session ({res_meta.get('error', 'not found')}). Starting fresh."
-                )
-
-        state.update_status(memory.stats(), self.get_cache_stats())
-
-        max_steps_per_turn = 30
-        tui = CursesTUI(state)
-
-        def on_user_submit(user_text: str) -> None:
-            nonlocal step_idx
-
-            cmd = user_text.lower().strip()
-            if cmd in ("/help", "help"):
-                state.add_system("Available commands: /help, /model, /resume, /status, /compact, /new, /skill, /exit")
-                state.add_system("Press Esc on an empty prompt to exit; Esc clears text or dismisses menus.")
-                if custom_commands:
-                    state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
-                if skills:
-                    state.add_system("Available skills (run /<name>): " + ", ".join(f"/{s}" for s in sorted(skills.keys())))
-                return
-
-            if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
-                ("/model ", "/models ")
-            ):
-                arg = ""
-                if " " in user_text.strip():
-                    arg = user_text.strip().split(" ", 1)[1].strip()
-                if not arg:
-                    models = self.get_available_models()
-                    curr_model = (
-                        getattr(self.model, "model", "")
-                        or getattr(self.model, "model_name", "")
-                        or ""
-                    )
-                    state.add_system("🤖 Available Models (from config):")
-                    for i, m in enumerate(models, 1):
-                        is_active = (
-                            m["name"].lower() == curr_model.lower()
-                            or m.get("model", "").lower() == curr_model.lower()
-                        )
-                        active_lbl = " [active]" if is_active else ""
-                        prov = f"[{m['provider']}] " if m.get("provider") else ""
-                        state.add_system(f"  {i}. {m['name']}{active_lbl} - {prov}{m.get('description', '')}")
-                    state.add_system("Type /model <name|number> to switch active model.")
-                    return
-
-                ok, msg, new_m = self.switch_model(arg)
-                if ok:
-                    loop.model = new_m
-                    state.model_name = (
-                        getattr(new_m, "model", "")
-                        or getattr(new_m, "model_name", "")
-                        or ""
-                    )
-                    state.provider_name = getattr(new_m, "provider", "") or ""
-                    state.add_system(f"✅ {msg}")
-                    state.set_available_models(self.get_available_models())
-                    state.update_status(memory.stats(), self.get_cache_stats())
-                else:
-                    state.add_error(f"Failed to switch model: {msg}")
-                return
-
-            if cmd in ("/resume", "/resumes", "resume", "resumes") or cmd.startswith(
-                ("/resume ", "/resumes ")
-            ):
-                arg = ""
-                if " " in user_text.strip():
-                    arg = user_text.strip().split(" ", 1)[1].strip()
-                if not arg:
-                    sessions = self.find_recent_sessions(limit=8)
-                    state.add_system("📂 Recent Sessions:")
-                    if not sessions:
-                        state.add_system("  No previous sessions found in runs directory.")
-                    else:
-                        for i, s in enumerate(sessions, 1):
-                            ws_badge = " [this repo]" if s.get("matches_workspace") else ""
-                            state.add_system(f"  {i}. {s['run_id']}{ws_badge} ({s['total_steps']} steps) - {s['preview']}")
-                    state.add_system("Type /resume <number|session_id> to load a previous session.")
-                    return
-
-                messages, meta = self.load_session(arg)
-                if not messages:
-                    err = meta.get("error", f"Could not load session '{arg}'")
-                    state.add_error(f"Failed to resume session: {err}")
-                    return
-
-                memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
-                step_idx = meta.get("total_steps", 0) + 1
-                tracer.steps.clear()
-                state.lines.clear()
-                for m in messages:
-                    if m.role == "user" and m.content:
-                        state.add_user(m.content)
-                    elif m.role == "assistant":
-                        if m.content:
-                            state.add_agent(m.content)
-                        if m.tool_calls:
-                            for tc in m.tool_calls:
-                                act = _format_action_summary(tc.name, tc.arguments, color=False)
-                                state.add_action(act)
-                state.add_system(
-                    f"🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded, continuing at step {step_idx})."
-                )
-                state.set_available_sessions(self.find_recent_sessions(limit=15))
-                state.update_status(memory.stats(), self.get_cache_stats())
-                return
-
-            if cmd in ("/status", "status"):
-                s = memory.stats()
-                state.add_system(
-                    f"Context Tokens: {s['estimated_tokens']:,} / {s['max_estimated_tokens']:,} ({s['usage_pct']:.1f}%) | "
-                    f"Messages: {s['total_messages']}"
-                )
-                return
-
-            if cmd in ("/compact", "compact"):
-                old_chars = memory.total_chars()
-                did_compact = memory.compact_if_needed(force=True)
-                new_chars = memory.total_chars()
-                if did_compact:
-                    freed = (old_chars - new_chars) // 4
-                    state.add_system(f"Compaction applied: freed ~{freed:,} tokens.")
-                else:
-                    state.add_system("No older observations eligible for compaction.")
-                state.update_status(memory.stats(), self.get_cache_stats())
-                return
-
-            if cmd in ("/new", "/reset", "new", "reset"):
-                memory.reset()
-                state.lines.clear()
-                state.add_system("Fresh session started (workspace preserved).")
-                state.update_status(memory.stats(), self.get_cache_stats())
-                return
-
-            if cmd in SKILL_COMMAND_ALIASES or cmd.startswith(SKILL_COMMAND_PREFIXES):
-                outcome = resolve_skill_command(user_text, skills)
-                if outcome.is_error:
-                    state.add_error(outcome.message)
-                    return
-                if outcome.action == "skip":
-                    state.add_system(outcome.message)
-                    return
-                state.add_system(f"⚡ {outcome.message}")
-                effective_prompt = outcome.prompt or user_text
-            elif user_text.startswith("/"):
-                outcome = resolve_slash_input(
-                    user_text, custom_commands, skills, unknown_message="Type /help for commands."
-                )
-                if outcome.is_error or outcome.prompt is None:
-                    state.add_error(outcome.message)
-                    return
-                state.add_system(outcome.message)
-                effective_prompt = outcome.prompt
-            else:
-                effective_prompt = user_text
-
-            effective_prompt, attached_files = expand_tagged_files(effective_prompt, env.workspace_dir)
-            state.add_user(user_text)
-            if attached_files:
-                names = ", ".join(f"@{f}" for f in attached_files)
-                state.add_system(f"⚡ Attached {len(attached_files)} file(s): {names}")
-            memory.add_user(effective_prompt)
-            if tui.stdscr:
-                tui.draw(tui.stdscr)
-
-            turn_start = step_idx
-            state.turn_active = True
-            def _cancel_probe() -> bool:
-                """Non-blocking Esc check invoked from the model's retry/backoff path.
-
-                Surfaces progress the moment it fires, so a user who pressed Esc
-                during a long rate-limit backoff sees the request is aborting
-                rather than assuming the key did nothing. Every caller treats a
-                True result as terminal, so this runs at most once per turn.
-                """
-                if not tui.check_cancel_requested():
-                    return False
-                state.add_system(
-                    "⚠️ Cancelling… aborting the pending model request "
-                    "(Ctrl+C cancels immediately, even mid-request)."
-                )
-                state.update_status(memory.stats(), self.get_cache_stats())
-                if tui.stdscr:
-                    tui.draw(tui.stdscr)
-                return True
-
-            if isinstance(self.model, CancellableModel):
-                self.model.set_cancel_probe(_cancel_probe)
-
-            try:
-                while (step_idx - turn_start) < max_steps_per_turn:
-                    # Shared by the boundary cancel and the mid-request probe so both
-                    # report identically and leave the session in the same state.
-                    def _abort_turn(reason: str) -> None:
-                        dropped = memory.drop_incomplete_tool_turn()
-                        state.add_system(
-                            f"⚠️ Turn {reason} at step {step_idx}. Session is still active."
-                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
-                        )
-                        state.update_status(memory.stats(), self.get_cache_stats())
-                        if tui.stdscr:
-                            tui.draw(tui.stdscr)
-
-                    if tui.check_cancel_requested():
-                        _abort_turn("cancelled by user (Esc)")
-                        break
-
-                    try:
-                        is_finished, step_trace = loop.step(step_index=step_idx)
-                    except ModelCancelledError:
-                        _abort_turn("cancelled by user (Esc)")
-                        break
-                    except KeyboardInterrupt:
-                        _abort_turn("interrupted by user (Ctrl+C)")
-                        break
-                    except Exception as exc:
-                        state.add_error(f"Step {step_idx} error: {exc}")
-                        break
-
-                    tracer.record_step(step_trace)
-                    step_idx += 1
-
-                    model_text = step_trace.model_response.get("content") or ""
-                    tool_calls = step_trace.model_response.get("tool_calls") or []
-
-                    if tool_calls:
-                        if model_text.strip():
-                            first_line = model_text.strip().splitlines()[0]
-                            preview = (first_line[:80] + "...") if len(first_line) > 80 else first_line
-                            state.add_thought(preview)
-
-                        for tc, tr in _pair_calls_with_results(tool_calls, step_trace.tool_results):
-                            name = tc.get("name", "") if tc else ""
-                            args = tc.get("arguments", {}) if tc else {}
-                            action_text = _format_action_summary(name, args, color=False)
-                            exit_code = tr.get("exit_code", 0) if tr else 0
-                            if exit_code == 0:
-                                state.add_action(f"{action_text} ({step_trace.duration_s:.1f}s)")
-                            else:
-                                out_lines = tr.get("output", "").strip().splitlines() if tr else []
-                                err_msg = out_lines[0] if out_lines else "Failed"
-                                state.add_error(f"{action_text} (exit {exit_code}: {err_msg[:60]})")
-                    else:
-                        if model_text.strip():
-                            state.add_agent(model_text.strip())
-
-                    state.update_status(memory.stats(), self.get_cache_stats())
-                    if tui.stdscr:
-                        tui.draw(tui.stdscr)
-
-                    if is_finished:
-                        break
-
-                    if tui.check_cancel_requested():
-                        dropped = memory.drop_incomplete_tool_turn()
-                        state.add_system(
-                            f"⚠️ Turn cancelled by user (Esc) at step {step_idx}. Session is still active."
-                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
-                        )
-                        state.update_status(memory.stats(), self.get_cache_stats())
-                        if tui.stdscr:
-                            tui.draw(tui.stdscr)
-                        break
-            finally:
-                state.turn_active = False
-                if isinstance(self.model, CancellableModel):
-                    self.model.set_cancel_probe(None)
-                state.update_status(memory.stats(), self.get_cache_stats())
-                if tui.stdscr:
-                    tui.draw(tui.stdscr)
-
-        try:
-            tui.run(
-                on_user_submit=on_user_submit,
-                initial_instruction=initial_instruction,
+    def _replay_resumed_session(self, state: Any, memory: Memory, resume: Any) -> int:
+        """Restores a previous session and replays its transcript into the TUI."""
+        if not resume:
+            return 1
+        messages, meta = self.load_session(None if resume is True else resume)
+        if not messages:
+            state.add_system(
+                f"⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh."
             )
-        finally:
-            env.teardown()
-            c_stats = self.get_cache_stats()
-            patch_diff = env.get_git_patch()
-            json_path, md_path = tracer.finalize(
-                finish_reason="session_ended", patch_diff=patch_diff, telemetry=c_stats
-            )
-            print(f"\nComplete session trace saved to:\n   {md_path}\n")
+            return 1
+
+        memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+        step_index = meta.get("total_steps", 0) + 1
+        replay_messages(state, messages)
+        state.add_system(
+            f"🔄 Resumed session '{meta.get('run_id')}' "
+            f"({len(messages)} messages loaded, continuing at step {step_index})."
+        )
+        return step_index
