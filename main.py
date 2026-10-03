@@ -194,6 +194,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Run single one-shot task and exit immediately without entering interactive chat",
     )
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch interactive mode in full-screen TUI with bottom-anchored chat",
+    )
+    parser.add_argument(
         "--benchmark",
         choices=["mini-swe", "calculator", "all", "deepswe-mini"],
         default=None,
@@ -626,7 +631,10 @@ def main():
         return
 
     # Default: Interactive Mode in the target project directory
-    harness.run_interactive(initial_instruction=args.instruction)
+    if args.tui:
+        harness.run_tui(initial_instruction=args.instruction)
+    else:
+        harness.run_interactive(initial_instruction=args.instruction)
 
 
 if __name__ == "__main__":

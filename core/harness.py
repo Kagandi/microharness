@@ -974,3 +974,146 @@ class Harness:
             print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
         finally:
             env.teardown()
+
+    def run_tui(
+        self,
+        initial_instruction: str | None = None,
+        task_id: str = "tui_session",
+    ) -> None:
+        """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
+        from core.tracer import _format_action_summary, _pair_calls_with_results
+        from core.tui import CursesTUI, TUIState
+
+        env, _, memory, tracer, loop, run_dir = self._setup_run(
+            task_id=task_id,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            initial_instruction="",
+            initial_files={},
+        )
+        tracer.verbose = False
+        tracer.compact = True
+
+        state = TUIState(title="microharness")
+        state.provider_name = getattr(self.model, "provider", "")
+        state.model_name = getattr(self.model, "model_name", "")
+        state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else "OFF"
+        curr_reasoning = self.get_reasoning_effort()
+        state.reasoning = curr_reasoning.upper() if curr_reasoning else "OFF"
+        state.update_status(memory.stats(), self.get_cache_stats())
+
+        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+
+        step_idx = 1
+        max_steps_per_turn = 30
+        tui = CursesTUI(state)
+
+        def on_user_submit(user_text: str) -> None:
+            nonlocal step_idx
+
+            cmd = user_text.lower().strip()
+            if cmd in ("/help", "help"):
+                state.add_system("Available commands: /help, /status, /compact, /new, /exit")
+                if custom_commands:
+                    state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
+                return
+
+            if cmd in ("/status", "status"):
+                s = memory.stats()
+                state.add_system(
+                    f"Context Tokens: {s['estimated_tokens']:,} / {s['max_estimated_tokens']:,} ({s['usage_pct']:.1f}%) | "
+                    f"Messages: {s['total_messages']}"
+                )
+                return
+
+            if cmd in ("/compact", "compact"):
+                old_chars = memory.total_chars()
+                did_compact = memory.compact_if_needed(force=True)
+                new_chars = memory.total_chars()
+                if did_compact:
+                    freed = (old_chars - new_chars) // 4
+                    state.add_system(f"🧹 Compaction applied: freed ~{freed:,} tokens.")
+                else:
+                    state.add_system("ℹ️ No older observations eligible for compaction.")
+                state.update_status(memory.stats(), self.get_cache_stats())
+                return
+
+            if cmd in ("/new", "/reset", "new", "reset"):
+                memory.reset()
+                state.lines.clear()
+                state.add_system("✨ Fresh session started (workspace preserved).")
+                state.update_status(memory.stats(), self.get_cache_stats())
+                return
+
+            if user_text.startswith("/"):
+                cmd_part, _, args_part = user_text[1:].partition(" ")
+                cmd_key = cmd_part.lower().strip()
+                if cmd_key in custom_commands:
+                    _, template, scope = custom_commands[cmd_key]
+                    effective_prompt = _expand_command(template, args_part)
+                    state.add_system(f"⚡ Executing /{cmd_key} [{scope}] ...")
+                else:
+                    state.add_error(f"Unknown command '/{cmd_key}'. Type /help for commands.")
+                    return
+            else:
+                effective_prompt = user_text
+
+            state.add_user(user_text)
+            memory.add_user(effective_prompt)
+            if tui.stdscr:
+                tui.draw(tui.stdscr)
+
+            turn_start = step_idx
+            while (step_idx - turn_start) < max_steps_per_turn:
+                try:
+                    is_finished, step_trace = loop.step(step_index=step_idx)
+                except Exception as exc:
+                    state.add_error(f"Step {step_idx} error: {exc}")
+                    break
+
+                tracer.record_step(step_trace)
+                step_idx += 1
+
+                model_text = step_trace.model_response.get("content") or ""
+                tool_calls = step_trace.model_response.get("tool_calls") or []
+
+                if tool_calls:
+                    if model_text.strip():
+                        first_line = model_text.strip().splitlines()[0]
+                        preview = (first_line[:80] + "...") if len(first_line) > 80 else first_line
+                        state.add_thought(preview)
+
+                    for tc, tr in _pair_calls_with_results(tool_calls, step_trace.tool_results):
+                        name = tc.get("name", "") if tc else ""
+                        args = tc.get("arguments", {}) if tc else {}
+                        action_text = _format_action_summary(name, args, color=False)
+                        exit_code = tr.get("exit_code", 0) if tr else 0
+                        if exit_code == 0:
+                            state.add_action(f"{action_text} ({step_trace.duration_s:.1f}s)")
+                        else:
+                            out_lines = tr.get("output", "").strip().splitlines() if tr else []
+                            err_msg = out_lines[0] if out_lines else "Failed"
+                            state.add_error(f"{action_text} (exit {exit_code}: {err_msg[:60]})")
+                else:
+                    if model_text.strip():
+                        state.add_agent(model_text.strip())
+
+                state.update_status(memory.stats(), self.get_cache_stats())
+                if tui.stdscr:
+                    tui.draw(tui.stdscr)
+
+                if is_finished:
+                    break
+
+        if initial_instruction and initial_instruction.strip():
+            on_user_submit(initial_instruction.strip())
+
+        try:
+            tui.run(on_user_submit=on_user_submit)
+        finally:
+            env.teardown()
+            c_stats = self.get_cache_stats()
+            patch_diff = env.get_git_patch()
+            json_path, md_path = tracer.finalize(
+                finish_reason="session_ended", patch_diff=patch_diff, telemetry=c_stats
+            )
+            print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
