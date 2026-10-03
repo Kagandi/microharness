@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from core import config
 from core.types import Message, ToolCall
 
 
@@ -251,42 +252,11 @@ class ProviderAwareModel(Model, Protocol):
     provider: str
 
 
-def normalize_cache_ttl(ttl: str | None) -> str | None:
-    """Normalizes cache TTL setting ('5m', '1h', or None for disabled).
-
-    Supported representations:
-    - '5m', '5min', '5mins', '300', '300s' -> '5m' (standard ephemeral cache)
-    - '1h', '1hour', '1hr', '60m', '3600', '3600s' -> '1h' (extended beta cache)
-    - 'off', 'none', 'disable', 'disabled', 'false', '0', '', None -> None
-    """
-    if ttl is None:
-        return None
-    val = str(ttl).strip().lower()
-    if val in ("off", "none", "disable", "disabled", "false", "0", ""):
-        return None
-    if val in ("5m", "5min", "5mins", "300", "300s"):
-        return "5m"
-    if val in ("1h", "1hour", "1hr", "60m", "3600", "3600s"):
-        return "1h"
-    raise ValueError(
-        f"Unsupported cache TTL: '{ttl}'. Valid options: '5m' (5 minutes), '1h' (1 hour), or 'off'."
-    )
-
-
-def normalize_reasoning_effort(effort: str | None) -> str | None:
-    """Normalizes reasoning/thinking effort level ('low', 'medium', 'high', numeric budget, or None)."""
-    if effort is None:
-        return None
-    val = str(effort).strip().lower()
-    if val in ("off", "none", "disable", "disabled", "false", "0", ""):
-        return None
-    if val in ("low", "medium", "high"):
-        return val
-    if val.isdigit():
-        return val
-    raise ValueError(
-        f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', numeric token budget, or 'off'."
-    )
+# Cache TTL and reasoning effort normalization live in core/config.py so the
+# harness cascade and the model clients share one validation path. Re-exported
+# here because they are part of the model-facing surface.
+normalize_cache_ttl = config.normalize_cache_ttl
+normalize_reasoning_effort = config.normalize_reasoning_effort
 
 
 PROVIDER_ALIASES: dict[str, str] = {
@@ -301,54 +271,8 @@ def get_builtin_providers_path() -> Path:
     return Path(__file__).parent / "providers.json"
 
 
-def strip_json_comments(text: str) -> str:
-    """Strips # and // comments from JSON-like text while preserving string literals."""
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    in_string = False
-    escape = False
-
-    while i < n:
-        c = text[i]
-        if in_string:
-            out.append(c)
-            if escape:
-                escape = False
-            elif c == "\\":
-                escape = True
-            elif c == '"':
-                in_string = False
-            i += 1
-        else:
-            if c == '"':
-                in_string = True
-                escape = False
-                out.append(c)
-                i += 1
-            elif c == "#":
-                while i < n and text[i] != "\n":
-                    i += 1
-            elif c == "/" and i + 1 < n and text[i + 1] == "/":
-                while i < n and text[i] != "\n":
-                    i += 1
-            else:
-                out.append(c)
-                i += 1
-
-    return "".join(out)
-
-
-def _read_json_with_comments(file_path: Path | None) -> dict[str, Any]:
-    if not file_path or not file_path.is_file():
-        return {}
-    try:
-        raw = file_path.read_text(encoding="utf-8")
-        clean_json = strip_json_comments(raw)
-        data = json.loads(clean_json)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+strip_json_comments = config.strip_json_comments
+_read_json_with_comments = config.read_jsonc
 
 
 def load_builtin_providers() -> dict[str, dict[str, Any]]:

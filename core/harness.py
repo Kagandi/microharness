@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import time
 import uuid
@@ -8,6 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from core.config import (
+    PROJECT_TRUST_NOTICE,
+    ConfigLayers,
+    HarnessConfig,
+    get_default_global_dir,
+    load_global_config,
+    load_project_config,
+    normalize_cache_ttl,
+    normalize_reasoning_effort,
+    resolve_project_tool_trust,
+)
 from core.discovery import (
     discover_resources,
     discover_workspace_files,
@@ -28,13 +38,9 @@ from core.model import (
     RateLimitAwareModel,
     RateLimitError,
     ReasoningAwareModel,
-    normalize_cache_ttl,
-    normalize_reasoning_effort,
-    strip_json_comments,
 )
 from core.prompts import DEFAULT_SYSTEM_PROMPT
 from core.tools import (
-    DEFAULT_MAX_TOOL_CHARS,
     BashTool,
     EditFileTool,
     ReadFileTool,
@@ -46,38 +52,16 @@ from core.tools import (
 from core.tracer import ActionFormatter, Tracer, _dim
 from core.types import EvalResult, Message, RunResult, Task
 
-
-def get_default_global_dir() -> Path:
-    """Returns the default global directory, evaluating Path.home() at call time."""
-    home = Path.home()
-    if (home / ".microharness").exists() or not (home / ".mini-harness").exists():
-        return home / ".microharness"
-    return home / ".mini-harness"
+__all__ = [
+    "DEFAULT_GLOBAL_DIR",
+    "Harness",
+    "get_default_global_dir",
+    "load_global_config",
+    "load_project_config",
+]
 
 
 DEFAULT_GLOBAL_DIR = get_default_global_dir()
-
-
-def _load_json_config(config_file: Path | None) -> dict[str, Any]:
-    if not config_file or not config_file.is_file():
-        return {}
-    try:
-        raw = config_file.read_text(encoding="utf-8")
-        clean_json = strip_json_comments(raw)
-        data = json.loads(clean_json)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def load_global_config(global_dir: Path | None = None) -> dict[str, Any]:
-    """Loads user baseline configuration from ~/.microharness/config.json."""
-    return _load_json_config(global_dir / "config.json" if global_dir else None)
-
-
-def load_project_config(workspace: Path | None = None) -> dict[str, Any]:
-    """Loads optional project-level configuration from .microharness/config.json."""
-    return _load_json_config(workspace / ".microharness" / "config.json" if workspace else None)
 
 
 def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
@@ -362,71 +346,55 @@ class Harness:
         self.global_dir = (
             Path(global_dir).resolve() if global_dir is not None else get_default_global_dir()
         )
-        self.global_config = load_global_config(self.global_dir)
-        self.project_config = load_project_config(self.explicit_workspace_dir)
-        self.merged_config = {**self.global_config, **self.project_config}
+        self.layers = ConfigLayers.load(self.global_dir, self.explicit_workspace_dir)
+        self.global_config = self.layers.global_config
+        self.project_config = self.layers.project_config
+        self.merged_config = self.layers.merged
 
-        def _cfg(
-            key: str,
-            explicit: Any,
-            cast: Callable[[Any], Any] = lambda x: x,
-            default: Any = None,
-            require_truthy: bool = False,
-        ) -> Any:
-            val = explicit if explicit is not None else self.merged_config.get(key)
-            if require_truthy:
-                val = val if val else default
-            else:
-                val = val if val is not None else default
-            return cast(val) if val is not None else default
+        cfg = HarnessConfig(
+            sandbox=sandbox,
+            docker=docker,
+            docker_image=docker_image,
+            auto_discover_tools=auto_discover_tools,
+            disable_default_tools=disable_default_tools,
+            runs_dir=runs_dir,
+            max_tool_chars=max_tool_chars,
+            max_context_chars=max_context_chars,
+            trigger_ratio=trigger_ratio,
+            cache_ttl=cache_ttl,
+            reasoning_effort=reasoning_effort,
+            max_step_retries=max_step_retries,
+            step_retry_delay=step_retry_delay,
+        ).resolve(self.layers)
 
-        self.sandbox = _cfg("sandbox", sandbox, bool, False)
-        self.docker = _cfg("docker", docker, bool, False)
-        self.docker_image = _cfg(
-            "docker_image", docker_image, str, "python:3.11", require_truthy=True
+        self.sandbox = cfg.sandbox
+        self.docker = cfg.docker
+        self.docker_image = cfg.docker_image
+        self.auto_discover_tools = cfg.auto_discover_tools
+        self.disable_default_tools = cfg.disable_default_tools
+        self.runs_dir = cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
+        self.max_tool_chars = cfg.max_tool_chars
+        self.max_context_chars = cfg.max_context_chars
+        self.trigger_ratio = cfg.trigger_ratio
+        self.cache_ttl = cfg.cache_ttl
+        self.reasoning_effort = cfg.reasoning_effort
+        self.max_step_retries = cfg.max_step_retries
+        self.step_retry_delay = cfg.step_retry_delay
+
+        self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
+            trust_project_tools, self.layers
         )
-        self.custom_tools = tools if tools is not None else custom_tools
-        self.extra_tools = list(extra_tools or [])
-        self.auto_discover_tools = _cfg("auto_discover_tools", auto_discover_tools, bool, True)
-        self.disable_default_tools = _cfg("disable_default_tools", disable_default_tools, bool, False)
+        if project_claim_ignored:
+            print(f"⚠️ Notice: {PROJECT_TRUST_NOTICE}", file=sys.stderr)
 
-        # Trust boundary: project tools must be explicitly trusted via parameter
-        # or user's global config (~/.microharness/config.json).
-        # Project-level config is intentionally NOT allowed to self-grant trust.
-        if trust_project_tools is not None:
-            self.trust_project_tools = bool(trust_project_tools)
-        else:
-            self.trust_project_tools = bool(self.global_config.get("trust_project_tools", False))
-
-        if self.project_config.get("trust_project_tools") and not self.trust_project_tools:
-            print(
-                "⚠️ Notice: Project config attempted to enable 'trust_project_tools'. "
-                "Project tools can only be trusted via CLI flag (--trust-project-tools) "
-                "or global config (~/.microharness/config.json).",
-                file=sys.stderr,
-            )
-
-        self.evaluator = evaluator
-
-        runs_val = _cfg("runs_dir", runs_dir, Path, None, require_truthy=True)
-        self.runs_dir = runs_val.resolve() if runs_val else (self.global_dir / "runs").resolve()
-
-        self.max_tool_chars = _cfg("max_tool_chars", max_tool_chars, int, DEFAULT_MAX_TOOL_CHARS)
-        self.max_context_chars = _cfg("max_context_chars", max_context_chars, int, 8000)
-        self.trigger_ratio = _cfg("trigger_ratio", trigger_ratio, float, 0.80)
-
-        configured_cache_ttl = _cfg("cache_ttl", cache_ttl, str, "5m")
-        self.cache_ttl = normalize_cache_ttl(configured_cache_ttl)
         if isinstance(self.model, CacheAwareModel):
             self.model.set_cache_ttl(self.cache_ttl)
-
-        configured_reasoning = _cfg("reasoning_effort", reasoning_effort, str, None)
-        self.reasoning_effort = normalize_reasoning_effort(configured_reasoning)
         if isinstance(self.model, ReasoningAwareModel):
             self.model.set_reasoning_effort(self.reasoning_effort)
 
-        self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
-        self.step_retry_delay = _cfg("step_retry_delay", step_retry_delay, float, 5.0)
+        self.custom_tools = tools if tools is not None else custom_tools
+        self.extra_tools = list(extra_tools or [])
+        self.evaluator = evaluator
         self.action_formatters = action_formatters
         self.verbose = verbose
 
