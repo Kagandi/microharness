@@ -15,7 +15,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 🧭 Configuration, Steering, Skills & Commands
+## 🧭 Configuration, Steering, Skills, Commands & Tool Plugins
 
 `microharness` supports cascading configuration at two distinct scopes:
 1. **Global User Baseline** (`~/.microharness/` or `--global-dir`)
@@ -74,6 +74,69 @@ Check for:
 * **Invocation**: Type `/review src/auth.py` in interactive chat or pass `microharness "/review src/auth.py"`.
 * **Argument Substitution**: `$ARGUMENTS` or `{args}` is substituted with your trailing arguments.
 * **Dynamic Help & Shadowing**: `/help` lists all discovered custom commands with their descriptions and scopes (`[project]` or `[global]`). Project commands shadow global ones.
+ 
+### 5. Custom Tool Plugins (`.microharness/tools/*.py`) — Zero-Commit Extensibility
+Add new capabilities to the agent dynamically without modifying harness core code or making git commits:
+* **Global Tools** (`~/.microharness/tools/*.py`): Available across all projects on your machine.
+* **Project Tools** (`.microharness/tools/*.py` or `./tools/*.py`): Available in this repository.
+* **Tool Shadowing**: A project tool with the same `name` automatically overrides the global version.
+* **Additive Behavior**: Extra tools are registered alongside baseline tools (`bash`, `read_file`, `write_file`, `edit_file`) rather than replacing them.
+
+#### Authoring Conventions
+A tool plugin file can follow any of these patterns:
+
+##### Option A: Standalone Tool Class (Simplest)
+Any class conforming to the `Tool` protocol (`name`, `description`, `parameters`, `execute`):
+```python
+# ~/.microharness/tools/web_fetch.py or .microharness/tools/calculator.py
+class CalculatorTool:
+    name = "calculate"
+    description = "Evaluates basic math expressions safely"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "expression": {"type": "string", "description": "The math expression (e.g. '24 * 7')"}
+        },
+        "required": ["expression"],
+    }
+
+    def execute(self, expression: str) -> tuple[int, str]:
+        try:
+            return 0, str(eval(expression, {"__builtins__": {}}, {}))
+        except Exception as exc:
+            return 1, f"Error: {exc}"
+```
+
+##### Option B: Environment-Aware Factory (`get_tools`)
+Use `get_tools(env)` if your tool needs access to the harness execution environment (e.g. `env.workspace_dir`):
+```python
+# .microharness/tools/db_tool.py
+class DatabaseTool:
+    name = "query_db"
+    description = "Queries a project SQLite database"
+    parameters = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    def __init__(self, env=None):
+        self.workspace = env.workspace_dir if env else "."
+
+    def execute(self, query: str) -> tuple[int, str]:
+        # Query local database in self.workspace
+        return 0, "Query results..."
+
+def get_tools(env=None):
+    return [DatabaseTool(env)]
+```
+
+##### Option C: Module-Level `tools` List
+Export an explicit list of pre-instantiated tool instances:
+```python
+# .microharness/tools/helpers.py
+tools = [ToolOne(), ToolTwo()]
+```
 
 ---
 
