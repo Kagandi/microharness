@@ -587,7 +587,7 @@ class CursesTUI:
             border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
             mid_sep = "├" + "─" * (box_w - 2) + "┤"
             border_bot = "└" + "─" * (box_w - 2) + "┘"
-            tip_text = "   Tab / ↑ / ↓: Navigate  ·  Enter: Select  ·  Esc: Dismiss"
+            tip_text = "   Tab / ↑ / ↓: Navigate  ·  Enter / →: Select  ·  Esc: Dismiss"
 
             try:
                 stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
@@ -634,6 +634,74 @@ class CursesTUI:
 
         stdscr.refresh()
 
+    def handle_key(self, ch: str | int, on_user_submit: Callable[[str], None]) -> bool:
+        """Processes a single keystroke event.
+
+        Returns False if the interactive session should terminate (e.g. /exit), else True.
+        """
+        matches = self.state.get_matching_commands()
+
+        if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
+            if matches and not self.state.input_buffer.endswith(" "):
+                self.state.complete_selected_command()
+            user_text = self.state.clear_input()
+            if not user_text:
+                return True
+            if user_text.lower() in ("/exit", "/quit", "exit", "quit"):
+                return False
+            on_user_submit(user_text)
+            return True
+
+        if ch in ("\t", 9):
+            if matches:
+                if len(matches) == 1:
+                    self.state.complete_selected_command()
+                else:
+                    self.state.select_next_command()
+            return True
+
+        if ch in (curses.KEY_UP, curses.KEY_BTAB, 353, "\x1b[Z"):
+            if matches:
+                self.state.select_prev_command()
+                return True
+            self.state.scroll_up(5)
+            return True
+
+        if ch in (curses.KEY_DOWN,):
+            if matches:
+                self.state.select_next_command()
+                return True
+            self.state.scroll_down(5)
+            return True
+
+        if ch in (curses.KEY_RIGHT,):
+            if matches:
+                self.state.complete_selected_command()
+            return True
+
+        if ch in (curses.KEY_PPAGE,):
+            self.state.scroll_up(5)
+            return True
+
+        if ch in (curses.KEY_NPAGE,):
+            self.state.scroll_down(5)
+            return True
+
+        if ch in (27, "\x1b"):
+            if matches:
+                self.state.clear_input()
+            return True
+
+        if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
+            self.state.handle_backspace()
+            return True
+
+        if isinstance(ch, str) and ch.isprintable():
+            self.state.handle_input_char(ch)
+            return True
+
+        return True
+
     def run(self, on_user_submit: Callable[[str], None]) -> None:
         """Launches the interactive curses event loop."""
 
@@ -654,67 +722,8 @@ class CursesTUI:
                 except curses.error:
                     continue
 
-                matches = self.state.get_matching_commands()
-
-                if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
-                    if matches and not self.state.input_buffer.endswith(" "):
-                        self.state.complete_selected_command()
-                    user_text = self.state.clear_input()
-                    if not user_text:
-                        continue
-                    if user_text.lower() in ("/exit", "/quit", "exit", "quit"):
-                        break
-                    on_user_submit(user_text)
-                    self.draw(stdscr)
-                    continue
-
-                if ch in (ord("\t"), 9):
-                    if matches:
-                        self.state.select_next_command()
-                        self.draw(stdscr)
-                        continue
-
-                if ch in (curses.KEY_UP, curses.KEY_BTAB):
-                    if matches:
-                        self.state.select_prev_command()
-                        self.draw(stdscr)
-                        continue
-                    self.state.scroll_up(5)
-                    self.draw(stdscr)
-                    continue
-
-                if ch in (curses.KEY_DOWN,):
-                    if matches:
-                        self.state.select_next_command()
-                        self.draw(stdscr)
-                        continue
-                    self.state.scroll_down(5)
-                    self.draw(stdscr)
-                    continue
-
-                if ch in (curses.KEY_PPAGE,):
-                    self.state.scroll_up(5)
-                    self.draw(stdscr)
-                    continue
-
-                if ch in (curses.KEY_NPAGE,):
-                    self.state.scroll_down(5)
-                    self.draw(stdscr)
-                    continue
-
-                if ch in (27,):  # Escape
-                    if matches:
-                        self.state.clear_input()
-                        self.draw(stdscr)
-                        continue
-
-                if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
-                    self.state.handle_backspace()
-                    self.draw(stdscr)
-                    continue
-
-                if isinstance(ch, str) and ch.isprintable():
-                    self.state.handle_input_char(ch)
-                    self.draw(stdscr)
+                if not self.handle_key(ch, on_user_submit):
+                    break
+                self.draw(stdscr)
 
         curses.wrapper(_main)

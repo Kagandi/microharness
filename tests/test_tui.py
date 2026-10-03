@@ -342,6 +342,81 @@ class TestTUI(unittest.TestCase):
         tip_calls = [c for c in mock_stdscr.addstr.call_args_list if "Navigate" in str(c)]
         self.assertGreaterEqual(len(tip_calls), 1)
 
+    def test_curses_tui_handle_key_tab_and_navigation(self):
+        """Invariant: handle_key supports str/int Tab autocompletion, cycling, Shift-Tab, and Right-Arrow."""
+        import curses
+
+        state = TUIState()
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+
+        def dummy_submit(text: str) -> None:
+            submitted.append(text)
+
+        # 1. Single-match Tab autocompletion (str "\t")
+        state.input_buffer = "/c"
+        state.selected_command_idx = 0
+        ret = tui.handle_key("\t", dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(state.input_buffer, "/compact")
+
+        # 2. Single-match Tab autocompletion (int 9)
+        state.input_buffer = "/s"
+        state.selected_command_idx = 0
+        ret = tui.handle_key(9, dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(state.input_buffer, "/status")
+
+        # 3. Multi-match Tab cycling forward
+        state.input_buffer = "/"
+        state.selected_command_idx = 0
+        tui.handle_key("\t", dummy_submit)
+        self.assertEqual(state.selected_command_idx, 1)
+        tui.handle_key(9, dummy_submit)
+        self.assertEqual(state.selected_command_idx, 2)
+
+        # 4. Shift-Tab and Up arrow cycling backward
+        tui.handle_key(curses.KEY_BTAB, dummy_submit)
+        self.assertEqual(state.selected_command_idx, 1)
+        tui.handle_key(353, dummy_submit)  # Shift-Tab integer
+        self.assertEqual(state.selected_command_idx, 0)
+        tui.handle_key("\x1b[Z", dummy_submit)  # Shift-Tab ANSI escape sequence
+        self.assertEqual(state.selected_command_idx, 4)
+        tui.handle_key(curses.KEY_UP, dummy_submit)
+        self.assertEqual(state.selected_command_idx, 3)
+
+        # 5. Down arrow cycling forward
+        tui.handle_key(curses.KEY_DOWN, dummy_submit)
+        self.assertEqual(state.selected_command_idx, 4)
+        tui.handle_key(curses.KEY_DOWN, dummy_submit)
+        self.assertEqual(state.selected_command_idx, 0)
+
+        # 6. Right Arrow autocompletion into input buffer
+        state.selected_command_idx = 3  # /help
+        tui.handle_key(curses.KEY_RIGHT, dummy_submit)
+        self.assertEqual(state.input_buffer, "/help")
+
+        # 7. Enter key executes command and clears input
+        ret = tui.handle_key("\n", dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(submitted, ["/help"])
+        self.assertEqual(state.input_buffer, "")
+
+        # 8. Escape dismisses slash input
+        state.input_buffer = "/st"
+        tui.handle_key(27, dummy_submit)
+        self.assertEqual(state.input_buffer, "")
+
+        # 9. Negative test: Tab with no matches does not mutate input
+        state.input_buffer = "normal message"
+        tui.handle_key("\t", dummy_submit)
+        self.assertEqual(state.input_buffer, "normal message")
+
+        # 10. Exit command returns False
+        state.input_buffer = "/exit"
+        ret = tui.handle_key("\n", dummy_submit)
+        self.assertFalse(ret)
+
 
 if __name__ == "__main__":
     unittest.main()
