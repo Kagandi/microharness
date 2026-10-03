@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from core.commands import Command
 from core.environment import Environment
 from core.evaluator import FileContentEvaluator
 from core.harness import (
@@ -622,20 +623,20 @@ class TestHarnessIntegration(unittest.TestCase):
 
         # Invariant 1: explain is discovered from global scope
         self.assertIn("explain", cmds)
-        self.assertEqual(cmds["explain"][0], "Explain codebase")
-        self.assertEqual(cmds["explain"][2], "global")
+        self.assertEqual(cmds["explain"].description, "Explain codebase")
+        self.assertEqual(cmds["explain"].scope, "global")
 
         # Invariant 2: test-all is discovered from project scope
         self.assertIn("test-all", cmds)
-        self.assertEqual(cmds["test-all"][0], "Run All Tests")
-        self.assertEqual(cmds["test-all"][2], "project")
+        self.assertEqual(cmds["test-all"].description, "Run All Tests")
+        self.assertEqual(cmds["test-all"].scope, "project")
 
         # Invariant 3: project review shadows global review
         self.assertIn("review", cmds)
-        self.assertEqual(cmds["review"][0], "Project Review")
-        self.assertEqual(cmds["review"][2], "project")
-        self.assertIn("Project specialized review", cmds["review"][1])
-        self.assertNotIn("Old global review", cmds["review"][1])
+        self.assertEqual(cmds["review"].description, "Project Review")
+        self.assertEqual(cmds["review"].scope, "project")
+        self.assertIn("Project specialized review", cmds["review"].template)
+        self.assertNotIn("Old global review", cmds["review"].template)
 
     def test_expand_command_placeholders(self):
         # 1. $ARGUMENTS substitution
@@ -966,8 +967,8 @@ class TestHarnessIntegration(unittest.TestCase):
         # Verify commands discovery includes .microharness/commands
         cmds = _discover_commands(workspace=project_dir)
         self.assertIn("test", cmds)
-        self.assertEqual(cmds["test"][0], "Run Tests Fast")
-        self.assertEqual(cmds["test"][2], "project")
+        self.assertEqual(cmds["test"].description, "Run Tests Fast")
+        self.assertEqual(cmds["test"].scope, "project")
 
     def test_runs_dir_precedence_and_global_default(self):
         """Invariant: runs_dir defaults to global_dir / 'runs' unless overridden by config or argument."""
@@ -1078,7 +1079,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.score, 1.0)
 
     def test_skills_frontmatter_description_summary(self):
-        from core.harness import _discover_skills_index
+        from core.harness import _discover_skills_index, discover_skills
 
         workspace = Path(tempfile.mkdtemp(prefix="ws_frontmatter_"))
         skill_dir = workspace / ".microharness" / "skills" / "my-linter"
@@ -1088,7 +1089,7 @@ class TestHarnessIntegration(unittest.TestCase):
             encoding="utf-8",
         )
 
-        index = _discover_skills_index(workspace, global_dir=None)
+        index = _discover_skills_index(discover_skills(workspace, global_dir=None))
         self.assertIn("Comprehensive code style checks", index)
         self.assertNotIn(": --- (read", index)
 
@@ -1420,7 +1421,14 @@ class TestHarnessIntegration(unittest.TestCase):
         harness = Harness(model=MockModel([("Done", [])]), verbose=False)
         memory = Memory(system_prompt="sys", user_prompt="")
 
-        custom_commands = {"review": ("Review PR", "git diff HEAD~1", "project")}
+        custom_commands = {
+            "review": Command(
+                name="review",
+                description="Review PR",
+                template="git diff HEAD~1",
+                scope="project",
+            )
+        }
 
         # 1. /status does not add to memory, returns skip
         action = harness._dispatch_interactive_input("/status", memory, custom_commands)
@@ -1778,58 +1786,61 @@ def get_tools(env=None):
             self.assertIn("my-linter", discovered)
 
             # Invariant: Project skill shadows global skill
-            summary, path_str, scope, content = discovered["deploy-tool"]
-            self.assertEqual(scope, "project")
-            self.assertEqual(summary, "Deploy app to production")
-            self.assertIn("Step 2: deploy", content)
+            project_skill = discovered["deploy-tool"]
+            self.assertEqual(project_skill.scope, "project")
+            self.assertEqual(project_skill.summary, "Deploy app to production")
+            self.assertIn("Step 2: deploy", project_skill.content)
 
             # Invariant: Global skill is properly recognized
-            l_summary, l_path, l_scope, l_content = discovered["my-linter"]
-            self.assertEqual(l_scope, "global")
-            self.assertEqual(l_summary, "Linter")
-            self.assertIn("Run ruff", l_content)
+            global_skill = discovered["my-linter"]
+            self.assertEqual(global_skill.scope, "global")
+            self.assertEqual(global_skill.summary, "Linter")
+            self.assertIn("Run ruff", global_skill.content)
 
             # 4. _resolve_skill_command: listing mode
-            act, msg, is_err, prompt = _resolve_skill_command("/skill", discovered)
-            self.assertEqual(act, "skip")
-            self.assertFalse(is_err)
-            self.assertIsNone(prompt)
-            self.assertIn("deploy-tool", msg)
-            self.assertIn("my-linter", msg)
-            self.assertIn("[project]", msg)
-            self.assertIn("[global]", msg)
+            outcome = _resolve_skill_command("/skill", discovered)
+            self.assertEqual(outcome.action, "skip")
+            self.assertFalse(outcome.is_error)
+            self.assertIsNone(outcome.prompt)
+            self.assertIn("deploy-tool", outcome.message)
+            self.assertIn("my-linter", outcome.message)
+            self.assertIn("[project]", outcome.message)
+            self.assertIn("[global]", outcome.message)
 
             # 5. _resolve_skill_command: activation by name without instruction
-            act, msg, is_err, prompt = _resolve_skill_command("/skill deploy-tool", discovered)
-            self.assertEqual(act, "turn")
-            self.assertFalse(is_err)
-            self.assertIn("Activated skill: deploy-tool [project]", msg)
-            self.assertIn("[Active Skill: deploy-tool]", prompt)
-            self.assertIn("Step 2: deploy", prompt)
-            self.assertIn("Please follow the instructions from the 'deploy-tool' skill above.", prompt)
+            outcome = _resolve_skill_command("/skill deploy-tool", discovered)
+            self.assertEqual(outcome.action, "turn")
+            self.assertFalse(outcome.is_error)
+            self.assertEqual(outcome.message, "Activated skill: deploy-tool [project]")
+            self.assertIn("[Active Skill: deploy-tool]", outcome.prompt)
+            self.assertIn("Step 2: deploy", outcome.prompt)
+            self.assertIn(
+                "Please follow the instructions from the 'deploy-tool' skill above.",
+                outcome.prompt,
+            )
 
             # 6. _resolve_skill_command: activation with task instruction
-            act, msg, is_err, prompt = _resolve_skill_command("/skill deploy-tool deploy to staging", discovered)
-            self.assertEqual(act, "turn")
-            self.assertIn("Task:\ndeploy to staging", prompt)
+            outcome = _resolve_skill_command("/skill deploy-tool deploy to staging", discovered)
+            self.assertEqual(outcome.action, "turn")
+            self.assertIn("Task:\ndeploy to staging", outcome.prompt)
 
             # 7. _resolve_skill_command: activation by number
             sorted_keys = sorted(discovered.keys())
             first_skill = sorted_keys[0]
-            act, msg, is_err, prompt = _resolve_skill_command("/skill 1 run task", discovered)
-            self.assertEqual(act, "turn")
-            self.assertIn(f"[Active Skill: {first_skill}]", prompt)
+            outcome = _resolve_skill_command("/skill 1 run task", discovered)
+            self.assertEqual(outcome.action, "turn")
+            self.assertIn(f"[Active Skill: {first_skill}]", outcome.prompt)
 
             # 8. _resolve_skill_command: error cases
-            act, msg, is_err, prompt = _resolve_skill_command("/skill nonexistent", discovered)
-            self.assertEqual(act, "skip")
-            self.assertTrue(is_err)
-            self.assertIn("Skill 'nonexistent' not found", msg)
+            outcome = _resolve_skill_command("/skill nonexistent", discovered)
+            self.assertEqual(outcome.action, "skip")
+            self.assertTrue(outcome.is_error)
+            self.assertIn("Skill 'nonexistent' not found", outcome.message)
 
-            act, msg, is_err, prompt = _resolve_skill_command("/skill 99", discovered)
-            self.assertEqual(act, "skip")
-            self.assertTrue(is_err)
-            self.assertIn("Invalid skill number 99", msg)
+            outcome = _resolve_skill_command("/skill 99", discovered)
+            self.assertEqual(outcome.action, "skip")
+            self.assertTrue(outcome.is_error)
+            self.assertIn("Invalid skill number 99", outcome.message)
 
             # 9. _dispatch_interactive_input flow
             harness = Harness(model=MockModel([("Done", [])]), verbose=False)

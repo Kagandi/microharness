@@ -7,6 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from core.commands import (
+    Command,
+    SlashOutcome,
+    discover_commands,
+    expand_command,
+    resolve_slash_input,
+    split_slash_input,
+)
 from core.config import (
     PROJECT_TRUST_NOTICE,
     ConfigLayers,
@@ -18,11 +26,7 @@ from core.config import (
     normalize_reasoning_effort,
     resolve_project_tool_trust,
 )
-from core.discovery import (
-    discover_resources,
-    discover_workspace_files,
-    expand_tagged_files,
-)
+from core.discovery import discover_workspace_files, expand_tagged_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
@@ -45,6 +49,15 @@ from core.providers import (
     get_available_models_from_config,
     resolve_model_spec,
 )
+from core.skills import (
+    Skill,
+    SkillCommandResult,
+    compose_skill_prompt,
+    discover_skills,
+    extract_skill_summary,
+    render_skills_index,
+    resolve_skill_command,
+)
 from core.tools import (
     BashTool,
     EditFileTool,
@@ -60,10 +73,22 @@ from core.usage import summarize_run_usage
 
 __all__ = [
     "DEFAULT_GLOBAL_DIR",
+    "Command",
     "Harness",
+    "Skill",
+    "SkillCommandResult",
+    "SlashOutcome",
+    "compose_skill_prompt",
+    "discover_commands",
+    "discover_skills",
+    "expand_command",
     "get_default_global_dir",
     "load_global_config",
     "load_project_config",
+    "render_skills_index",
+    "resolve_skill_command",
+    "resolve_slash_input",
+    "split_slash_input",
 ]
 
 
@@ -101,221 +126,17 @@ def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -
     return ("\n\n" + "\n\n".join(sections)) if sections else ""
 
 
-def _extract_skill_summary(content: str, default: str) -> str:
-    """Extracts a 1-line summary from a SKILL.md document, supporting YAML frontmatter and block scalars."""
-    raw_lines = content.splitlines()
-    non_empty_indices = [i for i, line in enumerate(raw_lines) if line.strip()]
-    if not non_empty_indices:
-        return default
+SKILL_COMMAND_ALIASES = ("/skill", "/skills", "skill", "skills")
+SKILL_COMMAND_PREFIXES = ("/skill ", "/skills ")
 
-    first_idx = non_empty_indices[0]
-    first_line = raw_lines[first_idx].strip()
-
-    if first_line == "---":
-        in_frontmatter = True
-        desc_parts: list[str] = []
-        capturing_scalar = False
-        after_frontmatter: list[str] = []
-
-        for line in raw_lines[first_idx + 1 :]:
-            stripped = line.strip()
-            if stripped == "---":
-                if in_frontmatter:
-                    in_frontmatter = False
-                    continue
-            if in_frontmatter:
-                if capturing_scalar:
-                    if line.startswith(("  ", "\t")):
-                        if stripped:
-                            desc_parts.append(stripped)
-                        continue
-                    else:
-                        capturing_scalar = False
-
-                if stripped.startswith("description:"):
-                    _, _, val = stripped.partition(":")
-                    val = val.strip().strip("\"'")
-                    if val in (">", "|", ">-", "|-"):
-                        capturing_scalar = True
-                    elif val:
-                        return val
-            else:
-                if stripped:
-                    after_frontmatter.append(stripped)
-
-        if desc_parts:
-            return " ".join(desc_parts)
-        if after_frontmatter:
-            return after_frontmatter[0].lstrip("#").strip() or default
-        return default
-
-    return first_line.lstrip("#").strip() or default
-
-
-def _discover_skills(
-    workspace: Path, global_dir: Path | None = None
-) -> dict[str, tuple[str, str, str, str]]:
-    """Discovers available skills from global and project skills directories.
-
-    Returns dict mapping: skill_name -> (summary, path_str, scope, content)
-    where scope is 'global' or 'project'. Project skills cleanly shadow global ones.
-    """
-    ws = Path(workspace).resolve() if workspace else None
-
-    def _skill_loader(entry: Path, scope: str):
-        skill_doc = (
-            entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
-        )
-        if not skill_doc or not skill_doc.is_file() or entry.name == "README.md":
-            return None
-        content = skill_doc.read_text(encoding="utf-8", errors="replace")
-        summary = _extract_skill_summary(content, entry.stem)
-        resolved_doc = skill_doc.resolve()
-        if ws and resolved_doc.is_relative_to(ws):
-            path_str = str(resolved_doc.relative_to(ws))
-        else:
-            path_str = str(skill_doc)
-        return entry.stem, (summary, path_str, scope, content)
-
-    discovered = discover_resources(
-        resource_name="skills",
-        loader=_skill_loader,
-        workspace_dir=workspace,
-        global_dir=global_dir,
-    )
-    return {res.id: res.item for res in discovered.values()}
-
-
-def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
-    """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
-    discovered = _discover_skills(workspace, global_dir)
-    if not discovered:
-        return ""
-
-    has_global = any(scope == "global" for _, _, scope, _ in discovered.values())
-    lines: list[str] = []
-    for name, (summary, path_str, scope, _) in sorted(discovered.items()):
-        badge = f"[{scope}] " if has_global else ""
-        lines.append(f"- {badge}{name}: {summary} (read `{path_str}` for full instructions)")
-
-    return (
-        "--- Available Skills (Progressive Disclosure) ---\n"
-        + "\n".join(lines)
-        + "\nTip: Use the `read_file` tool to inspect a skill's full instructions only when needed.\n"
-        + "------------------------------------------------"
-    )
-
-
-def _resolve_skill_command(
-    user_input: str,
-    skills: dict[str, tuple[str, str, str, str]],
-) -> tuple[str, str, bool, str | None]:
-    """Parses and resolves a /skill user command.
-
-    Returns:
-        (action, message, is_error, effective_prompt)
-        where action is 'skip' (for info/listing/error) or 'turn' (to run model turn),
-        is_error indicates if a user error occurred (e.g. unknown skill),
-        and effective_prompt is the prompt to inject into memory if action == 'turn'.
-    """
-    parts = user_input.strip().split(maxsplit=2)
-    if len(parts) == 1:
-        # Listing mode: /skill or /skills
-        if not skills:
-            return (
-                "skip",
-                "ℹ️ No skills found in workspace or global directory. Place skills in .microharness/skills/<name>/SKILL.md or ~/.microharness/skills/<name>/SKILL.md.",
-                False,
-                None,
-            )
-        lines = ["Available Skills:"]
-        for i, (name, (summary, _, scope, _)) in enumerate(sorted(skills.items()), start=1):
-            lines.append(f"  {i}. {name:<14} [{scope}] - {summary}")
-        lines.append("\nTo activate a skill into the conversation, type /skill <name|number> [optional instruction]")
-        lines.append(f"Example: /skill {sorted(skills.keys())[0]}")
-        return ("skip", "\n".join(lines), False, None)
-
-    target = parts[1].strip()
-    instruction = parts[2].strip() if len(parts) > 2 else ""
-
-    skill_name = None
-    sorted_skills = sorted(skills.keys())
-    if target.isdigit():
-        idx = int(target) - 1
-        if 0 <= idx < len(sorted_skills):
-            skill_name = sorted_skills[idx]
-        else:
-            return (
-                "skip",
-                f"Invalid skill number {target}. Type /skill to view available skills.",
-                True,
-                None,
-            )
-    else:
-        for k in sorted_skills:
-            if k.lower() == target.lower():
-                skill_name = k
-                break
-
-    if not skill_name:
-        return (
-            "skip",
-            f"Skill '{target}' not found. Type /skill to view available skills.",
-            True,
-            None,
-        )
-
-    summary, path_str, scope, content = skills[skill_name]
-    if instruction:
-        effective_prompt = f"[Active Skill: {skill_name}]\n{content}\n\nTask:\n{instruction}"
-    else:
-        effective_prompt = f"[Active Skill: {skill_name}]\n{content}\n\nPlease follow the instructions from the '{skill_name}' skill above."
-
-    return (
-        "turn",
-        f"Activated skill: {skill_name} [{scope}]",
-        False,
-        effective_prompt,
-    )
-
-
-def _discover_commands(
-    workspace: Path, global_dir: Path | None = None
-) -> dict[str, tuple[str, str, str]]:
-    """Discovers custom slash commands from global and project commands directories.
-
-    Returns dict mapping: command_name -> (description, template, scope)
-    where scope is 'global' or 'project'. Project commands cleanly shadow global ones.
-    """
-    def _command_loader(path: Path, scope: str):
-        content = path.read_text(encoding="utf-8", errors="replace")
-        lines = content.splitlines()
-        desc = next(
-            (line.strip().lstrip("#").strip() for line in lines if line.strip()), path.stem
-        )
-        return path.stem.lower(), (desc, content, scope)
-
-    discovered = discover_resources(
-        resource_name="commands",
-        loader=_command_loader,
-        workspace_dir=workspace,
-        global_dir=global_dir,
-        file_pattern="*.md",
-    )
-    return {res.id: res.item for res in discovered.values()}
-
-
-def _expand_command(template: str, user_args: str) -> str:
-    """Expands a command template with user arguments."""
-    args = user_args.strip()
-    result = template
-    if "$ARGUMENTS" in result:
-        result = result.replace("$ARGUMENTS", args)
-    elif "{args}" in result:
-        result = result.replace("{args}", args)
-    elif args:
-        result = f"{result.strip()}\n\nAdditional Arguments / Target:\n{args}"
-    return result.strip()
+# Skill and command discovery moved to core/skills.py and core/commands.py. These
+# aliases keep the historical import paths working for the CLI and tests.
+_discover_skills = discover_skills
+_discover_skills_index = render_skills_index
+_extract_skill_summary = extract_skill_summary
+_discover_commands = discover_commands
+_expand_command = expand_command
+_resolve_skill_command = resolve_skill_command
 
 
 class Harness:
@@ -702,7 +523,7 @@ class Harness:
         if agents_instructions:
             prompt += f"\n\n{agents_instructions}"
 
-        skills_index = _discover_skills_index(workspace, self.global_dir)
+        skills_index = render_skills_index(discover_skills(workspace, self.global_dir))
         if skills_index:
             prompt += f"\n\n{skills_index}"
 
@@ -742,17 +563,18 @@ class Harness:
             workspace, system_prompt, tool_registry, use_sandbox
         )
 
-        # Expand custom command if initial instruction is a slash command
-        custom_commands = _discover_commands(workspace, self.global_dir)
+        # A batch instruction may itself be a custom command, e.g. "/review src/auth.py".
         effective_instruction = initial_instruction
         if initial_instruction.startswith("/"):
-            cmd_part, _, args_part = initial_instruction[1:].partition(" ")
-            cmd_key = cmd_part.lower().strip()
-            if cmd_key in custom_commands:
-                _, tmpl, scope = custom_commands[cmd_key]
-                effective_instruction = _expand_command(tmpl, args_part)
+            outcome = resolve_slash_input(
+                initial_instruction,
+                discover_commands(workspace, self.global_dir),
+                allow_skills=False,
+            )
+            if outcome.prompt is not None:
+                effective_instruction = outcome.prompt
                 if self.verbose:
-                    print(f"⚡ Expanded custom command /{cmd_key} [{scope}]")
+                    print(f"⚡ {outcome.message}")
 
         memory = Memory(
             system_prompt=active_system_prompt,
@@ -933,8 +755,8 @@ class Harness:
 
     def _print_interactive_help(
         self,
-        custom_commands: dict[str, tuple[str, str, str]],
-        skills: dict[str, tuple[str, str, str, str]] | None = None,
+        custom_commands: dict[str, Command],
+        skills: dict[str, Skill] | None = None,
     ) -> None:
         print("\nAvailable commands:")
         print("  /model [name|idx]             - View configured models or switch active model")
@@ -948,13 +770,21 @@ class Harness:
         print("  /exit                         - Save session trace and exit")
         if custom_commands:
             print("\nCustom slash commands (from commands/):")
-            for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
-                print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
+            for name, command in sorted(custom_commands.items()):
+                print(f"  /{name:<10} - {command.badge}{command.description}")
         if skills:
             print("\nAvailable skills (run /<name> or /skill <name>):")
-            for s_name, (s_desc, _, s_scope, _) in sorted(skills.items()):
-                print(f"  /{s_name:<10} - [{s_scope}] {s_desc}")
+            for name, skill in sorted(skills.items()):
+                print(f"  /{name:<10} - {skill.badge}{skill.summary}")
         print()
+
+    def _add_prompt(self, memory: Memory, prompt: str, workspace: Path) -> None:
+        """Expands ``@file`` tags in a prompt and appends it as the next user message."""
+        effective_prompt, attached = expand_tagged_files(prompt, workspace)
+        if attached:
+            names = ", ".join(f"@{name}" for name in attached)
+            print(f"⚡ Attached {len(attached)} file(s): {names}")
+        memory.add_user(effective_prompt)
 
     def _print_context_status(self, memory: Memory) -> None:
         s = memory.stats()
@@ -1041,8 +871,8 @@ class Harness:
         self,
         user_input: str,
         memory: Memory,
-        custom_commands: dict[str, tuple[str, str, str]],
-        skills: dict[str, tuple[str, str, str, str]] | None = None,
+        custom_commands: dict[str, Command],
+        skills: dict[str, Skill] | None = None,
         workspace_dir: Path | None = None,
         tracer: Tracer | None = None,
         step_holder: list[int] | None = None,
@@ -1163,52 +993,26 @@ class Harness:
             print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
             return "skip"
 
-        if (
-            cmd in ("/skill", "/skills", "skill", "skills")
-            or cmd.startswith(("/skill ", "/skills "))
-        ):
-            action, msg, is_error, eff_prompt = _resolve_skill_command(user_input, skills or {})
-            if is_error:
-                print(f"\n❌ {msg}\n")
+        if cmd in SKILL_COMMAND_ALIASES or cmd.startswith(SKILL_COMMAND_PREFIXES):
+            outcome = resolve_skill_command(user_input, skills or {})
+            if outcome.is_error:
+                print(f"\n❌ {outcome.message}\n")
                 return "skip"
-            if action == "skip":
-                print(f"\n{msg}\n")
+            if outcome.action == "skip":
+                print(f"\n{outcome.message}\n")
                 return "skip"
-            print(f"\n⚡ {msg} ...\n")
-            if eff_prompt:
-                eff_prompt, attached = expand_tagged_files(eff_prompt, ws)
-                if attached:
-                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
-                memory.add_user(eff_prompt)
+            print(f"\n⚡ {outcome.message} ...\n")
+            self._add_prompt(memory, outcome.prompt or "", ws)
             return "turn"
 
         if user_input.startswith("/"):
-            cmd_part, _, args_part = user_input[1:].partition(" ")
-            cmd_key = cmd_part.lower().strip()
-            if cmd_key in custom_commands:
-                _, template, scope = custom_commands[cmd_key]
-                expanded_prompt = _expand_command(template, args_part)
-                expanded_prompt, attached = expand_tagged_files(expanded_prompt, ws)
-                print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
-                if attached:
-                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
-                memory.add_user(expanded_prompt)
-                return "turn"
-            elif skills and cmd_key in skills:
-                _, _, scope, content = skills[cmd_key]
-                instr = args_part.strip()
-                if instr:
-                    effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nTask:\n{instr}"
-                else:
-                    effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nPlease follow the instructions from the '{cmd_key}' skill above."
-                effective_prompt, attached = expand_tagged_files(effective_prompt, ws)
-                print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
-                if attached:
-                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
-                memory.add_user(effective_prompt)
-                return "turn"
-            print(f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n")
-            return "skip"
+            outcome = resolve_slash_input(user_input, custom_commands, skills)
+            if outcome.is_error or outcome.prompt is None:
+                print(f"\n❌ {outcome.message}\n")
+                return "skip"
+            print(f"\n⚡ {outcome.message} ...\n")
+            self._add_prompt(memory, outcome.prompt, ws)
+            return "turn"
 
         effective_prompt, attached = expand_tagged_files(user_input, ws)
         if attached:
@@ -1549,37 +1353,25 @@ class Harness:
                 state.update_status(memory.stats(), self.get_cache_stats())
                 return
 
-            if (
-                cmd in ("/skill", "/skills", "skill", "skills")
-                or cmd.startswith(("/skill ", "/skills "))
-            ):
-                action, msg, is_error, eff_prompt = _resolve_skill_command(user_text, skills)
-                if is_error:
-                    state.add_error(msg)
+            if cmd in SKILL_COMMAND_ALIASES or cmd.startswith(SKILL_COMMAND_PREFIXES):
+                outcome = resolve_skill_command(user_text, skills)
+                if outcome.is_error:
+                    state.add_error(outcome.message)
                     return
-                if action == "skip":
-                    state.add_system(msg)
+                if outcome.action == "skip":
+                    state.add_system(outcome.message)
                     return
-                state.add_system(f"⚡ {msg}")
-                effective_prompt = eff_prompt or user_text
+                state.add_system(f"⚡ {outcome.message}")
+                effective_prompt = outcome.prompt or user_text
             elif user_text.startswith("/"):
-                cmd_part, _, args_part = user_text[1:].partition(" ")
-                cmd_key = cmd_part.lower().strip()
-                if cmd_key in custom_commands:
-                    _, template, scope = custom_commands[cmd_key]
-                    effective_prompt = _expand_command(template, args_part)
-                    state.add_system(f"Executing /{cmd_key} [{scope}] ...")
-                elif skills and cmd_key in skills:
-                    _, _, scope, content = skills[cmd_key]
-                    instr = args_part.strip()
-                    if instr:
-                        effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nTask:\n{instr}"
-                    else:
-                        effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nPlease follow the instructions from the '{cmd_key}' skill above."
-                    state.add_system(f"⚡ Activated skill: /{cmd_key} [{scope}]")
-                else:
-                    state.add_error(f"Unknown command '/{cmd_key}'. Type /help for commands.")
+                outcome = resolve_slash_input(
+                    user_text, custom_commands, skills, unknown_message="Type /help for commands."
+                )
+                if outcome.is_error or outcome.prompt is None:
+                    state.add_error(outcome.message)
                     return
+                state.add_system(outcome.message)
+                effective_prompt = outcome.prompt
             else:
                 effective_prompt = user_text
 
