@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol
 
+from core.discovery import discover_resources
 from core.environment import Environment
 from core.types import ToolCall, ToolResult
 
@@ -406,33 +407,21 @@ def discover_tool_plugins(
 
     Locations searched:
     1. Global: `~/.microharness/tools/*.py` (or `global_dir / "tools"`)
-    2. Project: `<workspace>/.microharness/tools/*.py`
+    2. Project: `<workspace>/.microharness/tools/*.py`, `<workspace>/tools/*.py`
 
-    Project-level tools shadow global tools with matching tool names.
+    Project-level tools cleanly shadow global tools sharing the same tool name.
     """
-    discovered_map: dict[str, Tool] = {}
+    def _loader(path: Path, scope: str):
+        for tool in load_tool_plugin(path, env=env):
+            yield tool.name, tool
 
-    # 1. Global tools
-    g_dir = Path(global_dir).resolve() if global_dir else Path.home() / ".microharness"
-    global_tools_dir = g_dir / "tools"
-    if global_tools_dir.is_dir():
-        for py_file in sorted(global_tools_dir.glob("*.py")):
-            if py_file.name.startswith(("_", ".")):
-                continue
-            loaded = load_tool_plugin(py_file, env=env)
-            for tool in loaded:
-                discovered_map[tool.name] = tool
+    resources = discover_resources(
+        resource_name="tools",
+        loader=_loader,
+        workspace_dir=workspace_dir,
+        global_dir=global_dir,
+        file_pattern="*.py",
+    )
+    return [r.item for r in resources.values()]
 
-    # 2. Project tools (shadows global tools with same name)
-    if workspace_dir:
-        ws_tools_dir = Path(workspace_dir).resolve() / ".microharness" / "tools"
-        if ws_tools_dir.is_dir():
-            for py_file in sorted(ws_tools_dir.glob("*.py")):
-                if py_file.name.startswith(("_", ".")):
-                    continue
-                loaded = load_tool_plugin(py_file, env=env)
-                for tool in loaded:
-                    discovered_map[tool.name] = tool
-
-    return list(discovered_map.values())
 

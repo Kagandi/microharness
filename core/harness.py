@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from core.discovery import discover_resources
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
@@ -152,41 +153,36 @@ def _extract_skill_summary(content: str, default: str) -> str:
 
 def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
     """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
-    # Key: skill_name -> (summary, path_str, scope)
-    skills: dict[str, tuple[str, str, str]] = {}
+    ws = Path(workspace).resolve() if workspace else None
 
-    def scan_dir(s_dir: Path, scope: str, relative_base: Path | None) -> None:
-        if not s_dir.is_dir():
-            return
-        for entry in sorted(s_dir.iterdir()):
-            skill_doc = (
-                entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
-            )
-            if skill_doc and skill_doc.is_file() and entry.name != "README.md":
-                content = skill_doc.read_text(encoding="utf-8", errors="replace")
-                summary = _extract_skill_summary(content, entry.stem)
-                if relative_base and skill_doc.is_relative_to(relative_base):
-                    path_str = str(skill_doc.relative_to(relative_base))
-                else:
-                    path_str = str(skill_doc)
-                skills[entry.stem] = (summary, path_str, scope)
+    def _skill_loader(entry: Path, scope: str):
+        skill_doc = (
+            entry / "SKILL.md" if entry.is_dir() else (entry if entry.suffix == ".md" else None)
+        )
+        if not skill_doc or not skill_doc.is_file() or entry.name == "README.md":
+            return None
+        content = skill_doc.read_text(encoding="utf-8", errors="replace")
+        summary = _extract_skill_summary(content, entry.stem)
+        resolved_doc = skill_doc.resolve()
+        if ws and resolved_doc.is_relative_to(ws):
+            path_str = str(resolved_doc.relative_to(ws))
+        else:
+            path_str = str(skill_doc)
+        return entry.stem, (summary, path_str, scope)
 
-    # 1. Global skills first (~/.microharness/skills/ or ~/.microharness/.skills/)
-    if global_dir:
-        for gd in [global_dir / "skills", global_dir / ".skills"]:
-            scan_dir(gd, "global", relative_base=None)
-
-    # 2. Project skills second (shadows/overrides global skills with matching names)
-    # Order: legacy folders first, then .microharness/skills so .microharness takes priority
-    for pd in [workspace / "skills", workspace / ".skills", workspace / ".microharness" / "skills"]:
-        scan_dir(pd, "project", relative_base=workspace)
-
-    if not skills:
+    discovered = discover_resources(
+        resource_name="skills",
+        loader=_skill_loader,
+        workspace_dir=workspace,
+        global_dir=global_dir,
+    )
+    if not discovered:
         return ""
 
-    has_global = any(s[2] == "global" for s in skills.values())
+    has_global = any(res.scope == "global" for res in discovered.values())
     lines: list[str] = []
-    for name, (summary, path_str, scope) in sorted(skills.items()):
+    for name, res in sorted(discovered.items()):
+        summary, path_str, scope = res.item
         badge = f"[{scope}] " if has_global else ""
         lines.append(f"- {badge}{name}: {summary} (read `{path_str}` for full instructions)")
 
@@ -206,36 +202,22 @@ def _discover_commands(
     Returns dict mapping: command_name -> (description, template, scope)
     where scope is 'global' or 'project'. Project commands cleanly shadow global ones.
     """
-    commands: dict[str, tuple[str, str, str]] = {}
+    def _command_loader(path: Path, scope: str):
+        content = path.read_text(encoding="utf-8", errors="replace")
+        lines = content.splitlines()
+        desc = next(
+            (line.strip().lstrip("#").strip() for line in lines if line.strip()), path.stem
+        )
+        return path.stem.lower(), (desc, content, scope)
 
-    def scan_dir(cmd_dir: Path, scope: str) -> None:
-        if not cmd_dir.is_dir():
-            return
-        for file in sorted(cmd_dir.glob("*.md")):
-            if file.name.lower() == "readme.md":
-                continue
-            content = file.read_text(encoding="utf-8", errors="replace")
-            lines = content.splitlines()
-            desc = next(
-                (line.strip().lstrip("#").strip() for line in lines if line.strip()), file.stem
-            )
-            commands[file.stem.lower()] = (desc, content, scope)
-
-    # 1. Global commands (~/.microharness/commands/)
-    if global_dir:
-        for gd in [global_dir / "commands", global_dir / ".commands"]:
-            scan_dir(gd, "global")
-
-    # 2. Project commands (shadows global commands)
-    # Order: legacy folders first, then .microharness/commands so .microharness takes priority
-    for pd in [
-        workspace / "commands",
-        workspace / ".commands",
-        workspace / ".microharness" / "commands",
-    ]:
-        scan_dir(pd, "project")
-
-    return commands
+    discovered = discover_resources(
+        resource_name="commands",
+        loader=_command_loader,
+        workspace_dir=workspace,
+        global_dir=global_dir,
+        file_pattern="*.md",
+    )
+    return {res.id: res.item for res in discovered.values()}
 
 
 def _expand_command(template: str, user_args: str) -> str:
