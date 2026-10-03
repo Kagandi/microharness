@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import textwrap
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,8 +158,73 @@ def _parse_table_row(line: str) -> list[str]:
     return [c.strip() for c in stripped.split("|")]
 
 
+MIN_COL_WIDTH = 3
+
+
+def _char_width(ch: str) -> int:
+    """Terminal cells occupied by a single character."""
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _dwidth(text: str) -> int:
+    """Display width in terminal cells, accounting for wide and combining characters."""
+    return sum(_char_width(ch) for ch in text)
+
+
+def _truncate_display(text: str, width: int, ellipsis: str = "…") -> str:
+    """Truncates text so its display width fits within `width`, marking elision."""
+    if _dwidth(text) <= width:
+        return text
+    if width <= 0:
+        return ""
+    budget = width - _dwidth(ellipsis)
+    if budget <= 0:
+        return ellipsis[:width]
+    kept: list[str] = []
+    used = 0
+    for ch in text:
+        cw = _char_width(ch)
+        if used + cw > budget:
+            break
+        kept.append(ch)
+        used += cw
+    return "".join(kept) + ellipsis
+
+
+def _pad_display(text: str, width: int) -> str:
+    """Right-pads text with spaces to reach the given display width."""
+    return text + " " * max(0, width - _dwidth(text))
+
+
+def _fitted_widths(desired: list[int], max_width: int, num_cols: int) -> list[int]:
+    """Scales column widths down so the rendered table fits within max_width.
+
+    Widths never drop below MIN_COL_WIDTH, so a caller that still overflows must
+    shed columns (see render_markdown_table) rather than expect a fit here.
+    """
+    overhead = 3 * num_cols + 1
+    avail = max_width - overhead
+    if avail <= 0:
+        return [MIN_COL_WIDTH] * num_cols
+    total = sum(desired)
+    if total <= avail:
+        return desired
+    scaled = [max(MIN_COL_WIDTH, int(w * avail / total)) for w in desired]
+    leftover = avail - sum(scaled)
+    if leftover > 0 and scaled:
+        scaled[scaled.index(max(scaled))] += leftover
+    return scaled
+
+
 def render_markdown_table(headers: list[str], rows: list[list[str]], max_width: int = 80) -> list[TUILine]:
-    """Renders a parsed markdown table into boxed TUILines fitting within max_width."""
+    """Renders a parsed markdown table into boxed TUILines that fit within max_width.
+
+    Columns are sized by display width (wide CJK characters count as two cells) and,
+    when the table cannot fit the requested width, trailing columns are dropped rather
+    than allowing the box art to overflow the available pane.
+    """
     num_cols = len(headers)
     if num_cols == 0:
         return []
@@ -173,34 +239,37 @@ def render_markdown_table(headers: list[str], rows: list[list[str]], max_width: 
             row = row[:num_cols]
         padded_rows.append(row)
 
-    col_widths = [len(h) for h in clean_headers]
-    for r in padded_rows:
-        for i in range(num_cols):
-            col_widths[i] = max(col_widths[i], len(r[i]))
+    desired: list[int] = []
+    for i in range(num_cols):
+        widest = _dwidth(clean_headers[i])
+        for r in padded_rows:
+            widest = max(widest, _dwidth(r[i]))
+        desired.append(max(MIN_COL_WIDTH, widest))
 
-    col_widths = [max(3, w) for w in col_widths]
-    total_w = sum(col_widths) + 3 * num_cols + 1
+    # Drop trailing columns until the table fits; the per-column floor of
+    # MIN_COL_WIDTH means a table of n columns can never render narrower than
+    # 6n+1 cells, so width-fitting alone cannot guarantee the max_width contract.
+    visible = num_cols
+    while visible > 0:
+        col_widths = _fitted_widths(desired[:visible], max_width, visible)
+        if sum(col_widths) + 3 * visible + 1 <= max_width:
+            break
+        visible -= 1
+    if visible == 0:
+        return []
 
-    if total_w > max_width and max_width >= (4 * num_cols + 1):
-        avail = max_width - (3 * num_cols + 1)
-        sum_content = sum(col_widths)
-        if sum_content > 0:
-            scale = avail / sum_content
-            col_widths = [max(3, int(w * scale)) for w in col_widths]
-            diff = avail - sum(col_widths)
-            if diff > 0:
-                col_widths[0] += diff
+    if visible < num_cols:
+        clean_headers = clean_headers[:visible]
+        padded_rows = [r[:visible] for r in padded_rows]
 
     def fit(text: str, w: int) -> str:
-        if len(text) > w:
-            return (text[: max(0, w - 1)] + "…") if w > 1 else text[:w]
-        return text.ljust(w)
+        return _pad_display(_truncate_display(text, w), w)
 
     top_border = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
     mid_border = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
     bot_border = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
 
-    header_cells = " │ ".join(fit(clean_headers[i], col_widths[i]) for i in range(num_cols))
+    header_cells = " │ ".join(fit(clean_headers[i], col_widths[i]) for i in range(visible))
     header_line = f"│ {header_cells} │"
 
     tui_lines: list[TUILine] = [
@@ -210,7 +279,7 @@ def render_markdown_table(headers: list[str], rows: list[list[str]], max_width: 
     ]
 
     for r in padded_rows:
-        row_cells = " │ ".join(fit(r[i], col_widths[i]) for i in range(num_cols))
+        row_cells = " │ ".join(fit(r[i], col_widths[i]) for i in range(visible))
         tui_lines.append(TUILine(text=f"│ {row_cells} │", tag="table_row"))
 
     tui_lines.append(TUILine(text=bot_border, tag="table_border"))
@@ -1036,7 +1105,8 @@ class CursesTUI:
             self.state.scroll_down(5)
             return True
 
-        # 7. Escape: Dismiss menu or clear tag query
+        # 7. Escape: cancel the running turn, else dismiss menu / clear tag query,
+        #    else (with an empty prompt) exit the session.
         if ch in (27, "\x1b"):
             if file_matches:
                 tag_info = self.state.get_current_file_tag_query()
@@ -1048,7 +1118,10 @@ class CursesTUI:
             if cmd_matches:
                 self.state.clear_input()
                 return True
-            return True
+            if self.state.input_buffer:
+                self.state.clear_input()
+                return True
+            return False
 
         if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
             self.state.handle_backspace()
@@ -1060,8 +1133,17 @@ class CursesTUI:
 
         return True
 
-    def run(self, on_user_submit: Callable[[str], None]) -> None:
-        """Launches the interactive curses event loop."""
+    def run(
+        self,
+        on_user_submit: Callable[[str], None],
+        initial_instruction: str | None = None,
+    ) -> None:
+        """Launches the interactive curses event loop.
+
+        If `initial_instruction` is given it is submitted *after* the first frame is
+        drawn, so a turn started from the command line is visible from its first step
+        instead of running against an uninitialised screen.
+        """
 
         def _main(stdscr: Any) -> None:
             self.stdscr = stdscr
@@ -1078,6 +1160,10 @@ class CursesTUI:
                 pass
 
             self.draw(stdscr)
+
+            if initial_instruction and initial_instruction.strip():
+                on_user_submit(initial_instruction.strip())
+                self.draw(stdscr)
 
             while True:
                 try:
