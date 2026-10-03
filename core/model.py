@@ -25,6 +25,7 @@ from core.protocols import (
 )
 from core.ratelimit import ModelCancelledError, RateLimitError, RateLimitHints, RetryPolicy
 from core.types import Message, ToolCall
+from core.usage import UsageTelemetry
 
 __all__ = [
     "CacheAwareModel",
@@ -410,120 +411,7 @@ def build_model_from_spec(
     return MockModel([("Mock response (offline mode)", [])])
 
 
-class _CacheTelemetryMixin:
-    """Provides common prompt cache telemetry and token usage accounting."""
-
-    cache_ttl: str | None
-    last_usage: dict[str, Any]
-    total_prompt_tokens: int
-    total_completion_tokens: int
-    total_cached_tokens: int
-
-    def _init_cache_telemetry(self, cache_ttl: str | None = None) -> None:
-        self.cache_ttl = normalize_cache_ttl(cache_ttl)
-        self.last_usage = {}
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self.total_cached_tokens = 0
-
-    def set_cache_ttl(self, ttl: str | None) -> str | None:
-        """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
-        self.cache_ttl = normalize_cache_ttl(ttl)
-        return self.cache_ttl
-
-    def get_last_step_usage(self) -> dict[str, Any]:
-        """Returns normalized token counts and cache hit percentage for the most recent generation step."""
-        usage = self.last_usage or {}
-        p_tok = int(
-            usage.get("prompt_tokens")
-            or usage.get("input_tokens")
-            or usage.get("promptTokenCount")
-            or 0
-        )
-        c_tok = int(
-            usage.get("completion_tokens")
-            or usage.get("output_tokens")
-            or usage.get("candidatesTokenCount")
-            or 0
-        )
-        prompt_details = usage.get("prompt_tokens_details")
-        cached_tok = 0
-        if isinstance(prompt_details, dict):
-            cached_tok = int(prompt_details.get("cached_tokens") or 0)
-        if not cached_tok:
-            cached_tok = int(
-                usage.get("cache_read_input_tokens")
-                or usage.get("cached_tokens")
-                or usage.get("cachedContentTokenCount")
-                or usage.get("native_tokens_prompt_cache_read")
-                or 0
-            )
-        hit_pct = round((cached_tok / p_tok * 100), 1) if p_tok > 0 else 0.0
-        return {
-            "prompt_tokens": p_tok,
-            "completion_tokens": c_tok,
-            "cached_tokens": cached_tok,
-            "cache_hit_rate_pct": hit_pct,
-        }
-
-    def get_cache_stats(self) -> dict[str, Any]:
-        """Returns prompt cache TTL and cumulative token utilization metrics."""
-        hit_rate = (
-            (self.total_cached_tokens / self.total_prompt_tokens * 100)
-            if self.total_prompt_tokens > 0
-            else 0.0
-        )
-        return {
-            "cache_ttl": self.cache_ttl,
-            "last_usage": dict(self.last_usage),
-            "total_prompt_tokens": self.total_prompt_tokens,
-            "total_completion_tokens": self.total_completion_tokens,
-            "total_cached_tokens": self.total_cached_tokens,
-            "cache_hit_rate_pct": round(hit_rate, 1),
-        }
-
-    def reset(self) -> None:
-        """Resets per-task token telemetry and usage counters."""
-        self.total_prompt_tokens = 0
-        self.total_completion_tokens = 0
-        self.total_cached_tokens = 0
-        self.last_usage = {}
-
-
-    def _update_usage(self, usage: dict[str, Any]) -> None:
-        self.last_usage = usage
-        prompt_toks = int(
-            usage.get("prompt_tokens")
-            or usage.get("input_tokens")
-            or usage.get("promptTokenCount")
-            or 0
-        )
-        comp_toks = int(
-            usage.get("completion_tokens")
-            or usage.get("output_tokens")
-            or usage.get("candidatesTokenCount")
-            or 0
-        )
-
-        cached_toks = 0
-        prompt_details = usage.get("prompt_tokens_details")
-        if isinstance(prompt_details, dict):
-            cached_toks = int(prompt_details.get("cached_tokens") or 0)
-        if not cached_toks:
-            cached_toks = int(
-                usage.get("cache_read_input_tokens")
-                or usage.get("cached_tokens")
-                or usage.get("cachedContentTokenCount")
-                or usage.get("native_tokens_prompt_cache_read")
-                or 0
-            )
-
-        self.total_prompt_tokens += prompt_toks
-        self.total_completion_tokens += comp_toks
-        self.total_cached_tokens += cached_toks
-
-
-class HttpChatModel(_CacheTelemetryMixin):
+class HttpChatModel(UsageTelemetry):
     """A generic HTTP model client for any OpenAI-compatible completions endpoint.
 
     Accepts either:
@@ -879,7 +767,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         return content, tool_calls
 
 
-class MockModel(_CacheTelemetryMixin):
+class MockModel(UsageTelemetry):
     """Deterministic model for offline testing and educational walkthroughs."""
 
     def __init__(

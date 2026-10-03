@@ -51,6 +51,7 @@ from core.tools import (
 )
 from core.tracer import ActionFormatter, Tracer, _dim
 from core.types import EvalResult, Message, RunResult, Task
+from core.usage import summarize_run_usage
 
 __all__ = [
     "DEFAULT_GLOBAL_DIR",
@@ -406,6 +407,41 @@ class Harness:
             inline_providers=self.merged_config.get("providers"),
         )
         self.active_loop: AgentLoop | None = None
+
+    def _evaluate(self, env: Environment, tracer: Tracer) -> EvalResult | None:
+        """Grades a finished run when an evaluator is configured."""
+        if not self.evaluator:
+            return None
+        if self.verbose:
+            print(f"\n{'=' * 20} Running Evaluation {'=' * 20}")
+        result = self.evaluator.evaluate(env, tracer.steps)
+        if self.verbose:
+            emoji = "✅" if result.passed else "❌"
+            print(f"{emoji} Evaluation Passed: {result.passed} (Score: {result.score})")
+            print(f"Feedback: {result.feedback.strip()}")
+        return result
+
+    def _write_patch(self, patch_diff: str, run_dir: Path) -> str | None:
+        """Persists the workspace diff next to the trace, returning its path."""
+        if not patch_diff:
+            return None
+        patch_file = run_dir / "patch.diff"
+        patch_file.write_text(patch_diff, encoding="utf-8")
+        if self.verbose:
+            print(f"📦 Git patch saved to: {patch_file}")
+        return str(patch_file)
+
+    def _rate_limit_wait(self) -> float:
+        """Cumulative seconds this model has spent honouring provider rate limits."""
+        raw = (
+            self.model.total_rate_limit_wait_s
+            if isinstance(self.model, RateLimitAwareModel)
+            else getattr(self.model, "total_rate_limit_wait_s", 0.0)
+        )
+        try:
+            return float(raw or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     @property
     def workspace_dir(self) -> Path:
@@ -765,14 +801,7 @@ class Harness:
         finish_reason = "max_steps_exceeded"
 
         while (step_idx - start_step) < max_steps:
-            if isinstance(self.model, RateLimitAwareModel):
-                raw_wait = self.model.total_rate_limit_wait_s
-            else:
-                raw_wait = getattr(self.model, "total_rate_limit_wait_s", 0.0)
-            try:
-                rate_limit_wait = float(raw_wait)
-            except (TypeError, ValueError):
-                rate_limit_wait = 0.0
+            rate_limit_wait = self._rate_limit_wait()
             effective_deadline = (deadline + rate_limit_wait) if deadline else None
             if effective_deadline and time.time() > effective_deadline:
                 tracer.log("\n⚠️ Task reached maximum allowed timeout.")
@@ -827,10 +856,7 @@ class Harness:
     def run(self, task: Task) -> RunResult:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
         run_start = time.time()
-        if isinstance(self.model, RateLimitAwareModel):
-            start_rl_wait = float(self.model.total_rate_limit_wait_s or 0.0)
-        else:
-            start_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
+        start_rl_wait = self._rate_limit_wait()
         system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
 
         active_docker = self.docker or bool(task.docker_image)
@@ -869,26 +895,9 @@ class Harness:
             total_duration = time.time() - run_start
             total_steps = len(tracer.steps)
 
-            eval_result: EvalResult | None = None
-            if self.evaluator:
-                if self.verbose:
-                    print(f"\n{'=' * 20} Running Evaluation {'=' * 20}")
-                eval_result = self.evaluator.evaluate(env, tracer.steps)
-                if self.verbose:
-                    status_emoji = "✅" if eval_result.passed else "❌"
-                    print(
-                        f"{status_emoji} Evaluation Passed: {eval_result.passed} (Score: {eval_result.score})"
-                    )
-                    print(f"Feedback: {eval_result.feedback.strip()}")
-
+            eval_result = self._evaluate(env, tracer)
             patch_diff = env.get_git_patch()
-            patch_path: str | None = None
-            if patch_diff:
-                patch_file = run_dir / "patch.diff"
-                patch_file.write_text(patch_diff, encoding="utf-8")
-                patch_path = str(patch_file)
-                if self.verbose:
-                    print(f"📦 Git patch saved to: {patch_file}")
+            patch_path = self._write_patch(patch_diff, run_dir)
 
             c_stats = self.get_cache_stats()
             if not isinstance(c_stats, dict):
@@ -903,54 +912,11 @@ class Harness:
             passed = eval_result.passed if eval_result else (finish_reason == "completed")
             score = eval_result.score if eval_result else (1.0 if passed else 0.0)
 
-            raw_prompt = c_stats.get("total_prompt_tokens")
-            raw_comp = c_stats.get("total_completion_tokens")
-            raw_cached = c_stats.get("total_cached_tokens")
-            raw_hit = c_stats.get("cache_hit_rate_pct")
+            usage = summarize_run_usage(
+                (step.usage for step in tracer.steps), c_stats
+            )
+            task_rl_wait = max(0.0, self._rate_limit_wait() - start_rl_wait)
 
-            step_prompt = sum(
-                int(s.usage.get("prompt_tokens", 0) or 0)
-                for s in tracer.steps
-                if isinstance(s.usage, dict)
-            )
-            step_comp = sum(
-                int(s.usage.get("completion_tokens", 0) or 0)
-                for s in tracer.steps
-                if isinstance(s.usage, dict)
-            )
-            step_cached = sum(
-                int(s.usage.get("cached_tokens", 0) or 0)
-                for s in tracer.steps
-                if isinstance(s.usage, dict)
-            )
-
-            total_prompt_tokens = (
-                step_prompt
-                if step_prompt > 0
-                else (int(raw_prompt) if isinstance(raw_prompt, (int, float)) and raw_prompt else 0)
-            )
-            total_comp_tokens = (
-                step_comp
-                if step_comp > 0
-                else (int(raw_comp) if isinstance(raw_comp, (int, float)) and raw_comp else 0)
-            )
-            total_cached_tokens = (
-                step_cached
-                if step_cached > 0
-                else (int(raw_cached) if isinstance(raw_cached, (int, float)) and raw_cached else 0)
-            )
-            hit_rate = (
-                round(total_cached_tokens / total_prompt_tokens * 100.0, 1)
-                if total_prompt_tokens > 0
-                else (float(raw_hit) if isinstance(raw_hit, (int, float)) and raw_hit else 0.0)
-            )
-
-
-            if isinstance(self.model, RateLimitAwareModel):
-                current_rl_wait = float(self.model.total_rate_limit_wait_s or 0.0)
-            else:
-                current_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
-            task_rl_wait = max(0.0, current_rl_wait - start_rl_wait)
 
             return RunResult(
                 task_id=task.id,
@@ -963,10 +929,10 @@ class Harness:
                 workspace_path=str(env.workspace_dir),
                 eval_result=eval_result,
                 patch_path=patch_path,
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_comp_tokens,
-                cached_tokens=total_cached_tokens,
-                cache_hit_rate_pct=hit_rate,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_hit_rate_pct=usage.cache_hit_rate_pct,
                 rate_limit_wait_s=task_rl_wait,
             )
         finally:
