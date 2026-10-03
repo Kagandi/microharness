@@ -258,14 +258,15 @@ while not done:
 ### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/harness.py`)
 * **Real-time Terminal Streaming**: Clean emoji indicators for Thoughts (`🧠`), Actions (`⚡`), Observations (`👁️`), Compactions (`🧹`), and User Input (`👤`).
 * **Artifact Persistence & Crash Recovery**: Every run writes:
-  * `trajectory.jsonl`: Append-only, per-step streaming persistence. Each step is flushed immediately to disk as JSON Lines, ensuring $O(1)$ durability and complete session recovery even if the process or container crashes mid-turn.
+  * `trajectory.jsonl`: Append-only, per-step streaming persistence. Each step is written and flushed to disk as it completes, so a process or container crash mid-turn loses at most the in-flight step. Records are serialized with `default=str`, so non-JSON-native values (Decimals, `Path`, sets, custom objects) degrade to their string form instead of dropping the step. A step that cannot be serialized at all (circular references, non-primitive dict keys) is replaced by a placeholder carrying `serialization_error: true` and empty `prompt_messages`; the placeholder preserves `step_index` so the stream never contains index holes, and message reconstruction skips it in favour of the last step that recorded a real prompt. Recovery is therefore complete up to the most recent serializable step, not guaranteed unconditionally.
   * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, reconstructed messages, and patch diff.
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
 * **Interactive Meta-Commands & Resilience**:
-  * Graceful interruption: Hitting `Ctrl+C` or `Esc` cancels the active step/turn and returns cleanly to the prompt without aborting the session.
-  * `/model [name|number]`: Inspects available models or switches active model dynamically on the fly (supporting alias maps, model lists, and provider presets from `config.json`).
-  * `/resume [id|number]`: Discovers recent sessions from `~/.microharness/runs/` with workspace affinity and restores conversational message history in-place.
+  * Graceful interruption: Hitting `Ctrl+C` cancels the active step/turn and returns cleanly to the prompt without aborting the session. Hitting `Esc` during a turn cancels at the next step boundary (see §5 for the known limitation).
+  * `/model [name|number]`: Inspects available models or switches the active model dynamically on the fly. A supplied name is resolved against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (accepting both `openai` and `openai/gpt-4o`). An unrecognized name is rejected with the list of valid models rather than silently constructing a client for a model that does not exist. A numeric argument selects from the same list.
+  * `--model`: The startup flag applies the same recognition rules, but only *warns* on stderr instead of refusing, so the flag remains a usable escape hatch for endpoints whose provider is not in the registry. `--model`, `MODEL_NAME`, and `config.json` precedence is unchanged.
+  * `/resume [id|number]`: Discovers recent sessions from `~/.microharness/runs/` with workspace affinity and restores conversational message history in-place. Discovery sorts candidates by mtime first, then reads at most the newest `max(limit * 5, 50)` session directories; if that bounded pass finds no session for the current workspace, a second pass scans the remainder so an older session for the same repository stays reachable. Without a workspace filter only plain recency ordering applies.
   * `/cache [5m|1h|off]`: Inspects or dynamically toggles prompt caching TTL on the fly (`5m` standard ephemeral or `1h` extended beta).
   * `/status`: Displays context window usage (chars and estimated tokens), message role counts, and prompt cache hit metrics.
   * `/compact`: Triggers manual memory compaction.
@@ -358,12 +359,27 @@ $$N_{\text{pings}} = \frac{0.75 \times B}{0.10 \times B} = \mathbf{7.5 \text{ pi
 ---
 
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (91 passing tests in ~5.8s):
-* `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner and task filtering.
-* `test_harbor.py`: Verifies `task.toml` parsing, missing metadata rejection, missing file errors, evaluator DockerEnvironment enforcement, and task filtering.
+All features are tested against rigorous, non-tautological standards in `tests/` (259 passing tests in ~7s):
+* `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner, task filtering, and graceful handling of malformed resume rows.
+* `test_harbor.py`: Verifies `task.toml` parsing, missing metadata rejection, missing file errors, evaluator `ContainerEnvironment` enforcement, and task filtering.
 * `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes, Docker container lifecycle, command execution, and timeout enforcement.
-* `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors.
+* `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors, and plugin trust-boundary enforcement (untrusted project plugins must not execute).
+* `test_discovery.py`: Resource search-directory resolution, including the rule that project tool plugins are only ever discovered under `.microharness/tools/` while other resources retain legacy paths.
+* `test_tracer.py`: Action/result pairing, telemetry export, per-instance formatter scoping, `trajectory.jsonl` streaming, session reconstruction and loading (including `trace.json`-absent crash recovery), workspace-affinity ordering with bounded-scan short-circuiting, and serialization resilience for non-primitive and unserializable step payloads.
 * `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
-* `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing, cache TTL normalization, 5m/1h/off payload generation, dynamic on-the-fly TTL switching, and cumulative cache hit statistics.
+* `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing, cache TTL normalization, 5m/1h/off payload generation, dynamic on-the-fly TTL switching, cumulative cache hit statistics, deadline clamping, and model-name recognition for both `/model` and the `--model` startup flag.
 * `test_evaluator.py`: Strict equality assertions, missing target files, forbidden string rejection.
-* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, global config (`config.json`) cascading precedence, dynamic cache TTL switching, and Docker sandboxing with evaluator assertions.
+* `test_harness.py`: Batch runs, timeout and max_steps guardrails, crash resilience, multi-turn chat sessions, `AGENTS.md` and skills progressive disclosure, custom commands expansion and shadowing, global config (`config.json`) cascading precedence, dynamic cache TTL switching, dynamic model switching (including index bounds and resume step numbering), and Docker sandboxing with evaluator assertions.
+* `test_tui.py`: Table rendering and CJK width handling, key decoding including Shift+Enter, floating autocomplete menus for commands/files/skills/models/sessions, Enter-key menu selection, mid-turn `Esc` cancellation, and the headless `run_tui` flow including resume step-numbering continuity.
+
+### Mutation Testing
+Correctness claims above are enforced by mutation testing rather than assertion count. Each guard is verified by introducing a deliberate defect and confirming the suite fails, so a passing test cannot be satisfied by a no-op. Current status: every mutant across the plugin trust boundary, deadline clamping, rate-limit delta accounting, tool shadowing, project-tool discovery scoping, model-name recognition, session reconstruction, crash recovery, serialization resilience, session-discovery ordering, and resume step numbering is killed by at least one test. Equivalent mutants (e.g. removing an explicit `flush()` immediately before a `with`-block close) are verified as equivalent by construction rather than counted as coverage.
+
+---
+
+## 5. Known Limitations & Planned Work
+Deliberately unimplemented or bounded behaviour, recorded so it is not mistaken for a defect:
+
+* **Mid-step cancellation**: `Esc` during a turn is observed at step boundaries, not during a single in-flight step. Cancelling a slow HTTP request mid-flight requires executing the turn on a worker thread with cooperative cancellation (or a cancellable transport), which conflicts with the synchronous `Model.generate` protocol in §3.5. `Ctrl+C` remains the only way to interrupt a blocked step, and it aborts the run.
+* **Bounded session discovery**: `find_recent_sessions` parses each candidate `trace.json` in full, so the second (correctness) pass over a large `runs_dir` is proportional to the number of session directories. Bounding it trades away the workspace-affinity guarantee; the two-pass structure keeps the common case cheap. A future session index (e.g. a small sidecar `meta.json`) would remove the trade-off entirely.
+* **Unserializable step payloads**: Steps containing circular references or non-primitive dict keys are replaced by a placeholder, preserving the step index but not that step's message content. See §3.8.

@@ -477,6 +477,35 @@ class Harness:
 
         return get_available_models_from_config(self.merged_config, self.provider_registry)
 
+    def resolve_model_spec(self, spec: str) -> tuple[bool, str, str]:
+        """Resolves a user-supplied model name to a configured alias.
+
+        Accepts a configured alias from ``models``, the underlying model id of
+        one, or a provider name (``openai`` / ``openai/gpt-4o``) present in the
+        provider registry. Returns ``(ok, canonical_spec, error)``.
+        """
+        clean_spec = spec.strip()
+        if not clean_spec:
+            return False, "", "Model specification cannot be empty."
+
+        avail = self.get_available_models()
+        avail_names = {m["name"].lower(): m["name"] for m in avail}
+        avail_models = {m.get("model", "").lower(): m["name"] for m in avail if m.get("model")}
+        clean_lower = clean_spec.lower()
+        reg = self.provider_registry or {}
+
+        if clean_lower in avail_names:
+            return True, avail_names[clean_lower], ""
+        if clean_lower in avail_models:
+            return True, avail_models[clean_lower], ""
+        if "/" in clean_spec and clean_spec.split("/", 1)[0].lower() in reg:
+            return True, clean_spec, ""
+        if clean_lower in reg:
+            return True, clean_spec, ""
+
+        valid_list = ", ".join(m["name"] for m in avail) or "none configured"
+        return False, "", f"Unknown model '{spec}'. Available models: {valid_list}"
+
     def switch_model(self, spec: str | dict[str, Any]) -> tuple[bool, str, Model]:
         """Switches active model dynamically using config and provider registry."""
         from core.model import build_model_from_spec
@@ -506,28 +535,10 @@ class Harness:
                             self.model,
                         )
                 else:
-                    avail_names = {m["name"].lower(): m["name"] for m in avail}
-                    avail_models = {
-                        m.get("model", "").lower(): m["name"] for m in avail if m.get("model")
-                    }
-                    clean_lower = clean_spec.lower()
-                    reg = self.provider_registry or {}
-
-                    if clean_lower in avail_names:
-                        target_spec = avail_names[clean_lower]
-                    elif clean_lower in avail_models:
-                        target_spec = avail_models[clean_lower]
-                    elif "/" in clean_spec and clean_spec.split("/", 1)[0].lower() in reg:
-                        target_spec = clean_spec
-                    elif clean_lower in reg:
-                        target_spec = clean_spec
-                    else:
-                        valid_list = ", ".join(m["name"] for m in avail) or "none configured"
-                        return (
-                            False,
-                            f"Unknown model '{spec}'. Available models: {valid_list}",
-                            self.model,
-                        )
+                    ok, canonical, error = self.resolve_model_spec(clean_spec)
+                    if not ok:
+                        return False, error, self.model
+                    target_spec = canonical
 
             new_model = build_model_from_spec(
                 spec=target_spec,

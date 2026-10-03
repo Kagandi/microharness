@@ -195,8 +195,8 @@ When you chat with the agent, the harness maintains persistent memory and render
 ### Slash Commands (No Model Call)
 You can inspect or control the harness runtime directly:
 
-* **`/model [name|number]`**: Inspect available models or switch active model dynamically on the fly (e.g. `/model fast` or `/model 2`). In TUI mode, Tab autocompletes configured model names.
-* **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place.
+* **`/model [name|number]`**: Inspect available models or switch active model dynamically on the fly (e.g. `/model fast` or `/model 2`). In TUI mode, Tab autocompletes configured model names. A name is matched against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (`openai` or `openai/gpt-4o` both work). An unrecognized name is **rejected with the list of valid models** rather than silently constructing a client for a model that does not exist. The `--model` startup flag applies the same recognition rules but only warns on stderr, so it remains usable for endpoints whose provider is not in the registry.
+* **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place. Discovery reads only the newest sessions first and falls back to a full scan when your repository has no recent session, so an older session for the same repo stays reachable.
 * **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
 * **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
 * **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
@@ -217,7 +217,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 250+ unit and integration tests run in ~6s)*
+*(All 250+ unit and integration tests run in ~7s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
 
 ### 3. Interactive and TUI Sessions
 ```bash

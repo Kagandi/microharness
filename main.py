@@ -34,6 +34,7 @@ from core.model import (
     NamedModel,
     ResettableModel,
     find_provider_by_endpoint,
+    get_available_models_from_config,
     load_provider_registry,
     resolve_provider,
     seed_user_providers,
@@ -372,6 +373,37 @@ def _resolve_model(
         reasoning_lbl = f", reasoning: {reasoning_effort.upper()}" if reasoning_effort else ""
         prov_lbl = f" [{resolved_name}]" if resolved_name else ""
         print(f"🔌 Connected to{prov_lbl}: {endpoint} (model: {model_name}, cache: {cache_lbl}{reasoning_lbl})")
+
+        # An explicit --model that matches no configured alias, model id, or known
+        # provider is almost always a typo. We warn rather than refuse so the flag
+        # stays a usable escape hatch for providers the registry does not know yet,
+        # but the mismatch is surfaced here instead of as an opaque HTTP error later.
+        requested_model = getattr(args, "model", None)
+        if requested_model:
+            try:
+                registry = load_provider_registry(
+                    global_dir=global_dir, project_dir=target_dir
+                )
+                known = get_available_models_from_config(config, registry)
+                names = {m["name"].lower() for m in known}
+                ids = {m.get("model", "").lower() for m in known if m.get("model")}
+                reg_names = {n.lower() for n in registry}
+                head = requested_model.split("/", 1)[0].lower()
+                if (
+                    requested_model.strip().lower() not in names
+                    and requested_model.strip().lower() not in ids
+                    and requested_model.strip().lower() not in reg_names
+                    and head not in reg_names
+                ):
+                    available = ", ".join(m["name"] for m in known) or "none configured"
+                    print(
+                        f"⚠️  Warning: --model '{requested_model}' does not match any configured "
+                        f"model or known provider. Available: {available}",
+                        file=sys.stderr,
+                    )
+            except Exception:
+                pass
+
         return HttpChatModel(
             base_url=endpoint,
             model=model_name,

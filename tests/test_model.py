@@ -460,6 +460,93 @@ class TestModel(unittest.TestCase):
             self.assertIsInstance(model, HttpChatModel)
             self.assertEqual(model.api_key, "test-env-key-gemini")
 
+    def test_resolve_model_warns_on_unrecognized_flag(self):
+        """Invariant: an explicit --model matching no alias, model id, or provider warns on stderr."""
+        import argparse
+        import contextlib
+        import io
+
+        from main import _resolve_model
+
+        config = {
+            "endpoint": "https://example.invalid/v1",
+            "api_key": "k",
+            "models": [{"name": "good", "model": "good-model", "provider": "openai"}],
+        }
+
+        def run(model_flag: str | None) -> str:
+            args = argparse.Namespace(
+                endpoint=None, model=model_flag, api_key=None, provider=None
+            )
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                _resolve_model(args, config=config, cache_ttl="off")
+            return stderr.getvalue()
+
+        # Typo: warned, and the available list is surfaced.
+        bad = run("gpt-4o-mmp")
+        self.assertIn("does not match any configured model", bad)
+        self.assertIn("gpt-4o-mmp", bad)
+        self.assertIn("good", bad)
+
+        # Configured alias, underlying model id, and provider-qualified names are all accepted.
+        self.assertEqual(run("good"), "")
+        self.assertEqual(run("good-model"), "")
+        self.assertEqual(run("openai"), "")
+        self.assertEqual(run("openai/gpt-4o"), "")
+
+        # No explicit flag means nothing to validate.
+        self.assertEqual(run(None), "")
+
+    def test_harness_resolve_model_spec_contract(self):
+        """Invariant: resolve_model_spec canonicalizes known names and explains unknown ones."""
+        import tempfile
+        from pathlib import Path
+
+        from core.harness import Harness
+        from core.model import MockModel
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            (tmp / "g").mkdir()
+            (tmp / "g" / "config.json").write_text(
+                '{"models":[{"name":"Fast","model":"fast-id","provider":"openai"},'
+                '{"name":"Big","model":"big-id","provider":"openai"}]}',
+                encoding="utf-8",
+            )
+            harness = Harness(
+                model=MockModel([("x", [])]),
+                workspace_dir=tmp / "ws",
+                global_dir=tmp / "g",
+                runs_dir=tmp / "r",
+                sandbox=False,
+                verbose=False,
+            )
+
+            ok, canonical, err = harness.resolve_model_spec("fast")
+            self.assertTrue(ok)
+            self.assertEqual(canonical, "Fast")
+            self.assertEqual(err, "")
+
+            ok, canonical, _ = harness.resolve_model_spec("  BIG-ID  ")
+            self.assertTrue(ok)
+            self.assertEqual(canonical, "Big")
+
+            ok, canonical, _ = harness.resolve_model_spec("openai/gpt-4o")
+            self.assertTrue(ok)
+            self.assertEqual(canonical, "openai/gpt-4o")
+
+            ok, canonical, err = harness.resolve_model_spec("nope")
+            self.assertFalse(ok)
+            self.assertEqual(canonical, "")
+            self.assertIn("Unknown model 'nope'", err)
+            self.assertIn("Fast", err)
+            self.assertIn("Big", err)
+
+            ok, _, err = harness.resolve_model_spec("   ")
+            self.assertFalse(ok)
+            self.assertIn("cannot be empty", err)
+
     def test_normalize_reasoning_effort(self):
         """Invariant: Reasoning effort normalization accepts low/medium/high/digits and disables cleanly."""
         self.assertEqual(normalize_reasoning_effort("low"), "low")
