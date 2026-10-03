@@ -187,6 +187,48 @@ class ReasoningAwareModel(Model, Protocol):
     def get_reasoning_effort(self) -> str | None: ...
 
 
+@runtime_checkable
+class DeadlineAwareModel(Model, Protocol):
+    """Protocol for models that support task execution deadlines to bound in-flight HTTP requests."""
+
+    def set_deadline(self, deadline: float | None) -> None: ...
+
+
+@runtime_checkable
+class RateLimitAwareModel(Model, Protocol):
+    """Protocol for models that track cumulative rate-limit throttling duration."""
+
+    total_rate_limit_wait_s: float
+
+
+@runtime_checkable
+class UsageReportingModel(Model, Protocol):
+    """Protocol for models that report normalized token counts and hit rates for generation steps."""
+
+    def get_last_step_usage(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class NamedModel(Model, Protocol):
+    """Protocol for models that expose their model name identifier."""
+
+    model: str
+
+
+@runtime_checkable
+class EndpointAwareModel(Model, Protocol):
+    """Protocol for models that expose their HTTP endpoint URL."""
+
+    endpoint: str
+
+
+@runtime_checkable
+class ProviderAwareModel(Model, Protocol):
+    """Protocol for models that expose their underlying provider name."""
+
+    provider: str
+
+
 def normalize_cache_ttl(ttl: str | None) -> str | None:
     """Normalizes cache TTL setting ('5m', '1h', or None for disabled).
 

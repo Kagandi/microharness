@@ -26,9 +26,11 @@ from core.harness import (
     load_project_config,
 )
 from core.model import (
+    EndpointAwareModel,
     HttpChatModel,
     MockModel,
     Model,
+    NamedModel,
     ResettableModel,
     find_provider_by_endpoint,
     load_provider_registry,
@@ -468,10 +470,20 @@ def _dispatch_benchmark(
         verbose=True,
     )
 
+    model_name = (
+        model.model
+        if isinstance(model, NamedModel)
+        else getattr(model, "model", None)
+    )
+    endpoint_url = (
+        model.endpoint
+        if isinstance(model, EndpointAwareModel)
+        else getattr(model, "endpoint", None)
+    )
     benchmark_metadata = {
         "provider": getattr(args, "provider", None) or config.get("provider"),
-        "model": getattr(model, "model", None) or getattr(args, "model", None) or config.get("model"),
-        "endpoint": getattr(model, "endpoint", None) or getattr(args, "endpoint", None) or config.get("endpoint"),
+        "model": model_name or getattr(args, "model", None) or config.get("model"),
+        "endpoint": endpoint_url or getattr(args, "endpoint", None) or config.get("endpoint"),
         "cache_ttl": cache_ttl,
         "reasoning_effort": reasoning_effort,
         "max_steps": args.max_steps or int(config.get("max_steps", 30)),

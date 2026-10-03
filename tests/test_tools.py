@@ -437,6 +437,75 @@ class UntrustedTool:
         self.assertEqual(tool.name, "bash")
         self.assertIsNone(self.registry.get("non_existent_tool"))
 
+    def test_tool_protocol_runtime_checkable(self):
+        """Invariant: Tool protocol is @runtime_checkable and validates built-in and duck-typed tools."""
+        from core.tools import Tool
+
+        self.assertTrue(isinstance(self.registry.get("bash"), Tool))
+        self.assertTrue(isinstance(self.registry.get("read_file"), Tool))
+        self.assertTrue(isinstance(self.registry.get("write_file"), Tool))
+        self.assertTrue(isinstance(self.registry.get("edit_file"), Tool))
+
+        class ValidDuckTool:
+            name = "duck"
+            description = "A duck tool"
+            parameters = {"type": "object"}
+
+            def execute(self, **kwargs):
+                return "quack"
+
+        self.assertTrue(isinstance(ValidDuckTool(), Tool))
+
+        class IncompleteTool:
+            name = "incomplete"
+
+        self.assertFalse(isinstance(IncompleteTool(), Tool))
+
+    def test_is_tool_like_strict_validation(self):
+        """Invariant: _is_tool_like enforces Tool protocol conformance plus non-empty string and dict types."""
+        from core.tools import _is_tool_like
+
+        class ValidTool:
+            name = "valid"
+            description = "desc"
+            parameters = {}
+
+            def execute(self, **kwargs):
+                return "ok"
+
+        self.assertTrue(_is_tool_like(ValidTool()))
+
+        # Empty name rejected
+        class EmptyNameTool:
+            name = ""
+            description = "desc"
+            parameters = {}
+
+            def execute(self, **kwargs):
+                return "ok"
+
+        self.assertFalse(_is_tool_like(EmptyNameTool()))
+
+        # Non-dict parameters rejected
+        class NonDictParamsTool:
+            name = "test"
+            description = "desc"
+            parameters = ["not", "a", "dict"]
+
+            def execute(self, **kwargs):
+                return "ok"
+
+        self.assertFalse(_is_tool_like(NonDictParamsTool()))
+
+        # Non-callable execute rejected
+        class NonCallableExecuteTool:
+            name = "test"
+            description = "desc"
+            parameters = {}
+            execute = "not_callable"
+
+        self.assertFalse(_is_tool_like(NonCallableExecuteTool()))
+
 
 if __name__ == "__main__":
     unittest.main()

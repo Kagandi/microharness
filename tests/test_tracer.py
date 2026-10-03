@@ -266,6 +266,70 @@ class TestTracer(unittest.TestCase):
         # Invariant 3: Step 2 prints full final message
         self.assertIn("All changes are committed and the workspace is clean.", output)
 
+    def test_tracer_scoped_instance_formatters(self):
+        """Invariant: Tracer instance formatters do not leak between instances or mutate global defaults."""
+        import io
+        import sys
+        from core.tracer import _ACTION_FORMATTERS, Tracer
+        from core.types import StepTrace
+
+        initial_globals = dict(_ACTION_FORMATTERS)
+
+        # Instance 1 with custom formatter for bash
+        tracer1 = Tracer(
+            task=Task(id="t1", instruction=""),
+            output_dir=Path(tempfile.mkdtemp()),
+            verbose=True,
+            formatters={"bash": lambda args: f"CUSTOM_BASH: {args.get('command')}"},
+        )
+
+        # Instance 2 with custom formatter for custom_tool
+        tracer2 = Tracer(
+            task=Task(id="t2", instruction=""),
+            output_dir=Path(tempfile.mkdtemp()),
+            verbose=True,
+            formatters={"custom_tool": lambda args: f"CUSTOM_TOOL: {args.get('foo')}"},
+        )
+
+        step = StepTrace(
+            step_index=1,
+            prompt_messages=[],
+            model_response={
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls -la"}}],
+            },
+            tool_results=[{"call_id": "c1", "output": "ok", "exit_code": 0}],
+            duration_s=0.1,
+        )
+
+        buf1 = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf1
+            tracer1.record_step(step)
+        finally:
+            sys.stdout = old_stdout
+
+        buf2 = io.StringIO()
+        try:
+            sys.stdout = buf2
+            tracer2.record_step(step)
+        finally:
+            sys.stdout = old_stdout
+
+        out1 = buf1.getvalue()
+        out2 = buf2.getvalue()
+
+        # Invariant 1: tracer1 used its custom bash formatter
+        self.assertIn("CUSTOM_BASH: ls -la", out1)
+
+        # Invariant 2: tracer2 did NOT use tracer1's custom formatter; used default bash formatter
+        self.assertNotIn("CUSTOM_BASH", out2)
+        self.assertIn("$ ls -la", out2)
+
+        # Invariant 3: Global _ACTION_FORMATTERS was untouched
+        self.assertEqual(_ACTION_FORMATTERS, initial_globals)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,13 +4,14 @@ import importlib.util
 import inspect
 import sys
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from core.discovery import discover_resources
 from core.environment import Environment
 from core.types import ToolCall, ToolResult
 
 
+@runtime_checkable
 class Tool(Protocol):
     """Protocol defining a pluggable tool."""
 
@@ -298,16 +299,14 @@ class ToolRegistry:
 
 def _is_tool_like(obj: Any) -> bool:
     """Checks if an instantiated object conforms to the Tool protocol."""
+    if not isinstance(obj, Tool):
+        return False
     return (
-        hasattr(obj, "name")
-        and isinstance(getattr(obj, "name"), str)
-        and bool(getattr(obj, "name"))
-        and hasattr(obj, "description")
-        and isinstance(getattr(obj, "description"), str)
-        and hasattr(obj, "parameters")
-        and isinstance(getattr(obj, "parameters"), dict)
-        and hasattr(obj, "execute")
-        and callable(getattr(obj, "execute"))
+        isinstance(obj.name, str)
+        and bool(obj.name)
+        and isinstance(obj.description, str)
+        and isinstance(obj.parameters, dict)
+        and callable(obj.execute)
     )
 
 

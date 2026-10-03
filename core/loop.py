@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 from core.memory import Memory
-from core.model import Model
+from core.model import Model, UsageReportingModel
 from core.tools import ToolRegistry
 from core.types import StepTrace, ToolResult
 
@@ -45,7 +45,9 @@ class AgentLoop:
         self.memory.add_assistant(content=content, tool_calls=tool_calls)
 
         step_usage: dict[str, Any] = {}
-        if hasattr(self.model, "get_last_step_usage"):
+        if isinstance(self.model, UsageReportingModel):
+            step_usage = self.model.get_last_step_usage()
+        elif hasattr(self.model, "get_last_step_usage"):
             step_usage = self.model.get_last_step_usage()
         elif hasattr(self.model, "last_usage"):
             step_usage = dict(getattr(self.model, "last_usage", {}) or {})

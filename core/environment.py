@@ -7,6 +7,19 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class ContainerEnvironment(Protocol):
+    """Protocol for sandboxed environments executing inside an isolated container."""
+
+    container_name: str
+    is_running: bool
+
+    def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+        """Executes a bash command inside the container and returns (exit_code, output)."""
+        ...
 
 
 def _decode_timeout_output(exc: subprocess.TimeoutExpired, timeout: float) -> tuple[int, str]:

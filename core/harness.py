@@ -19,7 +19,11 @@ from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import (
     CacheAwareModel,
+    DeadlineAwareModel,
     Model,
+    NamedModel,
+    ProviderAwareModel,
+    RateLimitAwareModel,
     RateLimitError,
     ReasoningAwareModel,
     normalize_cache_ttl,
@@ -37,7 +41,7 @@ from core.tools import (
     WriteFileTool,
     discover_tool_plugins,
 )
-from core.tracer import Tracer, _dim
+from core.tracer import ActionFormatter, Tracer, _dim
 from core.types import EvalResult, RunResult, Task
 
 
@@ -348,6 +352,7 @@ class Harness:
         reasoning_effort: str | None = None,
         max_step_retries: int | None = None,
         step_retry_delay: float | None = None,
+        action_formatters: dict[str, ActionFormatter] | None = None,
         verbose: bool = True,
     ):
         self.model = model
@@ -420,6 +425,7 @@ class Harness:
 
         self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
         self.step_retry_delay = _cfg("step_retry_delay", step_retry_delay, float, 5.0)
+        self.action_formatters = action_formatters
         self.verbose = verbose
 
     @property
@@ -608,7 +614,12 @@ class Harness:
             trigger_ratio=self.trigger_ratio,
         )
         task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)
-        tracer = Tracer(task=task, output_dir=run_dir, verbose=self.verbose)
+        tracer = Tracer(
+            task=task,
+            output_dir=run_dir,
+            verbose=self.verbose,
+            formatters=self.action_formatters,
+        )
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
 
         return env, tool_registry, memory, tracer, loop, run_dir
@@ -632,7 +643,10 @@ class Harness:
         finish_reason = "max_steps_exceeded"
 
         while (step_idx - start_step) < max_steps:
-            raw_wait = getattr(self.model, "total_rate_limit_wait_s", 0.0)
+            if isinstance(self.model, RateLimitAwareModel):
+                raw_wait = self.model.total_rate_limit_wait_s
+            else:
+                raw_wait = getattr(self.model, "total_rate_limit_wait_s", 0.0)
             try:
                 rate_limit_wait = float(raw_wait)
             except (TypeError, ValueError):
@@ -642,8 +656,11 @@ class Harness:
                 tracer.log("\n⚠️ Task reached maximum allowed timeout.")
                 return False, "timeout", step_idx
 
-            if effective_deadline and hasattr(self.model, "set_deadline"):
-                self.model.set_deadline(effective_deadline)
+            if effective_deadline:
+                if isinstance(self.model, DeadlineAwareModel):
+                    self.model.set_deadline(effective_deadline)
+                elif hasattr(self.model, "set_deadline"):
+                    self.model.set_deadline(effective_deadline)
 
             try:
                 is_finished, step_trace = loop.step(step_index=step_idx)
@@ -691,7 +708,10 @@ class Harness:
     def run(self, task: Task) -> RunResult:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
         run_start = time.time()
-        start_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
+        if isinstance(self.model, RateLimitAwareModel):
+            start_rl_wait = float(self.model.total_rate_limit_wait_s or 0.0)
+        else:
+            start_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
         system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
 
         active_docker = self.docker or bool(task.docker_image)
@@ -715,7 +735,9 @@ class Harness:
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
         task_deadline = (run_start + task.timeout_seconds) if task.timeout_seconds else None
-        if hasattr(self.model, "set_deadline"):
+        if isinstance(self.model, DeadlineAwareModel):
+            self.model.set_deadline(task_deadline)
+        elif hasattr(self.model, "set_deadline"):
             self.model.set_deadline(task_deadline)
 
         try:
@@ -807,7 +829,10 @@ class Harness:
             )
 
 
-            current_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
+            if isinstance(self.model, RateLimitAwareModel):
+                current_rl_wait = float(self.model.total_rate_limit_wait_s or 0.0)
+            else:
+                current_rl_wait = float(getattr(self.model, "total_rate_limit_wait_s", 0.0) or 0.0)
             task_rl_wait = max(0.0, current_rl_wait - start_rl_wait)
 
             return RunResult(
@@ -828,7 +853,9 @@ class Harness:
                 rate_limit_wait_s=task_rl_wait,
             )
         finally:
-            if hasattr(self.model, "set_deadline"):
+            if isinstance(self.model, DeadlineAwareModel):
+                self.model.set_deadline(None)
+            elif hasattr(self.model, "set_deadline"):
                 self.model.set_deadline(None)
             env.teardown()
 
@@ -1165,8 +1192,16 @@ class Harness:
         skills = _discover_skills(env.workspace_dir, self.global_dir)
 
         state = TUIState(title="microharness")
-        state.provider_name = getattr(self.model, "provider", "") or ""
-        state.model_name = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+        if isinstance(self.model, ProviderAwareModel):
+            state.provider_name = self.model.provider or ""
+        else:
+            state.provider_name = getattr(self.model, "provider", "") or ""
+
+        if isinstance(self.model, NamedModel):
+            state.model_name = self.model.model or ""
+        else:
+            state.model_name = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+
         state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
         curr_reasoning = self.get_reasoning_effort()
         state.reasoning = curr_reasoning.upper() if curr_reasoning else ""

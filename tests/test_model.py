@@ -1168,6 +1168,49 @@ class TestModel(unittest.TestCase):
         self.assertEqual(m.total_cached_tokens, 0)
         self.assertEqual(m.last_usage, {})
 
+    def test_capability_protocols_runtime_checkable(self):
+        """Invariant: Capability protocols are @runtime_checkable and accurately identify conforming models."""
+        from core.model import (
+            DeadlineAwareModel,
+            EndpointAwareModel,
+            NamedModel,
+            ProviderAwareModel,
+            RateLimitAwareModel,
+            UsageReportingModel,
+        )
+
+        http_model = HttpChatModel(
+            base_url="https://api.example.com",
+            model="gpt-4o",
+            api_key="secret",
+        )
+        self.assertTrue(isinstance(http_model, DeadlineAwareModel))
+        self.assertTrue(isinstance(http_model, RateLimitAwareModel))
+        self.assertTrue(isinstance(http_model, UsageReportingModel))
+        self.assertTrue(isinstance(http_model, NamedModel))
+        self.assertTrue(isinstance(http_model, EndpointAwareModel))
+        self.assertTrue(isinstance(http_model, ProviderAwareModel))
+
+        mock_model = MockModel(script=[])
+        self.assertFalse(isinstance(mock_model, DeadlineAwareModel))
+        self.assertFalse(isinstance(mock_model, RateLimitAwareModel))
+        self.assertTrue(isinstance(mock_model, UsageReportingModel))
+        self.assertTrue(isinstance(mock_model, NamedModel))
+        self.assertFalse(isinstance(mock_model, EndpointAwareModel))
+        self.assertTrue(isinstance(mock_model, ProviderAwareModel))
+
+        class EmptyDummy:
+            pass
+
+        dummy = EmptyDummy()
+        self.assertFalse(isinstance(dummy, DeadlineAwareModel))
+        self.assertFalse(isinstance(dummy, RateLimitAwareModel))
+        self.assertFalse(isinstance(dummy, UsageReportingModel))
+        self.assertFalse(isinstance(dummy, NamedModel))
+        self.assertFalse(isinstance(dummy, EndpointAwareModel))
+        self.assertFalse(isinstance(dummy, ProviderAwareModel))
+
 
 if __name__ == "__main__":
     unittest.main()
+

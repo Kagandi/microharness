@@ -132,6 +132,32 @@ class TestHarborBenchmark(unittest.TestCase):
             self.assertIn("Partial: 0.75", res.feedback)
             self.assertIn("F2P: 3/4", res.feedback)
 
+    def test_harbor_evaluator_accepts_pluggable_container_env_not_docker_subclass(self):
+        """Invariant: HarborEvaluator accepts any ContainerEnvironment protocol implementer without requiring DockerEnvironment inheritance."""
+        import json
+        from core.environment import ContainerEnvironment, DockerEnvironment
+
+        class PluggableContainerEnv:
+            container_name = "custom_podman_container"
+            is_running = True
+
+            def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+                if "/logs/verifier/reward.json" in command:
+                    return 0, json.dumps({"reward": 1, "f2p_passed": 2, "f2p_total": 2})
+                return 0, "ok"
+
+        custom_env = PluggableContainerEnv()
+        self.assertTrue(isinstance(custom_env, ContainerEnvironment))
+        self.assertFalse(isinstance(custom_env, DockerEnvironment))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evaluator = HarborEvaluator(task_dir=Path(tmpdir), base_commit="HEAD")
+            res = evaluator.evaluate(custom_env, steps=[])
+
+            self.assertTrue(res.passed)
+            self.assertEqual(res.score, 1.0)
+            self.assertIn("PASSED ✅", res.feedback)
+
 
 if __name__ == "__main__":
     unittest.main()

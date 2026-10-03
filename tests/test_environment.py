@@ -266,6 +266,29 @@ class TestEnvironment(unittest.TestCase):
         # Verify teardown cleaned up the directory
         self.assertFalse(Path(temp_ws).exists())
 
+    def test_container_environment_protocol(self):
+        """Invariant: ContainerEnvironment protocol is @runtime_checkable and identifies container backends."""
+        from core.environment import ContainerEnvironment
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "test_cont"
+        d_env._container_started = True
+
+        self.assertTrue(isinstance(d_env, ContainerEnvironment))
+
+        # Plain host Environment lacks container_name and is not a ContainerEnvironment
+        self.assertFalse(isinstance(self.env, ContainerEnvironment))
+
+        # Custom container backend conforming to protocol without inheriting DockerEnvironment
+        class CustomContainerEnv:
+            container_name = "podman_123"
+            is_running = True
+
+            def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+                return 0, "podman execution"
+
+        self.assertTrue(isinstance(CustomContainerEnv(), ContainerEnvironment))
+
 
 if __name__ == "__main__":
     unittest.main()

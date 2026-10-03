@@ -29,17 +29,6 @@ def _red(text: str) -> str:
 
 
 ActionFormatter = Callable[[Any], str]
-_ACTION_FORMATTERS: dict[str, ActionFormatter] = {}
-
-
-def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> None:
-    """Registers a custom action summary formatter for a tool."""
-    _ACTION_FORMATTERS[tool_name] = formatter
-
-
-def unregister_action_formatter(tool_name: str) -> None:
-    """Unregisters an action summary formatter for a tool."""
-    _ACTION_FORMATTERS.pop(tool_name, None)
 
 
 def _format_bash_action(args: Any) -> str:
@@ -76,15 +65,35 @@ def _format_edit_file_action(args: Any) -> str:
     return f"● Edit {path}"
 
 
-register_action_formatter("bash", _format_bash_action)
-register_action_formatter("read_file", _format_read_file_action)
-register_action_formatter("write_file", _format_write_file_action)
-register_action_formatter("edit_file", _format_edit_file_action)
+ActionFormatter = Callable[[Any], str]
+_DEFAULT_ACTION_FORMATTERS: dict[str, ActionFormatter] = {
+    "bash": _format_bash_action,
+    "read_file": _format_read_file_action,
+    "write_file": _format_write_file_action,
+    "edit_file": _format_edit_file_action,
+}
+_ACTION_FORMATTERS: dict[str, ActionFormatter] = dict(_DEFAULT_ACTION_FORMATTERS)
 
 
-def _format_action_summary(name: str, args: Any, color: bool = True) -> str:
+def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> None:
+    """Registers a global custom action summary formatter for a tool."""
+    _ACTION_FORMATTERS[tool_name] = formatter
+
+
+def unregister_action_formatter(tool_name: str) -> None:
+    """Unregisters a global action summary formatter for a tool."""
+    _ACTION_FORMATTERS.pop(tool_name, None)
+
+
+def _format_action_summary(
+    name: str,
+    args: Any,
+    color: bool = True,
+    formatters: dict[str, ActionFormatter] | None = None,
+) -> str:
     """Formats a tool call concisely using registered formatters or a generic fallback."""
-    formatter = _ACTION_FORMATTERS.get(name)
+    active_formatters = formatters if formatters is not None else _ACTION_FORMATTERS
+    formatter = active_formatters.get(name) or _ACTION_FORMATTERS.get(name)
     text: str | None = None
     if formatter:
         try:
@@ -150,12 +159,17 @@ class Tracer:
         output_dir: Path,
         verbose: bool = True,
         compact: bool = False,
+        formatters: dict[str, ActionFormatter] | None = None,
     ):
         self.task = task
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
         self.compact = compact
+        self.formatters: dict[str, ActionFormatter] = {
+            **_ACTION_FORMATTERS,
+            **(formatters or {}),
+        }
         self.steps: list[StepTrace] = []
         self.eval_result: EvalResult | None = None
         self.finish_reason: str = "running"
@@ -188,7 +202,9 @@ class Tracer:
                 for tc, tr in _pair_calls_with_results(tool_calls, step.tool_results):
                     name = tc.get("name", "") if tc else ""
                     args = tc.get("arguments", {}) if tc else {}
-                    action_summary = _format_action_summary(name, args, color=True)
+                    action_summary = _format_action_summary(
+                        name, args, color=True, formatters=self.formatters
+                    )
                     exit_code = tr.get("exit_code", 0) if tr else 0
                     if exit_code == 0:
                         print(f"{action_summary} " + _dim(f"({step.duration_s:.1f}s)"))
@@ -231,7 +247,9 @@ class Tracer:
             if tc:
                 name = tc.get("name", "")
                 args = tc.get("arguments", {})
-                action_text = _format_action_summary(name, args, color=True)
+                action_text = _format_action_summary(
+                    name, args, color=True, formatters=self.formatters
+                )
                 print(action_text)
 
             if tr:

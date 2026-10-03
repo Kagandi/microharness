@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
-from core.environment import DockerEnvironment, Environment
+from core.environment import ContainerEnvironment, DockerEnvironment, Environment
 from core.types import EvalResult, StepTrace, Task
 
 DEEPSWE_MINI_TASKS: list[str] = [
@@ -62,11 +62,11 @@ class HarborEvaluator:
         self.timeout = timeout
 
     def evaluate(self, env: Environment, steps: list[StepTrace]) -> EvalResult:
-        if not isinstance(env, DockerEnvironment) or not env.is_running:
+        if not isinstance(env, ContainerEnvironment) or not env.is_running:
             return EvalResult(
                 passed=False,
                 score=0.0,
-                feedback="Harbor evaluation requires an active DockerEnvironment.",
+                feedback="Harbor evaluation requires an active DockerEnvironment (ContainerEnvironment).",
             )
 
         container = env.container_name
