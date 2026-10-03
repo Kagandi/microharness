@@ -40,6 +40,11 @@ from core.model import (
     ReasoningAwareModel,
 )
 from core.prompts import DEFAULT_SYSTEM_PROMPT
+from core.providers import (
+    build_model_from_spec,
+    get_available_models_from_config,
+    resolve_model_spec,
+)
 from core.tools import (
     BashTool,
     EditFileTool,
@@ -479,73 +484,62 @@ class Harness:
 
     def get_available_models(self) -> list[dict[str, Any]]:
         """Returns configured and available models for dynamic /model switching."""
-        from core.model import get_available_models_from_config
-
         return get_available_models_from_config(self.merged_config, self.provider_registry)
 
+    def active_model_name(self) -> str:
+        """Best-effort display name for the model currently in use."""
+        return getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+
     def resolve_model_spec(self, spec: str) -> tuple[bool, str, str]:
-        """Resolves a user-supplied model name to a configured alias.
+        """Resolves a user-supplied model name to a canonical spec.
 
         Accepts a configured alias from ``models``, the underlying model id of
         one, or a provider name (``openai`` / ``openai/gpt-4o``) present in the
         provider registry. Returns ``(ok, canonical_spec, error)``.
         """
-        clean_spec = spec.strip()
-        if not clean_spec:
-            return False, "", "Model specification cannot be empty."
+        return resolve_model_spec(spec, self.get_available_models(), self.provider_registry)
 
-        avail = self.get_available_models()
-        avail_names = {m["name"].lower(): m["name"] for m in avail}
-        avail_models = {m.get("model", "").lower(): m["name"] for m in avail if m.get("model")}
-        clean_lower = clean_spec.lower()
-        reg = self.provider_registry or {}
+    def _canonical_model_spec(
+        self, spec: str | dict[str, Any]
+    ) -> tuple[bool, str | dict[str, Any], str]:
+        """Turns a /model argument (name or 1-based index) into a buildable spec."""
+        if not spec:
+            return False, None, "Model specification cannot be empty."
+        if not isinstance(spec, (str, dict)):
+            return (
+                False,
+                None,
+                f"Expected model spec as str or dict, got {type(spec).__name__}",
+            )
 
-        if clean_lower in avail_names:
-            return True, avail_names[clean_lower], ""
-        if clean_lower in avail_models:
-            return True, avail_models[clean_lower], ""
-        if "/" in clean_spec and clean_spec.split("/", 1)[0].lower() in reg:
-            return True, clean_spec, ""
-        if clean_lower in reg:
-            return True, clean_spec, ""
+        if isinstance(spec, dict):
+            return True, spec, ""
 
-        valid_list = ", ".join(m["name"] for m in avail) or "none configured"
-        return False, "", f"Unknown model '{spec}'. Available models: {valid_list}"
+        clean = spec.strip()
+        if not clean:
+            return False, None, "Model specification cannot be empty."
+
+        available = self.get_available_models()
+        if clean.isdigit():
+            index = int(clean) - 1
+            if 0 <= index < len(available):
+                return True, available[index]["name"], ""
+            return (
+                False,
+                None,
+                f"Invalid model selection: index {spec} out of range (1-{len(available)})",
+            )
+
+        ok, canonical, error = self.resolve_model_spec(clean)
+        return (True, canonical, "") if ok else (False, None, error)
 
     def switch_model(self, spec: str | dict[str, Any]) -> tuple[bool, str, Model]:
         """Switches active model dynamically using config and provider registry."""
-        from core.model import build_model_from_spec
+        ok, target_spec, error = self._canonical_model_spec(spec)
+        if not ok or target_spec is None:
+            return False, error, self.model
 
         try:
-            if not spec:
-                return False, "Model specification cannot be empty.", self.model
-            if not isinstance(spec, (str, dict)):
-                return False, f"Expected model spec as str or dict, got {type(spec).__name__}", self.model
-
-            target_spec: str | dict[str, Any] = spec
-            avail = self.get_available_models()
-
-            if isinstance(spec, str):
-                clean_spec = spec.strip()
-                if not clean_spec:
-                    return False, "Model specification cannot be empty.", self.model
-
-                if clean_spec.isdigit():
-                    idx = int(clean_spec) - 1
-                    if 0 <= idx < len(avail):
-                        target_spec = avail[idx]["name"]
-                    else:
-                        return (
-                            False,
-                            f"Invalid model selection: index {spec} out of range (1-{len(avail)})",
-                            self.model,
-                        )
-                else:
-                    ok, canonical, error = self.resolve_model_spec(clean_spec)
-                    if not ok:
-                        return False, error, self.model
-                    target_spec = canonical
-
             new_model = build_model_from_spec(
                 spec=target_spec,
                 config=self.merged_config,
@@ -553,20 +547,17 @@ class Harness:
                 cache_ttl=self.cache_ttl,
                 reasoning_effort=self.reasoning_effort,
             )
-            self.model = new_model
-            if hasattr(self, "active_loop") and self.active_loop is not None:
-                self.active_loop.model = new_model
-
-            m_name = (
-                getattr(new_model, "model", "")
-                or getattr(new_model, "model_name", "")
-                or str(target_spec)
-            )
-            p_name = getattr(new_model, "provider", "") or ""
-            prov_str = f" [{p_name}]" if p_name else ""
-            return True, f"Switched model to {m_name}{prov_str}", new_model
         except Exception as exc:
             return False, f"Failed to switch model to '{spec}': {exc}", self.model
+
+        self.model = new_model
+        if self.active_loop is not None:
+            self.active_loop.model = new_model
+
+        provider = getattr(new_model, "provider", "") or ""
+        suffix = f" [{provider}]" if provider else ""
+        name = self.active_model_name() or str(target_spec)
+        return True, f"Switched model to {name}{suffix}", new_model
 
     def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Finds recent runs in runs_dir with workspace affinity."""
