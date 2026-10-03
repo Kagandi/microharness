@@ -982,7 +982,7 @@ class Harness:
     ) -> None:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
         from core.tracer import _format_action_summary, _pair_calls_with_results
-        from core.tui import CursesTUI, TUIState
+        from core.tui import CursesTUI, TUIState, compact_path, get_git_branch
 
         env, _, memory, tracer, loop, run_dir = self._setup_run(
             task_id=task_id,
@@ -993,15 +993,18 @@ class Harness:
         tracer.verbose = False
         tracer.compact = True
 
+        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+
         state = TUIState(title="microharness")
         state.provider_name = getattr(self.model, "provider", "") or ""
         state.model_name = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
         state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
         curr_reasoning = self.get_reasoning_effort()
         state.reasoning = curr_reasoning.upper() if curr_reasoning else ""
+        state.cwd = compact_path(str(env.workspace_dir))
+        state.git_branch = get_git_branch(env.workspace_dir)
+        state.set_custom_commands(custom_commands)
         state.update_status(memory.stats(), self.get_cache_stats())
-
-        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
 
         step_idx = 1
         max_steps_per_turn = 30

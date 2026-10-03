@@ -192,6 +192,150 @@ class TestTUI(unittest.TestCase):
             self.assertTrue(has_user)
             self.assertTrue(has_agent)
 
+    def test_compact_path_and_get_git_branch(self):
+        """Invariant: compact_path contracts home dir and get_git_branch detects HEAD ref."""
+        import tempfile
+        from pathlib import Path
+
+        from core.tui import compact_path, get_git_branch
+
+        home = Path.home()
+        self.assertEqual(compact_path(str(home)), "~")
+        self.assertEqual(compact_path(str(home / "test" / "dir")), "~/test/dir")
+        self.assertEqual(compact_path("/var/log"), "/var/log")
+        self.assertEqual(compact_path(""), "")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            p = Path(tmp_dir)
+            self.assertEqual(get_git_branch(p), "")
+
+            git_dir = p / ".git"
+            git_dir.mkdir()
+            head_file = git_dir / "HEAD"
+            head_file.write_text("ref: refs/heads/feature-tui\n", encoding="utf-8")
+            self.assertEqual(get_git_branch(p), "feature-tui")
+
+            head_file.write_text("a1b2c3d4e5f6\n", encoding="utf-8")
+            self.assertEqual(get_git_branch(p), "a1b2c3d")
+
+    def test_markdown_table_and_formatting(self):
+        """Invariant: parse_markdown_to_tui_lines renders tables with box drawing, code fences, and headings."""
+        from core.tui import parse_markdown_to_tui_lines
+
+        md_text = (
+            "# Agent Execution Report\n\n"
+            "Summary table below:\n\n"
+            "| Tool | Status | Duration |\n"
+            "| :--- | :--- | :--- |\n"
+            "| `bash` | passed | 0.2s |\n"
+            "| `read_file` | passed | 0.1s |\n\n"
+            "```python\n"
+            "def hello():\n"
+            "    return True\n"
+            "```\n\n"
+            "> Note: Workspace is clean\n"
+            "- Item 1\n"
+            "1. Step one\n"
+            "---\n"
+        )
+
+        lines = parse_markdown_to_tui_lines(md_text, max_width=80)
+        tags = [line.tag for line in lines]
+
+        # Invariant 1: Heading is uppercase and tagged
+        self.assertIn("AGENT EXECUTION REPORT", [entry.text for entry in lines if entry.tag == "heading"])
+
+        # Invariant 2: Table has border, header, and data rows
+        self.assertIn("table_border", tags)
+        self.assertIn("table_header", tags)
+        self.assertIn("table_row", tags)
+
+        table_header = next(entry.text for entry in lines if entry.tag == "table_header")
+        self.assertIn("Tool", table_header)
+        self.assertIn("Status", table_header)
+        self.assertIn("Duration", table_header)
+
+        table_rows = [entry.text for entry in lines if entry.tag == "table_row"]
+        self.assertEqual(len(table_rows), 2)
+        self.assertIn("bash", table_rows[0])
+        self.assertIn("read_file", table_rows[1])
+
+        # Invariant 3: Code fence has borders and code tag
+        self.assertIn("code_border", tags)
+        self.assertIn("code", tags)
+        code_lines = [entry.text for entry in lines if entry.tag == "code"]
+        self.assertTrue(any("def hello():" in cl for cl in code_lines))
+
+        # Invariant 4: Blockquote and bullets
+        self.assertIn("blockquote", tags)
+        self.assertTrue(any("• Item 1" in entry.text for entry in lines))
+        self.assertTrue(any("Step one" in entry.text for entry in lines))
+
+    def test_floating_command_menu_logic(self):
+        """Invariant: TUIState filters matching commands, handles navigation, and completes command."""
+        state = TUIState()
+        # Input not starting with / -> no matches
+        state.input_buffer = "hello"
+        self.assertEqual(state.get_matching_commands(), [])
+
+        # Input "/" -> all built-in commands
+        state.input_buffer = "/"
+        matches = state.get_matching_commands()
+        self.assertEqual(len(matches), 5)
+        self.assertEqual([m[0] for m in matches], ["/compact", "/status", "/new", "/help", "/exit"])
+
+        # Input "/c" -> matches /compact
+        state.input_buffer = "/c"
+        c_matches = state.get_matching_commands()
+        self.assertEqual(len(c_matches), 1)
+        self.assertEqual(c_matches[0][0], "/compact")
+
+        # Command completion
+        completed = state.complete_selected_command()
+        self.assertEqual(completed, "/compact")
+        self.assertEqual(state.input_buffer, "/compact")
+
+        # Custom workspace commands
+        state.set_custom_commands({"review": ("template", "prompt", "project")})
+        state.input_buffer = "/r"
+        r_matches = state.get_matching_commands()
+        self.assertEqual(len(r_matches), 1)
+        self.assertEqual(r_matches[0][0], "/review")
+
+        # Navigation wrap-around
+        state.input_buffer = "/"
+        all_matches = state.get_matching_commands()
+        state.selected_command_idx = 0
+        state.select_prev_command()
+        self.assertEqual(state.selected_command_idx, len(all_matches) - 1)
+        state.select_next_command()
+        self.assertEqual(state.selected_command_idx, 0)
+
+    def test_curses_draw_cockpit_and_floating_menu(self):
+        """Invariant: CursesTUI renders path cockpit row and floating commands menu when matching."""
+        state = TUIState(title="microharness")
+        state.cwd = "~/Projects/microharness"
+        state.git_branch = "feature-ui"
+        state.input_buffer = "/co"
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        # 1. Path & Git branch in cockpit
+        path_calls = [c for c in mock_stdscr.addstr.call_args_list if "~/Projects/microharness" in str(c)]
+        self.assertGreaterEqual(len(path_calls), 1)
+        self.assertIn("(feature-ui)", str(path_calls[0]))
+
+        # 2. Floating menu border and suggestion
+        menu_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Commands" in str(c)]
+        self.assertGreaterEqual(len(menu_border_calls), 1)
+
+        menu_item_calls = [c for c in mock_stdscr.addstr.call_args_list if "/compact" in str(c)]
+        self.assertGreaterEqual(len(menu_item_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

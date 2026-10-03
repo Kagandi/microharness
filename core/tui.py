@@ -1,16 +1,259 @@
 from __future__ import annotations
 
 import curses
+import re
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+DEFAULT_COMMANDS: list[tuple[str, str]] = [
+    ("/compact", "Free context tokens by compacting older turn observations"),
+    ("/status", "Show current token usage, cache rate, and context breakdown"),
+    ("/new", "Start fresh session while preserving workspace changes"),
+    ("/help", "List all available built-in and workspace custom commands"),
+    ("/exit", "Exit the interactive agent session"),
+]
+
+
+def compact_path(path_str: str) -> str:
+    """Compacts an absolute path with ~ if within the user's home directory."""
+    if not path_str:
+        return ""
+    try:
+        home = str(Path.home())
+        p_str = str(path_str)
+        if p_str == home or p_str == str(Path.home().resolve()):
+            return "~"
+        if p_str.startswith(home + "/"):
+            return "~" + p_str[len(home) :]
+        resolved_home = str(Path.home().resolve())
+        if p_str.startswith(resolved_home + "/"):
+            return "~" + p_str[len(resolved_home) :]
+        return p_str
+    except Exception:
+        return path_str
+
+
+def _clean_markdown_inline(text: str) -> str:
+    """Strips inline markdown formatting markers (`code`, **bold**, *italic*) while preserving identifiers."""
+    t = re.sub(r"`([^`]+)`", r"\1", text)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+    t = re.sub(r"\*([^*]+)\*", r"\1", t)
+    return t.strip()
+
+
+def get_git_branch(workspace: Path | str) -> str:
+    """Detects active git branch name from .git/HEAD using stdlib only."""
+    try:
+        ws_path = Path(workspace)
+        git_dir = ws_path / ".git"
+        if git_dir.is_file():
+            text = git_dir.read_text(encoding="utf-8").strip()
+            if text.startswith("gitdir:"):
+                target = text[7:].strip()
+                git_dir = (ws_path / target).resolve() if not Path(target).is_absolute() else Path(target)
+        if not git_dir.is_dir():
+            return ""
+        head_file = git_dir / "HEAD"
+        if head_file.is_file():
+            content = head_file.read_text(encoding="utf-8").strip()
+            if content.startswith("ref: refs/heads/"):
+                return content[len("ref: refs/heads/") :]
+            return content[:7]
+    except Exception:
+        pass
+    return ""
+
+
+def _is_table_separator(line: str) -> bool:
+    """Checks if a line is a markdown table separator like | --- | :---: |."""
+    stripped = line.strip()
+    if not (stripped.startswith("|") and stripped.endswith("|")):
+        return False
+    cells = [c.strip() for c in stripped[1:-1].split("|")]
+    return len(cells) > 0 and all(bool(re.match(r"^:?-+:?$", cell)) for cell in cells)
+
+
+def _parse_table_row(line: str) -> list[str]:
+    """Extracts cell texts from a pipe-delimited table row."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [c.strip() for c in stripped.split("|")]
+
+
+def render_markdown_table(headers: list[str], rows: list[list[str]], max_width: int = 80) -> list[TUILine]:
+    """Renders a parsed markdown table into boxed TUILines fitting within max_width."""
+    num_cols = len(headers)
+    if num_cols == 0:
+        return []
+
+    clean_headers = [_clean_markdown_inline(h) for h in headers]
+    padded_rows: list[list[str]] = []
+    for r in rows:
+        row = [_clean_markdown_inline(c) for c in r]
+        if len(row) < num_cols:
+            row.extend([""] * (num_cols - len(row)))
+        elif len(row) > num_cols:
+            row = row[:num_cols]
+        padded_rows.append(row)
+
+    col_widths = [len(h) for h in clean_headers]
+    for r in padded_rows:
+        for i in range(num_cols):
+            col_widths[i] = max(col_widths[i], len(r[i]))
+
+    col_widths = [max(3, w) for w in col_widths]
+    total_w = sum(col_widths) + 3 * num_cols + 1
+
+    if total_w > max_width and max_width >= (4 * num_cols + 1):
+        avail = max_width - (3 * num_cols + 1)
+        sum_content = sum(col_widths)
+        if sum_content > 0:
+            scale = avail / sum_content
+            col_widths = [max(3, int(w * scale)) for w in col_widths]
+            diff = avail - sum(col_widths)
+            if diff > 0:
+                col_widths[0] += diff
+
+    def fit(text: str, w: int) -> str:
+        if len(text) > w:
+            return (text[: max(0, w - 1)] + "…") if w > 1 else text[:w]
+        return text.ljust(w)
+
+    top_border = "┌" + "┬".join("─" * (w + 2) for w in col_widths) + "┐"
+    mid_border = "├" + "┼".join("─" * (w + 2) for w in col_widths) + "┤"
+    bot_border = "└" + "┴".join("─" * (w + 2) for w in col_widths) + "┘"
+
+    header_cells = " │ ".join(fit(clean_headers[i], col_widths[i]) for i in range(num_cols))
+    header_line = f"│ {header_cells} │"
+
+    tui_lines: list[TUILine] = [
+        TUILine(text=top_border, tag="table_border"),
+        TUILine(text=header_line, tag="table_header"),
+        TUILine(text=mid_border, tag="table_border"),
+    ]
+
+    for r in padded_rows:
+        row_cells = " │ ".join(fit(r[i], col_widths[i]) for i in range(num_cols))
+        tui_lines.append(TUILine(text=f"│ {row_cells} │", tag="table_row"))
+
+    tui_lines.append(TUILine(text=bot_border, tag="table_border"))
+    return tui_lines
+
+
+def parse_markdown_to_tui_lines(text: str, max_width: int = 80) -> list[TUILine]:
+    """Parses markdown text into styled TUILines with tables, code blocks, headings, lists."""
+    raw_lines = text.splitlines()
+    result: list[TUILine] = []
+    i = 0
+    n = len(raw_lines)
+
+    in_code_block = False
+
+    while i < n:
+        line = raw_lines[i]
+        stripped = line.strip()
+
+        # 1. Code Fence (```)
+        if stripped.startswith("```"):
+            if not in_code_block:
+                in_code_block = True
+                code_lang = stripped[3:].strip()
+                label = f" {code_lang} " if code_lang else " "
+                border_w = max(10, min(max_width - 2, 76))
+                dash_len = max(0, border_w - 2 - len(label))
+                top = "┌─" + label + ("─" * dash_len) + "┐"
+                result.append(TUILine(text=top[:border_w], tag="code_border"))
+            else:
+                in_code_block = False
+                border_w = max(10, min(max_width - 2, 76))
+                bot = "└" + ("─" * (border_w - 2)) + "┘"
+                result.append(TUILine(text=bot[:border_w], tag="code_border"))
+            i += 1
+            continue
+
+        if in_code_block:
+            result.append(TUILine(text=f"│ {line}", tag="code"))
+            i += 1
+            continue
+
+        # 2. Markdown Table Detection
+        if (
+            stripped.startswith("|")
+            and stripped.endswith("|")
+            and (i + 1 < n)
+            and _is_table_separator(raw_lines[i + 1])
+        ):
+            headers = _parse_table_row(line)
+            i += 2
+            data_rows: list[list[str]] = []
+            while i < n and raw_lines[i].strip().startswith("|") and raw_lines[i].strip().endswith("|"):
+                data_rows.append(_parse_table_row(raw_lines[i]))
+                i += 1
+            table_lines = render_markdown_table(headers, data_rows, max_width=max_width)
+            result.extend(table_lines)
+            continue
+
+        # 3. Headings
+        if stripped.startswith("#"):
+            match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if match:
+                level = len(match.group(1))
+                h_text = match.group(2).strip()
+                clean_h = _clean_markdown_inline(h_text)
+                if level == 1:
+                    result.append(TUILine(text=clean_h.upper(), tag="heading"))
+                else:
+                    result.append(TUILine(text=clean_h, tag="heading"))
+                i += 1
+                continue
+
+        # 4. Horizontal Rule
+        if stripped in ("---", "***", "___") or bool(re.match(r"^[-*_]{3,}$", stripped)):
+            hr_w = max(10, min(max_width - 2, 76))
+            result.append(TUILine(text="─" * hr_w, tag="dim"))
+            i += 1
+            continue
+
+        # 5. Blockquote
+        if stripped.startswith(">"):
+            quote_text = stripped[1:].strip()
+            result.append(TUILine(text=f"  │ {quote_text}", tag="blockquote"))
+            i += 1
+            continue
+
+        # 6. Unordered List (- item or * item)
+        if re.match(r"^[-*+]\s+", stripped):
+            item_text = re.sub(r"^[-*+]\s+", "", stripped)
+            result.append(TUILine(text=f"  • {item_text}", tag="agent"))
+            i += 1
+            continue
+
+        # 7. Ordered List (1. item)
+        list_match = re.match(r"^(\d+)\.\s+(.*)$", stripped)
+        if list_match:
+            num = list_match.group(1)
+            item_text = list_match.group(2)
+            result.append(TUILine(text=f"  {num}. {item_text}", tag="agent"))
+            i += 1
+            continue
+
+        # 8. Standard Prose
+        result.append(TUILine(text=line, tag="agent"))
+        i += 1
+
+    return result
 
 
 @dataclass
 class TUILine:
     text: str
-    tag: str  # "user", "thought", "action", "error", "agent", "system", "dim"
+    tag: str  # "user", "thought", "action", "error", "agent", "system", "dim", "heading", "table_border", "table_header", "table_row", "code_border", "code", "blockquote"
 
 
 class TUIState:
@@ -35,6 +278,53 @@ class TUIState:
         self.provider_name: str = ""
         self.cache_ttl: str = ""
         self.reasoning: str = ""
+        self.cwd: str = ""
+        self.git_branch: str = ""
+        self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
+        self.selected_command_idx: int = 0
+
+    def set_custom_commands(self, custom_commands: dict[str, Any]) -> None:
+        """Loads custom workspace commands into the auto-completion catalog."""
+        self.command_catalog = list(DEFAULT_COMMANDS)
+        for cmd_name, cmd_info in sorted(custom_commands.items()):
+            desc = f"Custom command: /{cmd_name}"
+            if isinstance(cmd_info, tuple) and len(cmd_info) >= 3:
+                scope = cmd_info[2]
+                desc = f"Custom command [{scope}]"
+            self.command_catalog.append((f"/{cmd_name}", desc))
+
+    def get_matching_commands(self) -> list[tuple[str, str]]:
+        """Filters command catalog matching current slash-command prefix in input buffer."""
+        buf = self.input_buffer.strip().lower()
+        if not buf.startswith("/"):
+            return []
+        if " " in buf:
+            return []
+        return [
+            (cmd, desc)
+            for cmd, desc in self.command_catalog
+            if cmd.lower().startswith(buf)
+        ]
+
+    def select_next_command(self) -> None:
+        matches = self.get_matching_commands()
+        if matches:
+            self.selected_command_idx = (self.selected_command_idx + 1) % len(matches)
+
+    def select_prev_command(self) -> None:
+        matches = self.get_matching_commands()
+        if matches:
+            self.selected_command_idx = (self.selected_command_idx - 1) % len(matches)
+
+    def complete_selected_command(self) -> str | None:
+        matches = self.get_matching_commands()
+        if not matches:
+            return None
+        idx = max(0, min(self.selected_command_idx, len(matches) - 1))
+        chosen_cmd, _ = matches[idx]
+        self.input_buffer = chosen_cmd
+        self.cursor_pos = len(self.input_buffer)
+        return chosen_cmd
 
     def add_user(self, text: str) -> None:
         if self.lines and self.lines[-1].text != "":
@@ -57,10 +347,10 @@ class TUIState:
         self.lines.append(TUILine(text=f"error: {text}", tag="error"))
         self.scroll_offset = 0
 
-    def add_agent(self, text: str) -> None:
+    def add_agent(self, text: str, max_width: int = 80) -> None:
         self.lines.append(TUILine(text="", tag="dim"))
-        for line in text.splitlines():
-            self.lines.append(TUILine(text=line, tag="agent"))
+        parsed = parse_markdown_to_tui_lines(text, max_width=max_width)
+        self.lines.extend(parsed)
         self.lines.append(TUILine(text="", tag="dim"))
         self.scroll_offset = 0
 
@@ -91,6 +381,9 @@ class TUIState:
         for line_item in self.lines:
             if not line_item.text:
                 wrapped.append(("", line_item.tag))
+            elif line_item.tag in ("table_border", "table_header", "table_row", "code_border", "code"):
+                # Preserve formatted table and code lines without re-wrapping
+                wrapped.append((line_item.text[:eff_width], line_item.tag))
             else:
                 indent = "  " if line_item.tag == "user" and line_item.text.startswith("> ") else ""
                 chunks = textwrap.wrap(
@@ -153,9 +446,9 @@ class CursesTUI:
             if curses.has_colors():
                 curses.start_color()
                 curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_CYAN, -1)     # User
-                curses.init_pair(2, curses.COLOR_GREEN, -1)    # Action / Success
-                curses.init_pair(3, curses.COLOR_YELLOW, -1)   # Tool / Warning
+                curses.init_pair(1, curses.COLOR_CYAN, -1)     # User / Heading
+                curses.init_pair(2, curses.COLOR_GREEN, -1)    # Action / Code
+                curses.init_pair(3, curses.COLOR_YELLOW, -1)   # Tool / Thought
                 curses.init_pair(4, curses.COLOR_RED, -1)      # Error
                 curses.init_pair(5, curses.COLOR_BLUE, -1)     # Header / Brand
                 curses.init_pair(6, curses.COLOR_WHITE, -1)    # Agent text
@@ -188,16 +481,29 @@ class CursesTUI:
         except curses.error:
             pass
 
-        # 3. Main Transcript Area (Rows 2 to H - 4)
-        transcript_height = max(1, h - 5)
+        # 3. Main Transcript Area (Rows 2 to H - 5)
+        sep_row = h - 4
+        path_row = h - 3
+        telemetry_row = h - 2
+        input_row = h - 1
+
+        transcript_height = max(1, h - 6)
         visible_lines = self.state.get_visible_slice(height=transcript_height, width=w)
         for i, (text, tag) in enumerate(visible_lines):
             row = 2 + i
-            if row >= h - 3:
+            if row >= sep_row:
                 break
             attr = curses.A_NORMAL
-            if tag == "user":
+            if tag in ("user", "heading"):
                 attr = curses.color_pair(1) | curses.A_BOLD if self.has_colors else curses.A_BOLD
+            elif tag == "table_header":
+                attr = curses.A_BOLD
+            elif tag == "table_row":
+                attr = curses.A_NORMAL
+            elif tag in ("table_border", "code_border", "blockquote", "dim", "system"):
+                attr = curses.A_DIM
+            elif tag == "code":
+                attr = curses.color_pair(2) if self.has_colors else curses.A_NORMAL
             elif tag == "thought":
                 attr = curses.color_pair(3) | curses.A_DIM if self.has_colors else curses.A_DIM
             elif tag == "action":
@@ -206,19 +512,19 @@ class CursesTUI:
                 attr = curses.color_pair(4) | curses.A_BOLD if self.has_colors else curses.A_BOLD
             elif tag == "agent":
                 attr = curses.color_pair(6) if self.has_colors else curses.A_NORMAL
-            elif tag in ("dim", "system"):
-                attr = curses.A_DIM
 
             try:
                 stdscr.addstr(row, 1, text[: w - 2], attr)
             except curses.error:
                 pass
 
-        # 4. Status Bar (Row H - 3)
-        status_row = h - 3
-        parts: list[str] = []
+        # 4. Status Cockpit: Row H - 4 (Sep), Row H - 3 (Path), Row H - 2 (Telemetry)
+        path_label = self.state.cwd or ""
+        if self.state.git_branch:
+            path_label = f"{path_label} ({self.state.git_branch})" if path_label else f"({self.state.git_branch})"
+        path_text = f" {path_label} " if path_label else ""
 
-        # Model name & provider
+        parts: list[str] = []
         model_label = ""
         if self.state.provider_name and self.state.model_name:
             if self.state.model_name.lower().startswith(self.state.provider_name.lower() + "/"):
@@ -233,13 +539,11 @@ class CursesTUI:
         if model_label:
             parts.append(model_label)
 
-        # Cache & reasoning
         if self.state.cache_ttl:
             parts.append(f"cache: {self.state.cache_ttl}")
         if self.state.reasoning:
             parts.append(f"reasoning: {self.state.reasoning}")
 
-        # Context tokens & metrics
         parts.append(
             f"context: {self.state.status_tokens:,} / {self.state.max_tokens:,} tokens ({self.state.usage_pct:.1f}%)"
         )
@@ -253,13 +557,47 @@ class CursesTUI:
         status_text = " " + " · ".join(parts) + " "
 
         try:
-            stdscr.addstr(status_row, 0, "─" * (w - 1), curses.A_DIM)
-            stdscr.addstr(status_row + 1, 0, status_text[: w - 1], curses.A_REVERSE)
+            stdscr.addstr(sep_row, 0, "─" * (w - 1), curses.A_DIM)
+            if path_text:
+                stdscr.addstr(path_row, 0, path_text[: w - 1], curses.A_DIM)
+            stdscr.addstr(telemetry_row, 0, status_text[: w - 1], curses.A_REVERSE)
         except curses.error:
             pass
 
-        # 5. Bottom Anchored Input Box (Row H - 1)
-        input_row = h - 1
+        # 5. Floating Slash-Command Menu (drawn above input row if matching)
+        matches = self.state.get_matching_commands()
+        if matches:
+            idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
+            visible_matches = matches[:6]
+            box_h = len(visible_matches) + 2
+            box_w = min(w - 4, 76)
+            start_y = max(1, input_row - box_h)
+            start_x = 2
+
+            title_part = " Commands "
+            border_top = "┌─" + title_part + "─" * max(0, box_w - 4 - len(title_part)) + "┐"
+            try:
+                stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
+                for row_i, (cmd, desc) in enumerate(visible_matches):
+                    y = start_y + 1 + row_i
+                    is_selected = (row_i == idx)
+                    prefix = " > " if is_selected else "   "
+                    line_content = f"{prefix}{cmd:<10} {desc}"
+                    line_content = line_content[: box_w - 2].ljust(box_w - 2)
+                    attr = (
+                        (curses.color_pair(1) | curses.A_BOLD)
+                        if (is_selected and self.has_colors)
+                        else (curses.A_BOLD if is_selected else curses.A_NORMAL)
+                    )
+                    stdscr.addstr(y, start_x, "│", curses.A_DIM)
+                    stdscr.addstr(y, start_x + 1, line_content, attr)
+                    stdscr.addstr(y, start_x + box_w - 1, "│", curses.A_DIM)
+                border_bot = "└" + "─" * (box_w - 2) + "┘"
+                stdscr.addstr(start_y + box_h - 1, start_x, border_bot[:box_w], curses.A_DIM)
+            except curses.error:
+                pass
+
+        # 6. Bottom Anchored Input Box (Row H - 1)
         prompt_label = "> "
         avail_input_w = max(5, w - len(prompt_label) - 2)
         display_input = self.state.input_buffer[-avail_input_w:]
@@ -267,7 +605,6 @@ class CursesTUI:
         try:
             stdscr.addstr(input_row, 0, prompt_label, curses.A_BOLD)
             stdscr.addstr(input_row, len(prompt_label), display_input)
-            # Position hardware cursor
             cursor_col = min(w - 1, len(prompt_label) + len(display_input))
             stdscr.move(input_row, cursor_col)
         except curses.error:
@@ -295,7 +632,11 @@ class CursesTUI:
                 except curses.error:
                     continue
 
+                matches = self.state.get_matching_commands()
+
                 if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
+                    if matches and not self.state.input_buffer.endswith(" "):
+                        self.state.complete_selected_command()
                     user_text = self.state.clear_input()
                     if not user_text:
                         continue
@@ -305,18 +646,48 @@ class CursesTUI:
                     self.draw(stdscr)
                     continue
 
-                if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
-                    self.state.handle_backspace()
-                    self.draw(stdscr)
-                    continue
+                if ch in (ord("\t"), 9):
+                    if matches:
+                        self.state.select_next_command()
+                        self.draw(stdscr)
+                        continue
 
-                if ch in (curses.KEY_UP, curses.KEY_PPAGE):
+                if ch in (curses.KEY_UP, curses.KEY_BTAB):
+                    if matches:
+                        self.state.select_prev_command()
+                        self.draw(stdscr)
+                        continue
                     self.state.scroll_up(5)
                     self.draw(stdscr)
                     continue
 
-                if ch in (curses.KEY_DOWN, curses.KEY_NPAGE):
+                if ch in (curses.KEY_DOWN,):
+                    if matches:
+                        self.state.select_next_command()
+                        self.draw(stdscr)
+                        continue
                     self.state.scroll_down(5)
+                    self.draw(stdscr)
+                    continue
+
+                if ch in (curses.KEY_PPAGE,):
+                    self.state.scroll_up(5)
+                    self.draw(stdscr)
+                    continue
+
+                if ch in (curses.KEY_NPAGE,):
+                    self.state.scroll_down(5)
+                    self.draw(stdscr)
+                    continue
+
+                if ch in (27,):  # Escape
+                    if matches:
+                        self.state.clear_input()
+                        self.draw(stdscr)
+                        continue
+
+                if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
+                    self.state.handle_backspace()
                     self.draw(stdscr)
                     continue
 
