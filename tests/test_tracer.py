@@ -206,6 +206,66 @@ class TestTracer(unittest.TestCase):
         self.assertIn("- **Tokens**: 1,200 in (600 cached - 50.0% hit rate), 80 out", md_text)
         self.assertIn("### Step 1 (1.25s · 1,200 in [600 cached - 50.0%], 80 out)", md_text)
 
+    def test_tracer_compact_mode_intermediate_and_final_steps(self):
+        """Invariant: In compact mode, intermediate steps render as 1-liners and final step prints full response."""
+        import io
+        import sys
+
+        from core.types import StepTrace
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="test_tracer_compact_"))
+        task = Task(id="compact_task", instruction="Test compact mode")
+        tracer = Tracer(task=task, output_dir=temp_dir, verbose=True, compact=True)
+
+        # Step 1: Intermediate step with tool call and output
+        step1 = StepTrace(
+            step_index=1,
+            prompt_messages=[],
+            model_response={
+                "content": "I will inspect the workspace files now.\nExtra details not needed.",
+                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "git status"}}],
+            },
+            tool_results=[{"call_id": "c1", "output": "On branch main\nnothing to commit", "exit_code": 0}],
+            duration_s=0.3,
+            usage={"prompt_tokens": 500, "completion_tokens": 40},
+        )
+
+        # Step 2: Final response with no tool calls
+        step2 = StepTrace(
+            step_index=2,
+            prompt_messages=[],
+            model_response={
+                "content": "All changes are committed and the workspace is clean.",
+                "tool_calls": [],
+            },
+            tool_results=[],
+            duration_s=0.8,
+            usage={"prompt_tokens": 800, "completion_tokens": 60},
+        )
+
+        captured_stdout = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = captured_stdout
+            tracer.record_step(step1)
+            tracer.record_step(step2)
+        finally:
+            sys.stdout = orig_stdout
+
+        output = captured_stdout.getvalue()
+
+        # Invariant 1: Step 1 collapsed into 1-line thinking and 1-line action
+        self.assertIn("● Thinking: I will inspect the workspace files now.", output)
+        self.assertIn("$ git status", output)
+        self.assertIn("(0.3s)", output)
+
+        # Invariant 2: Step 1 does NOT dump multi-line divider or raw tool stdout
+        self.assertNotIn("─── Step 1", output)
+        self.assertNotIn("nothing to commit", output)
+
+        # Invariant 3: Step 2 prints full final message
+        self.assertIn("All changes are committed and the workspace is clean.", output)
+
 
 if __name__ == "__main__":
     unittest.main()

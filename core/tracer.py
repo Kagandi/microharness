@@ -144,11 +144,18 @@ def _pair_calls_with_results(
 class Tracer:
     """Collects telemetry during the agent run and exports structured traces."""
 
-    def __init__(self, task: Task, output_dir: Path, verbose: bool = True):
+    def __init__(
+        self,
+        task: Task,
+        output_dir: Path,
+        verbose: bool = True,
+        compact: bool = False,
+    ):
         self.task = task
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
+        self.compact = compact
         self.steps: list[StepTrace] = []
         self.eval_result: EvalResult | None = None
         self.finish_reason: str = "running"
@@ -165,6 +172,40 @@ class Tracer:
         if not self.verbose:
             return
 
+        model_text = step.model_response.get("content") or ""
+        tool_calls = step.model_response.get("tool_calls") or []
+
+        if self.compact:
+            # Modern compact UX: collapse intermediate step details into clean 1-liners
+            if tool_calls:
+                # 1. If model emitted intermediate reasoning/thought before calling tools, show 1 dimmed line
+                if model_text.strip():
+                    first_line = model_text.strip().splitlines()[0]
+                    preview = (first_line[:90] + "...") if len(first_line) > 90 else first_line
+                    print(_dim(f"● Thinking: {preview}"))
+
+                # 2. For each tool call, show a single clean action line
+                for tc, tr in _pair_calls_with_results(tool_calls, step.tool_results):
+                    name = tc.get("name", "") if tc else ""
+                    args = tc.get("arguments", {}) if tc else {}
+                    action_summary = _format_action_summary(name, args, color=True)
+                    exit_code = tr.get("exit_code", 0) if tr else 0
+                    if exit_code == 0:
+                        print(f"{action_summary} " + _dim(f"({step.duration_s:.1f}s)"))
+                    else:
+                        out_lines = tr.get("output", "").strip().splitlines() if tr else []
+                        err_snip = out_lines[0] if out_lines else "Failed"
+                        err_snip = (err_snip[:70] + "...") if len(err_snip) > 70 else err_snip
+                        print(f"{action_summary} " + _red(f"❌ (exit {exit_code}: {err_snip})"))
+
+                if step.compaction_applied:
+                    print(_dim("🧹 [Context compacted to conserve budget]"))
+            else:
+                # Final response (no tool calls): print full response text cleanly
+                if model_text.strip():
+                    print(f"\n{model_text.strip()}\n")
+            return
+
         token_str = ""
         if step.usage:
             p_tok = int(step.usage.get("prompt_tokens") or 0)
@@ -179,9 +220,6 @@ class Tracer:
 
         divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s{token_str} " + "─" * 25)
         print(f"\n{divider}")
-
-        model_text = step.model_response.get("content")
-        tool_calls = step.model_response.get("tool_calls") or []
 
         if model_text:
             print(f"{model_text.strip()}\n")

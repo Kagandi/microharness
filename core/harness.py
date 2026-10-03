@@ -32,7 +32,7 @@ from core.tools import (
     WriteFileTool,
     discover_tool_plugins,
 )
-from core.tracer import Tracer
+from core.tracer import Tracer, _dim
 from core.types import EvalResult, RunResult, Task
 
 
@@ -733,8 +733,7 @@ class Harness:
         s = memory.stats()
         print("\n📊 Context Breakdown:")
         print(
-            f"  • Usage: {s['total_chars']:,} chars (~{s['estimated_tokens']:,} tokens) / "
-            f"{s['max_context_chars']:,} chars ({s['usage_pct']}%)"
+            f"  • Usage: {s['estimated_tokens']:,} / {s['max_estimated_tokens']:,} tokens ({s['usage_pct']}%)"
         )
         print(
             f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
@@ -850,8 +849,11 @@ class Harness:
             did_compact = memory.compact_if_needed(force=True)
             new_chars = memory.total_chars()
             if did_compact:
+                old_tokens = old_chars // 4
+                new_tokens = new_chars // 4
+                freed_tokens = old_tokens - new_tokens
                 print(
-                    f"\n🧹 Compaction applied: freed {old_chars - new_chars} characters ({old_chars} -> {new_chars} chars).\n"
+                    f"\n🧹 Compaction applied: freed ~{freed_tokens:,} tokens (~{old_tokens:,} -> ~{new_tokens:,} tokens).\n"
                 )
             else:
                 print("\nℹ️ No older observations eligible for compaction at this time.\n")
@@ -891,6 +893,7 @@ class Harness:
         )
 
         custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+        tracer.compact = True
 
         print("\n🚀 Interactive Session Started")
         print(f"📁 Project Workspace: {env.workspace_dir}")
@@ -934,11 +937,13 @@ class Harness:
                         )
                     has_pending_turn = False
 
-                # Render minimal context usage footer
+                # Render minimal context usage footer in pure tokens
                 stats = memory.stats()
                 print(
-                    f"─── 📊 Context: {stats['total_chars']:,} chars (~{stats['estimated_tokens']:,} tokens) / "
-                    f"{stats['max_context_chars']:,} ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+                    _dim(
+                        f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} tokens "
+                        f"({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+                    )
                 )
 
                 try:
