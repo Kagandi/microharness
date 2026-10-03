@@ -1172,7 +1172,7 @@ class CursesTUI:
             if cmd_matches:
                 if len(cmd_matches) == 1:
                     completed = self.state.complete_selected_command()
-                    if completed in ("/model", "/resume", "/skill", "/cache"):
+                    if completed in ("/model", "/resume", "/skill"):
                         self.state.input_buffer = f"{completed} "
                         self.state.cursor_pos = len(self.state.input_buffer)
                 else:
@@ -1203,7 +1203,7 @@ class CursesTUI:
                 return True
             if cmd_matches:
                 completed = self.state.complete_selected_command()
-                if completed in ("/model", "/resume", "/skill", "/cache"):
+                if completed in ("/model", "/resume", "/skill"):
                     self.state.input_buffer = f"{completed} "
                     self.state.cursor_pos = len(self.state.input_buffer)
                 return True

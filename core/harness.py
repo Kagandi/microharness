@@ -482,18 +482,52 @@ class Harness:
         from core.model import build_model_from_spec
 
         try:
-            target_spec = spec
-            if isinstance(spec, str) and spec.strip().isdigit():
-                idx = int(spec.strip()) - 1
-                avail = self.get_available_models()
-                if 0 <= idx < len(avail):
-                    target_spec = avail[idx]["name"]
+            if not spec:
+                return False, "Model specification cannot be empty.", self.model
+            if not isinstance(spec, (str, dict)):
+                return False, f"Expected model spec as str or dict, got {type(spec).__name__}", self.model
+
+            target_spec: str | dict[str, Any] = spec
+            avail = self.get_available_models()
+
+            if isinstance(spec, str):
+                clean_spec = spec.strip()
+                if not clean_spec:
+                    return False, "Model specification cannot be empty.", self.model
+
+                if clean_spec.isdigit():
+                    idx = int(clean_spec) - 1
+                    if 0 <= idx < len(avail):
+                        target_spec = avail[idx]["name"]
+                    else:
+                        return (
+                            False,
+                            f"Invalid model selection: index {spec} out of range (1-{len(avail)})",
+                            self.model,
+                        )
                 else:
-                    return (
-                        False,
-                        f"Invalid model selection: index {spec} out of range (1-{len(avail)})",
-                        self.model,
-                    )
+                    avail_names = {m["name"].lower(): m["name"] for m in avail}
+                    avail_models = {
+                        m.get("model", "").lower(): m["name"] for m in avail if m.get("model")
+                    }
+                    clean_lower = clean_spec.lower()
+                    reg = self.provider_registry or {}
+
+                    if clean_lower in avail_names:
+                        target_spec = avail_names[clean_lower]
+                    elif clean_lower in avail_models:
+                        target_spec = avail_models[clean_lower]
+                    elif "/" in clean_spec and clean_spec.split("/", 1)[0].lower() in reg:
+                        target_spec = clean_spec
+                    elif clean_lower in reg:
+                        target_spec = clean_spec
+                    else:
+                        valid_list = ", ".join(m["name"] for m in avail) or "none configured"
+                        return (
+                            False,
+                            f"Unknown model '{spec}'. Available models: {valid_list}",
+                            self.model,
+                        )
 
             new_model = build_model_from_spec(
                 spec=target_spec,
@@ -532,7 +566,9 @@ class Harness:
     ) -> tuple[list[Message], dict[str, Any]]:
         """Loads previous session messages and metadata."""
         from core.tracer import load_session_messages
-        from core.types import Message
+
+        if session_id_or_path is True:
+            session_id_or_path = None
 
         target_dir: Path | None = None
         if session_id_or_path:
@@ -1070,6 +1106,8 @@ class Harness:
         custom_commands: dict[str, tuple[str, str, str]],
         skills: dict[str, tuple[str, str, str, str]] | None = None,
         workspace_dir: Path | None = None,
+        tracer: Tracer | None = None,
+        step_holder: list[int] | None = None,
     ) -> str:
         """Processes an interactive user input line.
 
@@ -1101,7 +1139,7 @@ class Harness:
             return "skip"
 
         if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
-            ("/model ", "/models ", "model ", "models ")
+            ("/model ", "/models ")
         ):
             arg = ""
             if " " in user_input.strip():
@@ -1135,7 +1173,9 @@ class Harness:
                 print(f"\n❌ {msg}\n")
             return "skip"
 
-        if cmd in ("/resume", "resume") or cmd.startswith(("/resume ", "resume ")):
+        if cmd in ("/resume", "/resumes", "resume", "resumes") or cmd.startswith(
+            ("/resume ", "/resumes ")
+        ):
             arg = ""
             if " " in user_input.strip():
                 arg = user_input.strip().split(" ", 1)[1].strip()
@@ -1158,6 +1198,10 @@ class Harness:
                 return "skip"
 
             memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+            if tracer is not None:
+                tracer.steps.clear()
+            if step_holder is not None:
+                step_holder[0] = meta.get("total_steps", 0) + 1
             print(f"\n🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded).\n")
             return "skip"
 
@@ -1183,7 +1227,7 @@ class Harness:
 
         if (
             cmd in ("/skill", "/skills", "skill", "skills")
-            or cmd.startswith(("/skill ", "/skills ", "skill ", "skills "))
+            or cmd.startswith(("/skill ", "/skills "))
         ):
             action, msg, is_error, eff_prompt = _resolve_skill_command(user_input, skills or {})
             if is_error:
@@ -1286,10 +1330,18 @@ class Harness:
         has_pending_turn = False
         max_steps_per_turn = 30
 
+        step_idx_holder = [step_idx]
+
         if initial_instruction and initial_instruction.strip():
             action = self._dispatch_interactive_input(
-                initial_instruction.strip(), memory, custom_commands, skills
+                initial_instruction.strip(),
+                memory,
+                custom_commands,
+                skills,
+                tracer=tracer,
+                step_holder=step_idx_holder,
             )
+            step_idx = step_idx_holder[0]
             if action == "turn":
                 has_pending_turn = True
             elif action == "exit":
@@ -1306,6 +1358,7 @@ class Harness:
                         start_step=step_idx,
                         max_steps=max_steps_per_turn,
                     )
+                    step_idx_holder[0] = step_idx
                     if not is_finished and reason == "max_steps_exceeded":
                         print(
                             f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
@@ -1330,7 +1383,15 @@ class Harness:
                 if not user_input:
                     continue
 
-                action = self._dispatch_interactive_input(user_input, memory, custom_commands, skills)
+                action = self._dispatch_interactive_input(
+                    user_input,
+                    memory,
+                    custom_commands,
+                    skills,
+                    tracer=tracer,
+                    step_holder=step_idx_holder,
+                )
+                step_idx = step_idx_holder[0]
                 if action == "exit":
                     break
                 elif action == "turn":
@@ -1438,7 +1499,7 @@ class Harness:
                 return
 
             if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
-                ("/model ", "/models ", "model ", "models ")
+                ("/model ", "/models ")
             ):
                 arg = ""
                 if " " in user_text.strip():
@@ -1478,7 +1539,9 @@ class Harness:
                     state.add_error(f"Failed to switch model: {msg}")
                 return
 
-            if cmd in ("/resume", "resume") or cmd.startswith(("/resume ", "resume ")):
+            if cmd in ("/resume", "/resumes", "resume", "resumes") or cmd.startswith(
+                ("/resume ", "/resumes ")
+            ):
                 arg = ""
                 if " " in user_text.strip():
                     arg = user_text.strip().split(" ", 1)[1].strip()
@@ -1502,6 +1565,7 @@ class Harness:
 
                 memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
                 step_idx = meta.get("total_steps", 0) + 1
+                tracer.steps.clear()
                 state.lines.clear()
                 for m in messages:
                     if m.role == "user" and m.content:
@@ -1549,7 +1613,7 @@ class Harness:
 
             if (
                 cmd in ("/skill", "/skills", "skill", "skills")
-                or cmd.startswith(("/skill ", "/skills ", "skill ", "skills "))
+                or cmd.startswith(("/skill ", "/skills "))
             ):
                 action, msg, is_error, eff_prompt = _resolve_skill_command(user_text, skills)
                 if is_error:

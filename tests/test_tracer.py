@@ -587,6 +587,59 @@ class TestTracer(unittest.TestCase):
             self.assertEqual(len(res_limited), 2)
             self.assertEqual([r["run_id"] for r in res_limited], ["run_target", "run_new_other"])
 
+    def test_tracer_serialization_resilience(self):
+        """Invariant: Tracer serializes non-primitive types without dropping steps or index holes."""
+        from core.types import StepTrace
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            task = Task(id="test_task", instruction="Test resilience")
+            tracer = Tracer(task=task, output_dir=out_dir, verbose=False)
+
+            # Step 1: Contains Path, set, and custom object
+            class CustomObj:
+                def __str__(self):
+                    return "CustomObjRepr"
+
+            step1 = StepTrace(
+                step_index=1,
+                duration_s=0.5,
+                prompt_messages=[{"role": "user", "content": "hello"}],
+                model_response={"content": "response with object", "obj": CustomObj()},
+                tool_results=[{"call_id": "c1", "output": Path("/tmp/some_file"), "tags": {"a", "b"}}],
+            )
+            tracer.record_step(step1)
+
+            # Step 2: Normal step
+            step2 = StepTrace(
+                step_index=2,
+                duration_s=0.3,
+                prompt_messages=[{"role": "user", "content": "next"}],
+                model_response={"content": "done"},
+                tool_results=[],
+            )
+            tracer.record_step(step2)
+
+            # Step 3: Malformed non-string dict key (e.g. tuple key) which causes json.dumps to raise TypeError
+            step3 = StepTrace(
+                step_index=3,
+                duration_s=0.2,
+                prompt_messages=[{"role": "user", "content": "error step"}],
+                model_response={(1, 2): "tuple key raises TypeError"},  # type: ignore
+                tool_results=[],
+            )
+            tracer.record_step(step3)
+
+            # Verify trajectory.jsonl has exactly 3 lines with consecutive indices [1, 2, 3] (no index hole!)
+            traj_lines = [
+                json.loads(line)
+                for line in tracer.jsonl_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(traj_lines), 3)
+            self.assertEqual([line["step_index"] for line in traj_lines], [1, 2, 3])
+            self.assertTrue(traj_lines[2].get("serialization_error"))
+
 
 if __name__ == "__main__":
     unittest.main()

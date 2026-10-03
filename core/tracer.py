@@ -195,10 +195,30 @@ class Tracer:
                 "tool_results": step.tool_results,
             }
             with self.jsonl_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, default=str) + "\n")
                 f.flush()
         except Exception:
-            pass
+            try:
+                # Fallback: preserve step_index so crash recovery never has index holes
+                fallback = {
+                    "step_index": step.step_index,
+                    "duration_s": getattr(step, "duration_s", 0.0),
+                    "compaction_applied": getattr(step, "compaction_applied", False),
+                    "usage": {},
+                    "prompt_messages": [],
+                    "model_response": {
+                        "content": str(step.model_response.get("content", ""))
+                        if isinstance(getattr(step, "model_response", None), dict)
+                        else ""
+                    },
+                    "tool_results": [],
+                    "serialization_error": True,
+                }
+                with self.jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(fallback, default=str) + "\n")
+                    f.flush()
+            except Exception:
+                pass
 
     def record_step(self, step: StepTrace) -> None:
         self.steps.append(step)
@@ -382,7 +402,7 @@ class Tracer:
                 for s in self.steps
             ],
         }
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
     def _export_markdown(self, path: Path) -> None:
         lines = [
@@ -461,17 +481,18 @@ class Tracer:
                         lines.extend(
                             [
                                 f"**Action**: `{name}`",
-                                f"```json\n{json.dumps(args, indent=2)}\n```",
+                                f"```json\n{json.dumps(args, indent=2, default=str)}\n```",
                             ]
                         )
 
                 if tr:
                     trunc = " (Truncated)" if tr.get("was_truncated") else ""
                     exit_code = tr.get("exit_code", 0)
+                    out_str = str(tr.get("output", "") or "").strip()
                     lines.extend(
                         [
                             f"**Output** (exit={exit_code}){trunc}:",
-                            f"```\n{tr.get('output', '').strip()}\n```",
+                            f"```\n{out_str}\n```",
                             "",
                         ]
                     )
@@ -513,7 +534,7 @@ def reconstruct_messages_from_steps(steps: list[dict[str, Any]]) -> list[dict[st
                     if isinstance(args, str):
                         raw_args = args
                     else:
-                        raw_args = json.dumps(args) if isinstance(args, dict) else str(args)
+                        raw_args = json.dumps(args, default=str) if isinstance(args, dict) else str(args)
                     call_dict = {
                         "id": cid,
                         "type": "function",
@@ -597,20 +618,29 @@ def find_recent_sessions(
         return []
 
     target_ws = str(Path(workspace).resolve()) if workspace else None
-    sessions: list[dict[str, Any]] = []
 
+    # Step 1: Stat and sort candidates by mtime descending first
+    candidates: list[tuple[float, Path]] = []
     for entry in base.iterdir():
         if not entry.is_dir():
             continue
-        trace_json = entry / "trace.json"
-        traj_jsonl = entry / "trajectory.jsonl"
-        if not (trace_json.is_file() or traj_jsonl.is_file()):
-            continue
-
         try:
             mtime = entry.stat().st_mtime
         except Exception:
             mtime = 0.0
+        candidates.append((mtime, entry))
+
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    matching_sessions: list[dict[str, Any]] = []
+    other_sessions: list[dict[str, Any]] = []
+    scan_ceiling = max(limit * 5, 50) if target_ws else limit
+
+    for mtime, entry in candidates:
+        trace_json = entry / "trace.json"
+        traj_jsonl = entry / "trajectory.jsonl"
+        if not (trace_json.is_file() or traj_jsonl.is_file()):
+            continue
 
         total_steps = 0
         preview = ""
@@ -643,7 +673,11 @@ def find_recent_sessions(
 
         if not preview and traj_jsonl.is_file():
             try:
-                lines = [line for line in traj_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+                lines = [
+                    line
+                    for line in traj_jsonl.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
                 total_steps = max(total_steps, len(lines))
                 if lines:
                     last_step = json.loads(lines[-1])
@@ -659,20 +693,29 @@ def find_recent_sessions(
 
         is_match = bool(target_ws is not None and sess_ws is not None and target_ws == sess_ws)
 
-        sessions.append(
-            {
-                "run_id": entry.name,
-                "run_dir": str(entry),
-                "task_id": task_id,
-                "total_steps": total_steps,
-                "preview": preview or "(no user prompt)",
-                "workspace": sess_ws,
-                "mtime": mtime,
-                "finish_reason": finish_reason,
-                "matches_workspace": is_match,
-            }
-        )
+        record = {
+            "run_id": entry.name,
+            "run_dir": str(entry),
+            "task_id": task_id,
+            "total_steps": total_steps,
+            "preview": preview or "(no user prompt)",
+            "workspace": sess_ws,
+            "mtime": mtime,
+            "finish_reason": finish_reason,
+            "matches_workspace": is_match,
+        }
+
+        if is_match:
+            matching_sessions.append(record)
+            if len(matching_sessions) >= limit:
+                break
+        else:
+            other_sessions.append(record)
+
+        if len(matching_sessions) + len(other_sessions) >= scan_ceiling:
+            break
 
     # Sort: matching workspace first, then newest mtime
-    sessions.sort(key=lambda s: (1 if s["matches_workspace"] else 0, s["mtime"]), reverse=True)
-    return sessions[:limit]
+    combined = matching_sessions + other_sessions
+    combined.sort(key=lambda s: (1 if s["matches_workspace"] else 0, s["mtime"]), reverse=True)
+    return combined[:limit]

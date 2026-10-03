@@ -2266,6 +2266,13 @@ class ProjectWeather:
             ok_bad3, msg_bad3, _ = harness.switch_model(None)  # type: ignore
             self.assertFalse(ok_bad3)
 
+            # 6. Negative: unknown model / typo
+            ok_bad4, msg_bad4, _ = harness.switch_model("nonexistent-xyz")
+            self.assertFalse(ok_bad4)
+            self.assertIn("Unknown model 'nonexistent-xyz'", msg_bad4)
+            self.assertIn("fast", msg_bad4)
+            self.assertIn("smart", msg_bad4)
+
     def test_harness_session_resumption_and_dispatch(self):
         """Invariant: Harness finds, loads, and restores prior sessions via API and interactive commands."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2321,6 +2328,11 @@ class ProjectWeather:
             self.assertEqual(len(msgs_none), 2)
             self.assertEqual(meta_none["run_id"], "run_sess_1")
 
+            # 4b. load_session True normalizes to latest without TypeError
+            msgs_bool, meta_bool = harness.load_session(True)
+            self.assertEqual(len(msgs_bool), 2)
+            self.assertEqual(meta_bool["run_id"], "run_sess_1")
+
             # 5. Negative: invalid index and unknown session
             msgs_bad, meta_bad = harness.load_session("99")
             self.assertEqual(msgs_bad, [])
@@ -2358,6 +2370,72 @@ class ProjectWeather:
                 workspace_dir=ws_dir,
             )
             self.assertEqual(action_m_list, "skip")
+
+            # 8. Invariant: bare words with arguments are NOT hijacked (Finding 5)
+            act_turn1 = harness._dispatch_interactive_input(
+                "model the user database",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(act_turn1, "turn")
+            self.assertEqual(memory.get_messages()[-1].content, "model the user database")
+
+            act_turn2 = harness._dispatch_interactive_input(
+                "resume when you are ready",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(act_turn2, "turn")
+            self.assertEqual(memory.get_messages()[-1].content, "resume when you are ready")
+
+            act_turn3 = harness._dispatch_interactive_input(
+                "skill in coding is required",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(act_turn3, "turn")
+            self.assertEqual(memory.get_messages()[-1].content, "skill in coding is required")
+
+            # Bare words without arguments trigger command listing
+            self.assertEqual(harness._dispatch_interactive_input("model", memory=memory, custom_commands={}), "skip")
+            self.assertEqual(harness._dispatch_interactive_input("resume", memory=memory, custom_commands={}), "skip")
+            self.assertEqual(harness._dispatch_interactive_input("skill", memory=memory, custom_commands={}), "skip")
+
+            # 9. Invariant: mid-session resume clears prior tracer steps and pins step index to total_steps + 1 (Findings 4 & 6)
+            from core.tracer import Tracer
+            from core.types import StepTrace
+
+            active_tracer = Tracer(
+                task=Task(id="task_1", instruction="Initial goal"),
+                output_dir=runs_dir / "active_run",
+                verbose=False,
+            )
+            active_tracer.record_step(
+                StepTrace(step_index=1, duration_s=0.1, prompt_messages=[], model_response={"content": "prior turn"}, tool_results=[])
+            )
+            self.assertEqual(len(active_tracer.steps), 1)
+
+            step_holder = [1]
+            act_res = harness._dispatch_interactive_input(
+                "/resume 1",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+                tracer=active_tracer,
+                step_holder=step_holder,
+            )
+            self.assertEqual(act_res, "skip")
+            # Invariant: tracer steps cleared on resume
+            self.assertEqual(len(active_tracer.steps), 0)
+            # Invariant: step_idx strictly pinned to total_steps + 1 (3 + 1 = 4)
+            self.assertEqual(step_holder[0], 4)
 
 
 if __name__ == "__main__":
