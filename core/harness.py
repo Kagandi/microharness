@@ -39,15 +39,19 @@ from core.model import (
     ModelCancelledError,
     NamedModel,
     ProviderAwareModel,
-    RateLimitAwareModel,
-    RateLimitError,
     ReasoningAwareModel,
 )
-from core.prompts import DEFAULT_SYSTEM_PROMPT
+from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt, load_agents_instructions
 from core.providers import (
     build_model_from_spec,
     get_available_models_from_config,
     resolve_model_spec,
+)
+from core.session import (
+    find_sessions,
+    load_session,
+    rate_limit_wait,
+    run_steps,
 )
 from core.skills import (
     Skill,
@@ -93,37 +97,6 @@ __all__ = [
 
 
 DEFAULT_GLOBAL_DIR = get_default_global_dir()
-
-
-def _load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
-    """Loads global and project-level steering guidelines in cascading order."""
-    sections: list[str] = []
-
-    # 1. Global user baseline instructions (~/.microharness/AGENTS.md)
-    if global_dir:
-        global_file = global_dir / "AGENTS.md"
-        if global_file.is_file():
-            content = global_file.read_text(encoding="utf-8", errors="replace").strip()
-            if content:
-                sections.append(
-                    f"--- Global User Instructions (~/.microharness/AGENTS.md) ---\n"
-                    f"{content}\n"
-                    f"----------------------------------------------------------"
-                )
-
-    # 2. Project-level instructions (./.microharness/AGENTS.md or ./AGENTS.md, takes precedence/specializes)
-    for candidate in [workspace / ".microharness" / "AGENTS.md", workspace / "AGENTS.md"]:
-        if candidate.is_file():
-            content = candidate.read_text(encoding="utf-8", errors="replace").strip()
-            if content:
-                sections.append(
-                    f"--- Project Instructions ({candidate.name}) ---\n"
-                    f"{content}\n"
-                    f"--------------------------------------"
-                )
-                break
-
-    return ("\n\n" + "\n\n".join(sections)) if sections else ""
 
 
 SKILL_COMMAND_ALIASES = ("/skill", "/skills", "skill", "skills")
@@ -259,15 +232,7 @@ class Harness:
 
     def _rate_limit_wait(self) -> float:
         """Cumulative seconds this model has spent honouring provider rate limits."""
-        raw = (
-            self.model.total_rate_limit_wait_s
-            if isinstance(self.model, RateLimitAwareModel)
-            else getattr(self.model, "total_rate_limit_wait_s", 0.0)
-        )
-        try:
-            return float(raw or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+        return rate_limit_wait(self.model)
 
     @property
     def workspace_dir(self) -> Path:
@@ -382,53 +347,14 @@ class Harness:
 
     def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Finds recent runs in runs_dir with workspace affinity."""
-        from core.tracer import find_recent_sessions
-
-        return find_recent_sessions(
-            runs_dir=self.runs_dir,
-            workspace=self.explicit_workspace_dir,
-            limit=limit,
-        )
+        return find_sessions(self.runs_dir, self.explicit_workspace_dir, limit=limit)
 
     def load_session(
         self, session_id_or_path: str | Path | None = None
     ) -> tuple[list[Message], dict[str, Any]]:
-        """Loads previous session messages and metadata."""
-        from core.tracer import load_session_messages
-
-        if session_id_or_path is True:
-            session_id_or_path = None
-
-        target_dir: Path | None = None
-        if session_id_or_path:
-            p = Path(session_id_or_path)
-            if p.is_dir():
-                target_dir = p
-            elif (self.runs_dir / str(session_id_or_path)).is_dir():
-                target_dir = self.runs_dir / str(session_id_or_path)
-            elif str(session_id_or_path).strip().isdigit():
-                idx = int(str(session_id_or_path).strip()) - 1
-                recent = self.find_recent_sessions(limit=max(idx + 1, 10))
-                if 0 <= idx < len(recent):
-                    target_dir = Path(recent[idx]["run_dir"])
-                else:
-                    return [], {"error": f"Invalid session index: {session_id_or_path} (found {len(recent)} sessions)"}
-            else:
-                for s in self.find_recent_sessions(limit=50):
-                    if str(session_id_or_path) in s["run_id"]:
-                        target_dir = Path(s["run_dir"])
-                        break
-        else:
-            recent = self.find_recent_sessions(limit=1)
-            if recent:
-                target_dir = Path(recent[0]["run_dir"])
-
-        if not target_dir or not target_dir.is_dir():
-            return [], {"error": "Session not found: no resumable session available"}
-
-        raw_msgs, meta = load_session_messages(target_dir)
-        messages = [Message.from_dict(m) for m in raw_msgs]
-        return messages, meta
+        """Loads previous session messages and metadata by id, index, path, or recency."""
+        selector = None if session_id_or_path is True else session_id_or_path
+        return load_session(self.runs_dir, self.explicit_workspace_dir, selector)
 
     def _create_environment(
         self,
@@ -508,26 +434,15 @@ class Harness:
         tool_registry: ToolRegistry,
         use_sandbox: bool,
     ) -> str:
-        prompt = base_prompt
-        tool_docs = tool_registry.to_system_prompt_snippet()
-        if tool_docs and "You have access to tools to interact with the environment:" not in prompt:
-            prompt += f"\n\n{tool_docs}"
-
-        if not use_sandbox:
-            prompt += (
-                f"\n\nContext:\nYou are working directly in an existing project directory at `{workspace}`.\n"
-                "Inspect existing files and git history to understand the codebase before making changes."
-            )
-
-        agents_instructions = _load_agents_instructions(workspace, self.global_dir)
-        if agents_instructions:
-            prompt += f"\n\n{agents_instructions}"
-
-        skills_index = render_skills_index(discover_skills(workspace, self.global_dir))
-        if skills_index:
-            prompt += f"\n\n{skills_index}"
-
-        return prompt
+        """Assembles the system prompt from tools, steering, and the skills index."""
+        return build_system_prompt(
+            base_prompt,
+            tool_docs=tool_registry.to_system_prompt_snippet(),
+            workspace=workspace,
+            sandboxed=use_sandbox,
+            agents_instructions=load_agents_instructions(workspace, self.global_dir),
+            skills_index=render_skills_index(discover_skills(workspace, self.global_dir)),
+        )
 
     def _setup_run(
         self,
@@ -604,67 +519,19 @@ class Harness:
         deadline: float | None = None,
         on_finish: Callable[[str], None] | None = None,
     ) -> tuple[bool, str, int]:
-        """Drives the agent loop for up to max_steps with retries.
-
-        Returns:
-            (is_finished, finish_reason, next_step_index)
-        """
-        step_idx = start_step
-        step_attempts = 0
-        finish_reason = "max_steps_exceeded"
-
-        while (step_idx - start_step) < max_steps:
-            rate_limit_wait = self._rate_limit_wait()
-            effective_deadline = (deadline + rate_limit_wait) if deadline else None
-            if effective_deadline and time.time() > effective_deadline:
-                tracer.log("\n⚠️ Task reached maximum allowed timeout.")
-                return False, "timeout", step_idx
-
-            if effective_deadline and isinstance(self.model, DeadlineAwareModel):
-                self.model.set_deadline(effective_deadline)
-
-            try:
-                is_finished, step_trace = loop.step(step_index=step_idx)
-                tracer.record_step(step_trace)
-                step_attempts = 0
-                step_idx += 1
-
-                if is_finished:
-                    if on_finish:
-                        on_finish(step_trace.model_response.get("content", ""))
-                    return True, "completed", step_idx
-
-            except KeyboardInterrupt:
-                tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
-                return False, "interrupted", step_idx
-
-            except TimeoutError as exc:
-                tracer.log(f"\n⚠️ Task reached maximum allowed timeout: {exc}")
-                return False, "timeout", step_idx
-
-            except RateLimitError as exc:
-                tracer.log(
-                    f"\n🛑 Step {step_idx} rate limited (HTTP 429): {exc}\n"
-                    "Progress has been saved. You can resume this benchmark with --resume once rate limits reset."
-                )
-                return False, "rate_limited", step_idx
-
-            except Exception as exc:
-                step_attempts += 1
-                if step_attempts <= self.max_step_retries:
-                    sleep_s = self.step_retry_delay * step_attempts
-                    tracer.log(
-                        f"\n⚠️ Step {step_idx} encountered an error: {exc}\n"
-                        f"⏳ Sleeping {sleep_s:.1f}s and retrying step ({step_attempts}/{self.max_step_retries})..."
-                    )
-                    time.sleep(sleep_s)
-                    continue
-                tracer.log(
-                    f"\n❌ Step {step_idx} failed after {self.max_step_retries} retries: {exc}"
-                )
-                return False, "error", step_idx
-
-        return False, finish_reason, step_idx
+        """Drives the agent loop for up to max_steps with retries."""
+        outcome = run_steps(
+            self.model,
+            loop,
+            tracer,
+            start_step,
+            max_steps,
+            deadline=deadline,
+            max_retries=self.max_step_retries,
+            retry_delay=self.step_retry_delay,
+            on_finish=on_finish,
+        )
+        return outcome.finished, outcome.reason, outcome.next_step
 
     def run(self, task: Task) -> RunResult:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
