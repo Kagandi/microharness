@@ -811,6 +811,52 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertEqual(report.tasks[1].rate_limit_wait_s, 3.5)
         self.assertEqual(report.total_rate_limit_wait_s, 11.0)
 
+    def test_benchmark_report_to_markdown_and_file_generation(self):
+        """Invariant: BenchmarkReport.to_markdown generates formatted markdown and runner saves both .json and .md files."""
+        task1, eval1 = create_rate_limiter_task()
+
+        mock_harness = MagicMock()
+        mock_harness.run.return_value = RunResult(
+            task_id=task1.id,
+            passed=True,
+            score=1.0,
+            total_steps=5,
+            duration_s=10.0,
+            finish_reason="completed",
+            trace_path="trace1.json",
+            workspace_path="",
+            prompt_tokens=1500,
+            completion_tokens=120,
+            cached_tokens=1000,
+            cache_hit_rate_pct=66.7,
+            rate_limit_wait_s=2.5,
+        )
+        factory = MagicMock(return_value=mock_harness)
+
+        report = run_benchmark_suite(
+            harness_factory=factory,
+            tasks=[(task1, eval1)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+            config={"model": "test-model", "provider": "deepseek"},
+        )
+
+        md = report.to_markdown()
+        self.assertIn("# Mini-SWE Benchmark Report", md)
+        self.assertIn("- **Pass Rate:** 1/1 (100.0%)", md)
+        self.assertIn("- **Input Tokens:** 1,500", md)
+        self.assertIn("- **Cached Tokens:** 1,000 (66.7% hit rate)", md)
+        self.assertIn("- **Total Rate Limit Wait:** 2.5s", md)
+        self.assertIn("| `mini_swe_rate_limiter` | PASSED ✅ | 1.00 | 5 | 10.0s | 2.5s | 1,500 / 120 | 66.7% | `trace1.json` |", md)
+
+        # Invariant: both json and md files are written to output_dir
+        json_file = Path(self.tmp_dir) / "mini_swe_report.json"
+        md_file = Path(self.tmp_dir) / "mini_swe_report.md"
+        self.assertTrue(json_file.is_file())
+        self.assertTrue(md_file.is_file())
+        self.assertEqual(md_file.read_text(encoding="utf-8"), md)
+
 
 if __name__ == "__main__":
     unittest.main()

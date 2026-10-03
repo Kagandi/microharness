@@ -49,6 +49,45 @@ class BenchmarkReport:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def to_markdown(self) -> str:
+        """Formats the benchmark results into a clean markdown document."""
+        lines = [
+            f"# {self.suite_name} Benchmark Report\n",
+            "## Summary\n",
+            f"- **Pass Rate:** {self.passed_tasks}/{self.total_tasks} ({self.pass_rate:.1f}%)",
+            f"- **Mean Score:** {self.mean_score:.2f}",
+            f"- **Total Duration:** {self.total_duration_s:.1f}s ({self.total_duration_s / 60:.1f} min)",
+        ]
+        if self.total_rate_limit_wait_s > 0:
+            lines.append(f"- **Total Rate Limit Wait:** {self.total_rate_limit_wait_s:.1f}s")
+        if self.total_prompt_tokens > 0 or self.total_completion_tokens > 0:
+            lines.extend([
+                f"- **Input Tokens:** {self.total_prompt_tokens:,}",
+                f"- **Cached Tokens:** {self.total_cached_tokens:,} ({self.cache_hit_rate_pct:.1f}% hit rate)",
+                f"- **Output Tokens:** {self.total_completion_tokens:,}",
+            ])
+        if self.config:
+            lines.append("\n## Configuration\n")
+            for k, v in sorted(self.config.items()):
+                lines.append(f"- **{k}:** `{v}`")
+
+        lines.extend([
+            "\n## Task Scorecard\n",
+            "| Task ID | Status | Score | Steps | Duration | RL Wait | Tokens (In / Out) | Cache Hit | Trace |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ])
+        for t in self.tasks:
+            status_str = "PASSED ✅" if t.passed else "FAILED ❌"
+            trace_short = Path(t.trace_path).name if t.trace_path else "-"
+            tokens_str = f"{t.prompt_tokens:,} / {t.completion_tokens:,}"
+            hit_str = f"{t.cache_hit_rate_pct:.1f}%" if t.prompt_tokens > 0 else "-"
+            rl_str = f"{t.rate_limit_wait_s:.1f}s" if t.rate_limit_wait_s > 0 else "-"
+            lines.append(
+                f"| `{t.task_id}` | {status_str} | {t.score:.2f} | {t.total_steps} | {t.duration_s:.1f}s | {rl_str} | {tokens_str} | {hit_str} | `{trace_short}` |"
+            )
+        lines.append("")
+        return "\n".join(lines)
+
     def print_scorecard(self) -> None:
         width = 118
         print("\n" + "=" * width)
@@ -142,9 +181,13 @@ def _build_report(
 def _save_report_json(report: BenchmarkReport, output_dir: Path | str, suite_name: str) -> Path:
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    report_file = out_path / f"{suite_name.lower().replace('-', '_')}_report.json"
+    slug = suite_name.lower().replace("-", "_")
+    report_file = out_path / f"{slug}_report.json"
     report_file.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    md_file = out_path / f"{slug}_report.md"
+    md_file.write_text(report.to_markdown(), encoding="utf-8")
     return report_file
+
 
 
 def run_benchmark_suite(
@@ -347,6 +390,7 @@ def run_benchmark_suite(
     if output_dir:
         report_file = _save_report_json(report, output_dir, suite_name)
         if verbose:
-            print(f"📄 Benchmark report saved to: {report_file}")
+            print(f"📄 Benchmark report saved to: {report_file} (and {report_file.with_suffix('.md')})")
 
     return report
+
