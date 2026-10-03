@@ -994,11 +994,11 @@ class Harness:
         tracer.compact = True
 
         state = TUIState(title="microharness")
-        state.provider_name = getattr(self.model, "provider", "")
-        state.model_name = getattr(self.model, "model_name", "")
-        state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else "OFF"
+        state.provider_name = getattr(self.model, "provider", "") or ""
+        state.model_name = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+        state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
         curr_reasoning = self.get_reasoning_effort()
-        state.reasoning = curr_reasoning.upper() if curr_reasoning else "OFF"
+        state.reasoning = curr_reasoning.upper() if curr_reasoning else ""
         state.update_status(memory.stats(), self.get_cache_stats())
 
         custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
@@ -1031,16 +1031,16 @@ class Harness:
                 new_chars = memory.total_chars()
                 if did_compact:
                     freed = (old_chars - new_chars) // 4
-                    state.add_system(f"🧹 Compaction applied: freed ~{freed:,} tokens.")
+                    state.add_system(f"Compaction applied: freed ~{freed:,} tokens.")
                 else:
-                    state.add_system("ℹ️ No older observations eligible for compaction.")
+                    state.add_system("No older observations eligible for compaction.")
                 state.update_status(memory.stats(), self.get_cache_stats())
                 return
 
             if cmd in ("/new", "/reset", "new", "reset"):
                 memory.reset()
                 state.lines.clear()
-                state.add_system("✨ Fresh session started (workspace preserved).")
+                state.add_system("Fresh session started (workspace preserved).")
                 state.update_status(memory.stats(), self.get_cache_stats())
                 return
 
@@ -1050,7 +1050,7 @@ class Harness:
                 if cmd_key in custom_commands:
                     _, template, scope = custom_commands[cmd_key]
                     effective_prompt = _expand_command(template, args_part)
-                    state.add_system(f"⚡ Executing /{cmd_key} [{scope}] ...")
+                    state.add_system(f"Executing /{cmd_key} [{scope}] ...")
                 else:
                     state.add_error(f"Unknown command '/{cmd_key}'. Type /help for commands.")
                     return
@@ -1116,4 +1116,4 @@ class Harness:
             json_path, md_path = tracer.finalize(
                 finish_reason="session_ended", patch_diff=patch_diff, telemetry=c_stats
             )
-            print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
+            print(f"\nComplete session trace saved to:\n   {md_path}\n")

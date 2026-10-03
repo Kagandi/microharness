@@ -37,19 +37,24 @@ class TUIState:
         self.reasoning: str = ""
 
     def add_user(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"👤 You: {text}", tag="user"))
+        if self.lines and self.lines[-1].text != "":
+            self.lines.append(TUILine(text="", tag="dim"))
+        lines = text.splitlines() or [""]
+        for i, line in enumerate(lines):
+            prefix = "> " if i == 0 else "  "
+            self.lines.append(TUILine(text=f"{prefix}{line}", tag="user"))
         self.scroll_offset = 0
 
     def add_thought(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"● Thinking: {text}", tag="thought"))
+        self.lines.append(TUILine(text=f"Thinking: {text}", tag="thought"))
         self.scroll_offset = 0
 
     def add_action(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"● {text}", tag="action"))
+        self.lines.append(TUILine(text=text, tag="action"))
         self.scroll_offset = 0
 
     def add_error(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"❌ {text}", tag="error"))
+        self.lines.append(TUILine(text=f"error: {text}", tag="error"))
         self.scroll_offset = 0
 
     def add_agent(self, text: str) -> None:
@@ -87,11 +92,13 @@ class TUIState:
             if not line_item.text:
                 wrapped.append(("", line_item.tag))
             else:
+                indent = "  " if line_item.tag == "user" and line_item.text.startswith("> ") else ""
                 chunks = textwrap.wrap(
                     line_item.text,
                     width=eff_width,
                     replace_whitespace=False,
                     drop_whitespace=False,
+                    subsequent_indent=indent,
                 )
                 if not chunks:
                     wrapped.append(("", line_item.tag))
@@ -166,17 +173,7 @@ class CursesTUI:
             return
 
         # 1. Header Bar (Row 0)
-        brand = f" ⚡ {self.state.title} "
-        info_parts: list[str] = []
-        if self.state.provider_name or self.state.model_name:
-            info_parts.append(f"[{self.state.provider_name}] {self.state.model_name}".strip())
-        if self.state.cache_ttl:
-            info_parts.append(f"cache: {self.state.cache_ttl}")
-        if self.state.reasoning:
-            info_parts.append(f"reasoning: {self.state.reasoning}")
-
-        info_str = " · ".join(info_parts)
-        header_text = f"{brand}· {info_str}" if info_str else brand
+        header_text = f" {self.state.title} "
         header_text = header_text[: w - 1]
         try:
             stdscr.attron(curses.A_BOLD)
@@ -201,10 +198,14 @@ class CursesTUI:
             attr = curses.A_NORMAL
             if tag == "user":
                 attr = curses.color_pair(1) | curses.A_BOLD if self.has_colors else curses.A_BOLD
-            elif tag in ("action", "thought"):
+            elif tag == "thought":
+                attr = curses.color_pair(3) | curses.A_DIM if self.has_colors else curses.A_DIM
+            elif tag == "action":
                 attr = curses.color_pair(2) if self.has_colors else curses.A_NORMAL
             elif tag == "error":
                 attr = curses.color_pair(4) | curses.A_BOLD if self.has_colors else curses.A_BOLD
+            elif tag == "agent":
+                attr = curses.color_pair(6) if self.has_colors else curses.A_NORMAL
             elif tag in ("dim", "system"):
                 attr = curses.A_DIM
 
@@ -215,13 +216,41 @@ class CursesTUI:
 
         # 4. Status Bar (Row H - 3)
         status_row = h - 3
-        status_text = (
-            f" 📊 Context: {self.state.status_tokens:,} / {self.state.max_tokens:,} tokens "
-            f"({self.state.usage_pct:.1f}%) · Cache: {self.state.cache_hit_pct:.1f}% · "
-            f"Messages: {self.state.messages_count} "
+        parts: list[str] = []
+
+        # Model name & provider
+        model_label = ""
+        if self.state.provider_name and self.state.model_name:
+            if self.state.model_name.lower().startswith(self.state.provider_name.lower() + "/"):
+                model_label = self.state.model_name
+            else:
+                model_label = f"{self.state.provider_name}/{self.state.model_name}"
+        elif self.state.model_name:
+            model_label = self.state.model_name
+        elif self.state.provider_name:
+            model_label = self.state.provider_name
+
+        if model_label:
+            parts.append(model_label)
+
+        # Cache & reasoning
+        if self.state.cache_ttl:
+            parts.append(f"cache: {self.state.cache_ttl}")
+        if self.state.reasoning:
+            parts.append(f"reasoning: {self.state.reasoning}")
+
+        # Context tokens & metrics
+        parts.append(
+            f"context: {self.state.status_tokens:,} / {self.state.max_tokens:,} tokens ({self.state.usage_pct:.1f}%)"
         )
+        if self.state.cache_hit_pct > 0:
+            parts.append(f"cache hit: {self.state.cache_hit_pct:.1f}%")
+        parts.append(f"msgs: {self.state.messages_count}")
+
         if self.state.scroll_offset > 0:
-            status_text += f" [▲ Scrolled +{self.state.scroll_offset}]"
+            parts.append(f"[scrolled +{self.state.scroll_offset}]")
+
+        status_text = " " + " · ".join(parts) + " "
 
         try:
             stdscr.addstr(status_row, 0, "─" * (w - 1), curses.A_DIM)
@@ -231,7 +260,7 @@ class CursesTUI:
 
         # 5. Bottom Anchored Input Box (Row H - 1)
         input_row = h - 1
-        prompt_label = "❯ "
+        prompt_label = "> "
         avail_input_w = max(5, w - len(prompt_label) - 2)
         display_input = self.state.input_buffer[-avail_input_w:]
 

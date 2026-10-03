@@ -539,6 +539,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         default_reasoning_format = profile.get("reasoning_format", "standard")
         default_cache_strategy = profile.get("cache_strategy", "implicit")
 
+        self.provider = prov_name
         self.model = model
         self.api_key = api_key
         # Merge declarative profile headers with explicitly passed headers (explicit wins)
@@ -794,6 +795,8 @@ class MockModel(_CacheTelemetryMixin):
         cache_ttl: str | None = None,
         reasoning_effort: str | None = None,
     ):
+        self.model = "mock"
+        self.provider = "mock"
         self.script = list(script)
         self.step_idx = 0
         self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)

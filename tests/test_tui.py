@@ -38,16 +38,16 @@ class TestTUI(unittest.TestCase):
         state.add_user("What is microharness?")
         # Adding a message auto-scrolls to bottom (scroll_offset = 0)
         self.assertEqual(state.scroll_offset, 0)
-        self.assertEqual(state.lines[-1], TUILine(text="👤 You: What is microharness?", tag="user"))
+        self.assertEqual(state.lines[-1], TUILine(text="> What is microharness?", tag="user"))
 
         state.add_thought("Analyzing codebase")
-        self.assertEqual(state.lines[-1], TUILine(text="● Thinking: Analyzing codebase", tag="thought"))
+        self.assertEqual(state.lines[-1], TUILine(text="Thinking: Analyzing codebase", tag="thought"))
 
         state.add_action("bash: git status (0.2s)")
-        self.assertEqual(state.lines[-1], TUILine(text="● bash: git status (0.2s)", tag="action"))
+        self.assertEqual(state.lines[-1], TUILine(text="bash: git status (0.2s)", tag="action"))
 
         state.add_error("bash failed (exit 1)")
-        self.assertEqual(state.lines[-1], TUILine(text="❌ bash failed (exit 1)", tag="error"))
+        self.assertEqual(state.lines[-1], TUILine(text="error: bash failed (exit 1)", tag="error"))
 
         state.add_agent("Microharness is an AI agent harness.\nMinimal and pluggable.")
         # Agent response splits lines with dim spacers
@@ -107,6 +107,8 @@ class TestTUI(unittest.TestCase):
         state = TUIState(title="microharness")
         state.provider_name = "openrouter"
         state.model_name = "deepseek"
+        state.cache_ttl = "5M"
+        state.reasoning = "MEDIUM"
         state.add_user("ping")
         state.add_action("pong")
         state.handle_input_char("test input")
@@ -121,8 +123,15 @@ class TestTUI(unittest.TestCase):
         mock_stdscr.erase.assert_called_once()
         mock_stdscr.refresh.assert_called_once()
         # Verify prompt line added
-        prompt_calls = [c for c in mock_stdscr.addstr.call_args_list if "❯ " in str(c)]
+        prompt_calls = [c for c in mock_stdscr.addstr.call_args_list if "> " in str(c)]
         self.assertGreaterEqual(len(prompt_calls), 1)
+
+        # Verify bottom status bar includes model, cache, and reasoning
+        status_calls = [c for c in mock_stdscr.addstr.call_args_list if "cache: 5M" in str(c)]
+        self.assertGreaterEqual(len(status_calls), 1)
+        status_str = str(status_calls[0])
+        self.assertIn("openrouter/deepseek", status_str)
+        self.assertIn("reasoning: MEDIUM", status_str)
 
     def test_cli_tui_flag_parsing(self):
         """Invariant: --tui flag is parsed properly in main CLI argument parser."""
@@ -176,7 +185,7 @@ class TestTUI(unittest.TestCase):
             # Confirm presence of system /status output, /help output, user input, and agent response
             has_status = any("Context Tokens:" in line.text for line in lines)
             has_help = any("Available commands:" in line.text for line in lines)
-            has_user = any("👤 You: Hi agent" in line.text for line in lines)
+            has_user = any("> Hi agent" in line.text for line in lines)
             has_agent = any("Hello from agent" in line.text for line in lines)
             self.assertTrue(has_status)
             self.assertTrue(has_help)
