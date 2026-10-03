@@ -387,7 +387,7 @@ def discover_tool_plugins(
 
     Locations searched:
     1. Global: `~/.microharness/tools/*.py` (or `global_dir / "tools"`)
-    2. Project: `<workspace>/.microharness/tools/*.py`, `<workspace>/tools/*.py`
+    2. Project: `<workspace>/.microharness/tools/*.py`
 
     Project tools require `trust_project_tools=True` before module execution to
     prevent untrusted host code execution from cloned repositories.

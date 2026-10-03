@@ -23,18 +23,29 @@ class TestDiscovery(unittest.TestCase):
         global_dir = self.base / "global"
         workspace_dir = self.base / "workspace"
 
-        # Create only specific candidate directories
-        (global_dir / "tools").mkdir(parents=True)
-        (workspace_dir / ".tools").mkdir(parents=True)
-        (workspace_dir / ".microharness" / "tools").mkdir(parents=True)
+        # General resource (skills): searches global then project candidates
+        (global_dir / "skills").mkdir(parents=True)
+        (workspace_dir / ".skills").mkdir(parents=True)
+        (workspace_dir / ".microharness" / "skills").mkdir(parents=True)
 
-        dirs = resolve_search_directories("tools", workspace_dir=workspace_dir, global_dir=global_dir)
+        dirs = resolve_search_directories("skills", workspace_dir=workspace_dir, global_dir=global_dir)
 
         # Invariant: 3 existing directories found in strict global -> project order
         self.assertEqual(len(dirs), 3)
-        self.assertEqual(dirs[0], ((global_dir / "tools").resolve(), "global"))
-        self.assertEqual(dirs[1], ((workspace_dir / ".tools").resolve(), "project"))
-        self.assertEqual(dirs[2], ((workspace_dir / ".microharness" / "tools").resolve(), "project"))
+        self.assertEqual(dirs[0], ((global_dir / "skills").resolve(), "global"))
+        self.assertEqual(dirs[1], ((workspace_dir / ".skills").resolve(), "project"))
+        self.assertEqual(dirs[2], ((workspace_dir / ".microharness" / "skills").resolve(), "project"))
+
+        # For "tools", project search is strictly restricted to .microharness/tools
+        (global_dir / "tools").mkdir(parents=True)
+        (workspace_dir / "tools").mkdir(parents=True)
+        (workspace_dir / ".tools").mkdir(parents=True)
+        (workspace_dir / ".microharness" / "tools").mkdir(parents=True)
+
+        tool_dirs = resolve_search_directories("tools", workspace_dir=workspace_dir, global_dir=global_dir)
+        self.assertEqual(len(tool_dirs), 2)
+        self.assertEqual(tool_dirs[0], ((global_dir / "tools").resolve(), "global"))
+        self.assertEqual(tool_dirs[1], ((workspace_dir / ".microharness" / "tools").resolve(), "project"))
 
     def test_resolve_search_directories_fallback_when_both_none(self):
         """Invariant: If both workspace_dir and global_dir are None, fallback resolves ~/.microharness."""
@@ -101,7 +112,7 @@ class TestDiscovery(unittest.TestCase):
     def test_discover_resources_generator_loader_multiple_items_per_file(self):
         """Invariant: A loader returning a generator of multiple items per file registers all items."""
         workspace_dir = self.base / "workspace"
-        tools_dir = workspace_dir / "tools"
+        tools_dir = workspace_dir / ".microharness" / "tools"
         tools_dir.mkdir(parents=True)
 
         (tools_dir / "multi_plugin.py").write_text("# multi-tool plugin", encoding="utf-8")

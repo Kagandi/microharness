@@ -28,7 +28,9 @@ def resolve_search_directories(
 
     Precedence order:
     1. Global directories (scope='global'): `global_dir / resource_name`, `global_dir / f".{resource_name}"`
-    2. Project directories (scope='project'): `workspace / resource_name`, `workspace / f".{resource_name}"`, `workspace / ".microharness" / resource_name`
+    2. Project directories (scope='project'): `workspace / ".microharness" / resource_name` (and for
+       non-tools resources, legacy `workspace / resource_name`, `workspace / f".{resource_name}"`).
+       Tools are strictly restricted to `workspace / ".microharness" / "tools"` to avoid generic search paths.
 
     If both workspace_dir and global_dir are None, global_dir defaults to `~/.microharness`.
     """
@@ -48,13 +50,18 @@ def resolve_search_directories(
     # 2. Project directories (ordered so .microharness takes priority over legacy project folders)
     if workspace_dir is not None:
         ws_base = Path(workspace_dir).resolve()
-        for cand in [
-            ws_base / resource_name,
-            ws_base / f".{resource_name}",
-            ws_base / ".microharness" / resource_name,
-        ]:
+        if resource_name == "tools":
+            cand = ws_base / ".microharness" / "tools"
             if cand.is_dir():
                 dirs.append((cand, "project"))
+        else:
+            for cand in [
+                ws_base / resource_name,
+                ws_base / f".{resource_name}",
+                ws_base / ".microharness" / resource_name,
+            ]:
+                if cand.is_dir():
+                    dirs.append((cand, "project"))
 
     return dirs
 

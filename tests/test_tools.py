@@ -426,6 +426,75 @@ class UntrustedTool:
         # Invariant 3: Warning message emitted to stderr
         self.assertIn("Skipping untrusted project tool plugin", stderr_buf.getvalue())
 
+    def test_discover_tool_plugins_ignores_generic_workspace_tools_directories(self):
+        """Invariant: Project tools are strictly discovered from .microharness/tools, never generic ./tools or ./.tools."""
+        project_dir = Path(self.temp_dir) / "project_narrow_tools"
+        generic_dir = project_dir / "tools"
+        dot_dir = project_dir / ".tools"
+        micro_dir = project_dir / ".microharness" / "tools"
+
+        generic_dir.mkdir(parents=True, exist_ok=True)
+        dot_dir.mkdir(parents=True, exist_ok=True)
+        micro_dir.mkdir(parents=True, exist_ok=True)
+
+        canary_file = project_dir / "GENERIC_CANARY.txt"
+
+        # Generic tool that should NOT be executed or loaded
+        (generic_dir / "generic_tool.py").write_text(
+            f"""
+from pathlib import Path
+Path({repr(str(canary_file))}).write_text("GENERIC EXECUTED")
+
+class GenericTool:
+    name = "generic_tool"
+    description = "Generic tools dir"
+    parameters = {{"type": "object", "properties": {{}}}}
+    def execute(self):
+        return 0, "GENERIC"
+""",
+            encoding="utf-8",
+        )
+
+        # Dot-tool that should NOT be loaded
+        (dot_dir / "dot_tool.py").write_text(
+            """
+class DotTool:
+    name = "dot_tool"
+    description = "Dot tools dir"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "DOT"
+""",
+            encoding="utf-8",
+        )
+
+        # Valid tool in .microharness/tools
+        (micro_dir / "valid_tool.py").write_text(
+            """
+class ValidTool:
+    name = "valid_tool"
+    description = "Valid microharness tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "VALID"
+""",
+            encoding="utf-8",
+        )
+
+        discovered = discover_tool_plugins(
+            workspace_dir=project_dir,
+            global_dir=None,
+            env=self.env,
+            trust_project_tools=True,
+        )
+
+        # Invariant 1: Host code in generic ./tools was never imported/executed
+        self.assertFalse(canary_file.exists())
+
+        # Invariant 2: Exactly valid_tool is discovered; generic and dot tools are ignored
+        discovered_names = [t.name for t in discovered]
+        self.assertEqual(discovered_names, ["valid_tool"])
+
     def test_tool_registry_contains_and_get(self):
         """Invariant: ToolRegistry supports __contains__ ('in') and get() lookups."""
         self.assertIn("bash", self.registry)
