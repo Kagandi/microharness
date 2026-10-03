@@ -1890,8 +1890,13 @@ def get_tools(env=None):
             self.assertEqual(len(memory.messages), 4)
 
             # 13. Interactive help text mentions direct /<name> invocation
+            from core.interactive import ConsoleUI, TurnState
+
+            help_router = harness._make_router(
+                memory, {}, discovered, ConsoleUI(), None, None, TurnState()
+            )
             with patch("builtins.print") as mock_print:
-                harness._print_interactive_help(custom_commands={}, skills=discovered)
+                help_router.dispatch("/help")
                 printed = " ".join(str(c) for c in mock_print.call_args_list)
                 self.assertIn("Available skills (run /<name> or /skill <name>):", printed)
                 self.assertIn("/deploy-tool", printed)

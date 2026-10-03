@@ -29,6 +29,16 @@ from core.config import (
 from core.discovery import discover_workspace_files, expand_tagged_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
+from core.interactive import (
+    EXIT,
+    SKIP,
+    TURN,
+    CommandContext,
+    CommandRouter,
+    ConsoleUI,
+    SessionUI,
+    TurnState,
+)
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import (
@@ -48,6 +58,7 @@ from core.providers import (
     resolve_model_spec,
 )
 from core.session import (
+    MAX_STEPS_EXCEEDED,
     find_sessions,
     load_session,
     rate_limit_wait,
@@ -620,119 +631,32 @@ class Harness:
                 self.model.set_deadline(None)
             env.teardown()
 
-    def _print_interactive_help(
+    def _make_router(
         self,
+        memory: Memory,
         custom_commands: dict[str, Command],
-        skills: dict[str, Skill] | None = None,
-    ) -> None:
-        print("\nAvailable commands:")
-        print("  /model [name|idx]             - View configured models or switch active model")
-        print("  /resume [id|idx]              - View or resume a previous conversation session")
-        print("  /reasoning [low|med|high|off] - View or switch reasoning / thinking effort")
-        print("  /cache [5m|1h|off]            - View or switch prompt caching duration on the fly")
-        print("  /status                       - Show context window size, message breakdown, and budget")
-        print("  /compact                      - Manually collapse older observations to free context")
-        print("  /new                          - Clear conversation history while keeping workspace files")
-        print("  /skill [name]                 - Show available skills or activate one into conversation")
-        print("  /exit                         - Save session trace and exit")
-        if custom_commands:
-            print("\nCustom slash commands (from commands/):")
-            for name, command in sorted(custom_commands.items()):
-                print(f"  /{name:<10} - {command.badge}{command.description}")
-        if skills:
-            print("\nAvailable skills (run /<name> or /skill <name>):")
-            for name, skill in sorted(skills.items()):
-                print(f"  /{name:<10} - {skill.badge}{skill.summary}")
-        print()
-
-    def _add_prompt(self, memory: Memory, prompt: str, workspace: Path) -> None:
-        """Expands ``@file`` tags in a prompt and appends it as the next user message."""
-        effective_prompt, attached = expand_tagged_files(prompt, workspace)
-        if attached:
-            names = ", ".join(f"@{name}" for name in attached)
-            print(f"⚡ Attached {len(attached)} file(s): {names}")
-        memory.add_user(effective_prompt)
-
-    def _print_context_status(self, memory: Memory) -> None:
-        s = memory.stats()
-        print("\n📊 Context Breakdown:")
-        print(
-            f"  • Usage: {s['estimated_tokens']:,} / {s['max_estimated_tokens']:,} tokens ({s['usage_pct']}%)"
+        skills: dict[str, Skill],
+        ui: SessionUI,
+        workspace_dir: Path | None,
+        tracer: Tracer | None,
+        turns: TurnState,
+        *,
+        allow_bare_words: bool = True,
+    ) -> CommandRouter:
+        """Builds a command router bound to this harness and the caller's session state."""
+        return CommandRouter(
+            CommandContext(
+                harness=self,
+                memory=memory,
+                ui=ui,
+                workspace=workspace_dir or self.workspace_dir,
+                commands=custom_commands,
+                skills=skills,
+                tracer=tracer,
+                turns=turns,
+            ),
+            allow_bare_words=allow_bare_words,
         )
-        print(
-            f"  • Messages ({s['total_messages']}): {s['by_role']['system']} sys, "
-            f"{s['by_role']['user']} user, {s['by_role']['assistant']} assistant, {s['by_role']['tool']} tools"
-        )
-        curr_reasoning = self.get_reasoning_effort()
-        print(f"  • Reasoning Effort: {curr_reasoning.upper() if curr_reasoning else 'OFF'}")
-        c_stats = self.get_cache_stats()
-        ttl_val = c_stats.get("cache_ttl")
-        print(f"  • Prompt Caching: {ttl_val.upper() if ttl_val else 'OFF'}")
-        if c_stats.get("total_prompt_tokens"):
-            cached = c_stats.get("total_cached_tokens", 0)
-            total = c_stats.get("total_prompt_tokens", 0)
-            rate = c_stats.get("cache_hit_rate_pct", 0.0)
-            print(f"    Cache Hits: {cached:,} / {total:,} prompt tokens ({rate}% hit rate)\n")
-        else:
-            print()
-
-    def _handle_reasoning_command(self, user_input: str) -> None:
-        parts = user_input.strip().split()
-        if len(parts) == 1:
-            curr = self.get_reasoning_effort()
-            status_str = curr.upper() if curr else "OFF (Disabled)"
-            print(f"\n🧠 Reasoning / Thinking Effort: {status_str}")
-            print(
-                "  • Usage: /reasoning low | /reasoning medium | /reasoning high | /reasoning off | /reasoning <tokens>\n"
-            )
-            return
-
-        target = parts[1].strip()
-        try:
-            new_effort = self.set_reasoning_effort(target)
-            if new_effort:
-                print(
-                    f"\n🧠 Reasoning effort switched to: {new_effort.upper()} for subsequent turns.\n"
-                )
-            else:
-                print("\n🧠 Reasoning effort disabled (off) for subsequent turns.\n")
-        except ValueError as exc:
-            print(f"\n❌ {exc}\n")
-
-    def _handle_cache_command(self, user_input: str) -> None:
-        parts = user_input.strip().split()
-        if len(parts) == 1:
-            stats = self.get_cache_stats()
-            curr_ttl = stats.get("cache_ttl")
-            if curr_ttl:
-                desc = (
-                    "5 minutes (Standard Ephemeral)"
-                    if curr_ttl == "5m"
-                    else "1 hour (Extended Beta)"
-                )
-                print(f"\n⚡ Prompt Caching: {curr_ttl.upper()} ({desc})")
-            else:
-                print("\n⚡ Prompt Caching: DISABLED (off)")
-            if stats.get("total_prompt_tokens"):
-                cached = stats.get("total_cached_tokens", 0)
-                total = stats.get("total_prompt_tokens", 0)
-                rate = stats.get("cache_hit_rate_pct", 0.0)
-                print(f"  • Cached Tokens: {cached:,} / {total:,} ({rate}% hit rate)")
-            print("  • Usage: /cache 5m | /cache 1h | /cache off\n")
-            return
-
-        target_ttl = parts[1].lower().strip()
-        try:
-            new_ttl = self.set_cache_ttl(target_ttl)
-            if new_ttl:
-                desc = "5-minute ephemeral" if new_ttl == "5m" else "1-hour extended beta"
-                print(
-                    f"\n⚡ Prompt caching switched to: {new_ttl.upper()} ({desc}) for subsequent turns.\n"
-                )
-            else:
-                print("\n⚡ Prompt caching disabled for subsequent turns.\n")
-        except ValueError as exc:
-            print(f"\n❌ {exc}\n")
 
     def _dispatch_interactive_input(
         self,
@@ -751,141 +675,71 @@ class Harness:
             "turn" if an agent turn should be executed,
             "skip" if command was handled internally without calling the model.
         """
-        ws = workspace_dir or self.workspace_dir
-        cmd = user_input.lower().strip()
-        if cmd in ("/exit", "exit", "/quit", "quit"):
-            print("Ending session.")
-            return "exit"
+        turns = TurnState(step_index=step_holder[0] if step_holder else 1)
+        router = self._make_router(
+            memory, custom_commands, skills or {}, ConsoleUI(), workspace_dir, tracer, turns
+        )
+        action = router.dispatch(user_input)
+        if step_holder is not None:
+            step_holder[0] = turns.step_index
+        return action
 
-        if cmd in ("/help", "help"):
-            self._print_interactive_help(custom_commands, skills)
-            return "skip"
+    def _restore_session(self, memory: Memory, resume: bool | str | Path | None) -> int:
+        """Restores a previous session into memory, returning the step index to resume at."""
+        if not resume:
+            return 1
+        messages, meta = self.load_session(None if resume is True else resume)
+        if not messages:
+            print(f"\n⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh session.\n")
+            return 1
+        memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+        step_index = meta.get("total_steps", 0) + 1
+        print(
+            f"\n🔄 Resumed session '{meta.get('run_id')}' "
+            f"({len(messages)} messages loaded, continuing at step {step_index}).\n"
+        )
+        return step_index
 
-        if cmd in ("/status", "/context", "status", "context"):
-            self._print_context_status(memory)
-            return "skip"
+    def _print_session_banner(self, env: Environment) -> None:
+        """Prints the session header: workspace, model, and the command reminder."""
+        print("\n🚀 Interactive Session Started")
+        print(f"📁 Project Workspace: {env.workspace_dir}")
+        if self.docker:
+            print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
+        provider = getattr(self.model, "provider", "") or ""
+        suffix = f" [{provider}]" if provider else ""
+        print(f"🤖 Active Model: {self.active_model_name()}{suffix}")
+        print(f"⚡ Prompt Caching: {self.cache_ttl.upper() if self.cache_ttl else 'OFF'}")
+        reasoning = self.get_reasoning_effort()
+        print(f"🧠 Reasoning Effort: {reasoning.upper() if reasoning else 'OFF'}")
+        print(
+            "💡 Commands: /model | /resume | /reasoning | /cache | /compact | /status | "
+            "/new | /skill | /help | /exit\n"
+        )
 
-        if cmd.startswith("/reasoning") or cmd == "reasoning":
-            self._handle_reasoning_command(user_input)
-            return "skip"
+    def _print_context_footer(self, memory: Memory) -> None:
+        """Prints the single-line context usage footer shown before each prompt."""
+        stats = memory.stats()
+        print(
+            _dim(
+                f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} "
+                f"tokens ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
+            )
+        )
 
-        if cmd.startswith("/cache") or cmd == "cache":
-            self._handle_cache_command(user_input)
-            return "skip"
-
-        if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
-            ("/model ", "/models ")
-        ):
-            arg = ""
-            if " " in user_input.strip():
-                arg = user_input.strip().split(" ", 1)[1].strip()
-            if not arg:
-                models = self.get_available_models()
-                curr_model = (
-                    getattr(self.model, "model", "")
-                    or getattr(self.model, "model_name", "")
-                    or ""
-                )
-                print("\n🤖 Available Models (from config):")
-                if not models:
-                    print(f"  • {curr_model} [active]")
-                else:
-                    for i, m in enumerate(models, 1):
-                        is_active = (
-                            m["name"].lower() == curr_model.lower()
-                            or m.get("model", "").lower() == curr_model.lower()
-                        )
-                        active_lbl = " [active]" if is_active else ""
-                        prov = f"[{m['provider']}] " if m.get("provider") else ""
-                        print(f"  {i}. {m['name']}{active_lbl} - {prov}{m.get('description', '')}")
-                print("\nTip: Type /model <name|number> to switch active model.\n")
-                return "skip"
-
-            ok, msg, _ = self.switch_model(arg)
-            if ok:
-                print(f"\n✅ {msg}\n")
-            else:
-                print(f"\n❌ {msg}\n")
-            return "skip"
-
-        if cmd in ("/resume", "/resumes", "resume", "resumes") or cmd.startswith(
-            ("/resume ", "/resumes ")
-        ):
-            arg = ""
-            if " " in user_input.strip():
-                arg = user_input.strip().split(" ", 1)[1].strip()
-            if not arg:
-                sessions = self.find_recent_sessions(limit=8)
-                print("\n📂 Recent Sessions:")
-                if not sessions:
-                    print("  No previous sessions found in runs directory.")
-                else:
-                    for i, s in enumerate(sessions, 1):
-                        ws_badge = " [this repo]" if s.get("matches_workspace") else ""
-                        print(f"  {i}. {s['run_id']}{ws_badge} ({s['total_steps']} steps) - {s['preview']}")
-                print("\nTip: Type /resume <number|session_id> to load a previous session.\n")
-                return "skip"
-
-            messages, meta = self.load_session(arg)
-            if not messages:
-                err = meta.get("error", f"Could not load session '{arg}'")
-                print(f"\n❌ {err}\n")
-                return "skip"
-
-            memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
-            if tracer is not None:
-                tracer.steps.clear()
-            if step_holder is not None:
-                step_holder[0] = meta.get("total_steps", 0) + 1
-            print(f"\n🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded).\n")
-            return "skip"
-
-        if cmd in ("/compact", "compact"):
-            old_chars = memory.total_chars()
-            did_compact = memory.compact_if_needed(force=True)
-            new_chars = memory.total_chars()
-            if did_compact:
-                old_tokens = old_chars // 4
-                new_tokens = new_chars // 4
-                freed_tokens = old_tokens - new_tokens
-                print(
-                    f"\n🧹 Compaction applied: freed ~{freed_tokens:,} tokens (~{old_tokens:,} -> ~{new_tokens:,} tokens).\n"
-                )
-            else:
-                print("\nℹ️ No older observations eligible for compaction at this time.\n")
-            return "skip"
-
-        if cmd in ("/new", "/reset", "new", "reset"):
-            memory.reset()
-            print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
-            return "skip"
-
-        if cmd in SKILL_COMMAND_ALIASES or cmd.startswith(SKILL_COMMAND_PREFIXES):
-            outcome = resolve_skill_command(user_input, skills or {})
-            if outcome.is_error:
-                print(f"\n❌ {outcome.message}\n")
-                return "skip"
-            if outcome.action == "skip":
-                print(f"\n{outcome.message}\n")
-                return "skip"
-            print(f"\n⚡ {outcome.message} ...\n")
-            self._add_prompt(memory, outcome.prompt or "", ws)
-            return "turn"
-
-        if user_input.startswith("/"):
-            outcome = resolve_slash_input(user_input, custom_commands, skills)
-            if outcome.is_error or outcome.prompt is None:
-                print(f"\n❌ {outcome.message}\n")
-                return "skip"
-            print(f"\n⚡ {outcome.message} ...\n")
-            self._add_prompt(memory, outcome.prompt, ws)
-            return "turn"
-
-        effective_prompt, attached = expand_tagged_files(user_input, ws)
-        if attached:
-            print(f"\n⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
-        memory.add_user(effective_prompt)
-        return "turn"
+    def _finalize_session(self, env: Environment, tracer: Tracer, run_dir: Path) -> None:
+        """Writes the patch and trace for an interactive session that has ended."""
+        patch_diff = env.get_git_patch()
+        if patch_diff:
+            patch_file = run_dir / "patch.diff"
+            patch_file.write_text(patch_diff, encoding="utf-8")
+            print(f"📦 Git patch saved to: {patch_file}")
+        _, md_path = tracer.finalize(
+            finish_reason="session_ended",
+            patch_diff=patch_diff,
+            telemetry=self.get_cache_stats(),
+        )
+        print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
 
     def run_interactive(
         self,
@@ -901,88 +755,29 @@ class Harness:
             initial_files={},
         )
 
-        step_idx = 1
-        if resume:
-            res_target = None if resume is True else resume
-            messages, meta = self.load_session(res_target)
-            if messages:
-                memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
-                step_idx = meta.get("total_steps", 0) + 1
-                print(
-                    f"\n🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded, continuing at step {step_idx}).\n"
-                )
-            else:
-                print(
-                    f"\n⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh session.\n"
-                )
-
-        custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
-        skills = _discover_skills(env.workspace_dir, self.global_dir)
+        turns = TurnState(step_index=self._restore_session(memory, resume))
+        commands = discover_commands(env.workspace_dir, self.global_dir)
+        skills = discover_skills(env.workspace_dir, self.global_dir)
+        router = self._make_router(
+            memory, commands, skills, ConsoleUI(), env.workspace_dir, tracer, turns
+        )
         tracer.compact = True
 
-        print("\n🚀 Interactive Session Started")
-        print(f"📁 Project Workspace: {env.workspace_dir}")
-        if self.docker:
-            print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
-        curr_model = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
-        curr_prov = getattr(self.model, "provider", "") or ""
-        prov_lbl = f" [{curr_prov}]" if curr_prov else ""
-        print(f"🤖 Active Model: {curr_model}{prov_lbl}")
-        cache_label = self.cache_ttl.upper() if self.cache_ttl else "OFF"
-        print(f"⚡ Prompt Caching: {cache_label}")
-        reasoning_label = self.get_reasoning_effort()
-        print(f"🧠 Reasoning Effort: {reasoning_label.upper() if reasoning_label else 'OFF'}")
-        print(
-            "💡 Commands: /model | /resume | /reasoning | /cache | /compact | /status | /new | /skill | /help | /exit\n"
-        )
-
-        has_pending_turn = False
+        self._print_session_banner(env)
         max_steps_per_turn = 30
-
-        step_idx_holder = [step_idx]
-
-        if initial_instruction and initial_instruction.strip():
-            action = self._dispatch_interactive_input(
-                initial_instruction.strip(),
-                memory,
-                custom_commands,
-                skills,
-                tracer=tracer,
-                step_holder=step_idx_holder,
-            )
-            step_idx = step_idx_holder[0]
-            if action == "turn":
-                has_pending_turn = True
-            elif action == "exit":
-                env.teardown()
-                return
+        pending_turn = self._submit(router, initial_instruction)
+        if pending_turn == EXIT:
+            env.teardown()
+            return
 
         try:
             while True:
-                # If we have an active instruction to execute, run the agent loop
-                if has_pending_turn:
-                    is_finished, reason, step_idx = self._execute_steps(
-                        loop=loop,
-                        tracer=tracer,
-                        start_step=step_idx,
-                        max_steps=max_steps_per_turn,
+                if pending_turn == TURN:
+                    pending_turn = self._run_pending_turn(
+                        loop, tracer, turns, max_steps_per_turn
                     )
-                    step_idx_holder[0] = step_idx
-                    if not is_finished and reason == "max_steps_exceeded":
-                        print(
-                            f"\n⚠️ Reached safety limit of {max_steps_per_turn} steps for this turn. Returning to prompt.\n"
-                        )
-                    has_pending_turn = False
 
-                # Render minimal context usage footer in pure tokens
-                stats = memory.stats()
-                print(
-                    _dim(
-                        f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} tokens "
-                        f"({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
-                    )
-                )
-
+                self._print_context_footer(memory)
                 try:
                     user_input = input("👤 You: ").strip()
                 except (KeyboardInterrupt, EOFError):
@@ -991,34 +786,41 @@ class Harness:
 
                 if not user_input:
                     continue
-
-                action = self._dispatch_interactive_input(
-                    user_input,
-                    memory,
-                    custom_commands,
-                    skills,
-                    tracer=tracer,
-                    step_holder=step_idx_holder,
-                )
-                step_idx = step_idx_holder[0]
-                if action == "exit":
+                pending_turn = self._submit(router, user_input)
+                if pending_turn == EXIT:
                     break
-                elif action == "turn":
-                    has_pending_turn = True
 
-            patch_diff = env.get_git_patch()
-            if patch_diff:
-                patch_file = run_dir / "patch.diff"
-                patch_file.write_text(patch_diff, encoding="utf-8")
-                print(f"📦 Git patch saved to: {patch_file}")
-
-            c_stats = self.get_cache_stats()
-            json_path, md_path = tracer.finalize(
-                finish_reason="session_ended", patch_diff=patch_diff, telemetry=c_stats
-            )
-            print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
+            self._finalize_session(env, tracer, run_dir)
         finally:
             env.teardown()
+
+    def _submit(self, router: CommandRouter, user_input: str | None) -> str:
+        """Dispatches one line of input; returns the resulting action."""
+        if not user_input or not user_input.strip():
+            return SKIP
+        return router.dispatch(user_input)
+
+    def _run_pending_turn(
+        self,
+        loop: AgentLoop,
+        tracer: Tracer,
+        turns: TurnState,
+        max_steps: int,
+    ) -> str:
+        """Executes the queued agent turn and returns the action to take next."""
+        outcome = run_steps(
+            self.model,
+            loop,
+            tracer,
+            turns.step_index,
+            max_steps,
+            max_retries=self.max_step_retries,
+            retry_delay=self.step_retry_delay,
+        )
+        turns.step_index = outcome.next_step
+        if not outcome.finished and outcome.reason == MAX_STEPS_EXCEEDED:
+            print(f"\n⚠️ Reached safety limit of {max_steps} steps for this turn. Returning to prompt.\n")
+        return SKIP
 
     def run_tui(
         self,
