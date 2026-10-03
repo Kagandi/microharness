@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 import curses
+import os
 import re
+import sys
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+SHIFT_ENTER_SEQUENCES: set[str | int] = {
+    "\x1b[13;2u",
+    "\x1b[27;2;13~",
+    "\x1b[13;2~",
+    "\x1bOM",
+    "\x1b[M",
+    "\x1b\r",
+    "\x1b\n",
+    545,
+    546,
+}
 
 DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "Free context tokens by compacting older turn observations"),
@@ -340,7 +354,12 @@ class TUIState:
         self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
         self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
+        self.workspace_files: list[str] = []
         self.selected_command_idx: int = 0
+
+    def set_workspace_files(self, files: list[str]) -> None:
+        """Loads workspace relative file paths for @ file tagging and autocomplete."""
+        self.workspace_files = list(files)
 
     def _rebuild_command_catalog(self) -> None:
         """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
@@ -381,6 +400,63 @@ class TUIState:
         self.skills = dict(skills)
         self._rebuild_command_catalog()
 
+    def get_current_file_tag_query(self) -> tuple[int, str] | None:
+        """Detects if cursor is currently inside or right after an @file tag token.
+
+        Returns (tag_start_idx, query) where tag_start_idx is the index of '@'.
+        Returns None if not currently typing an @ tag.
+        """
+        pos = min(self.cursor_pos, len(self.input_buffer)) if self.cursor_pos >= 0 else len(self.input_buffer)
+        sub = self.input_buffer[:pos]
+        m = re.search(r"(?:^|\s)@([^\s]*)$", sub)
+        if not m:
+            return None
+        full_match = m.group(0)
+        at_offset = full_match.find("@")
+        at_idx = m.start() + at_offset
+        query = m.group(1)
+        return (at_idx, query)
+
+    def get_matching_file_tags(self) -> list[tuple[str, str]]:
+        """Filters workspace files matching current @file tag query."""
+        tag_info = self.get_current_file_tag_query()
+        if tag_info is None:
+            return []
+        _, query = tag_info
+        q = query.lower()
+
+        prefix_matches: list[str] = []
+        substring_matches: list[str] = []
+        for f in self.workspace_files:
+            f_low = f.lower()
+            fname = os.path.basename(f).lower()
+            if not q:
+                prefix_matches.append(f)
+            elif f_low.startswith(q) or fname.startswith(q):
+                prefix_matches.append(f)
+            elif q in f_low:
+                substring_matches.append(f)
+
+        ranked = prefix_matches + substring_matches
+        return [(f"@{f}", "[file]") for f in ranked[:30]]
+
+    def complete_selected_file_tag(self) -> str | None:
+        """Completes the currently selected @file tag into input_buffer with a trailing space."""
+        tag_info = self.get_current_file_tag_query()
+        if tag_info is None:
+            return None
+        matches = self.get_matching_file_tags()
+        if not matches:
+            return None
+        idx = max(0, min(self.selected_command_idx, len(matches) - 1))
+        chosen_tag, _ = matches[idx]  # e.g. "@core/tui.py"
+        at_idx, query = tag_info
+        before = self.input_buffer[:at_idx]
+        after = self.input_buffer[at_idx + 1 + len(query):]
+        self.input_buffer = f"{before}{chosen_tag} {after}"
+        self.cursor_pos = len(before) + len(chosen_tag) + 1
+        return chosen_tag
+
     def get_matching_commands(self) -> list[tuple[str, str]]:
         """Filters command catalog matching current slash-command prefix in input buffer."""
         buf = self.input_buffer.lstrip().lower()
@@ -417,11 +493,19 @@ class TUIState:
         ]
 
     def select_next_command(self) -> None:
+        file_matches = self.get_matching_file_tags()
+        if file_matches:
+            self.selected_command_idx = (self.selected_command_idx + 1) % len(file_matches)
+            return
         matches = self.get_matching_commands()
         if matches:
             self.selected_command_idx = (self.selected_command_idx + 1) % len(matches)
 
     def select_prev_command(self) -> None:
+        file_matches = self.get_matching_file_tags()
+        if file_matches:
+            self.selected_command_idx = (self.selected_command_idx - 1) % len(file_matches)
+            return
         matches = self.get_matching_commands()
         if matches:
             self.selected_command_idx = (self.selected_command_idx - 1) % len(matches)
@@ -525,15 +609,23 @@ class TUIState:
         return wrapped[start_idx:end_idx]
 
     def handle_input_char(self, char_str: str) -> None:
-        """Appends character to input buffer."""
-        self.input_buffer += char_str
-        self.cursor_pos += len(char_str)
+        """Inserts character into input buffer at cursor position."""
+        pos = min(self.cursor_pos, len(self.input_buffer))
+        self.input_buffer = self.input_buffer[:pos] + char_str + self.input_buffer[pos:]
+        self.cursor_pos = pos + len(char_str)
+
+    def handle_newline(self) -> None:
+        """Inserts a newline character at cursor position for multiline editing."""
+        pos = min(self.cursor_pos, len(self.input_buffer))
+        self.input_buffer = self.input_buffer[:pos] + "\n" + self.input_buffer[pos:]
+        self.cursor_pos = pos + 1
 
     def handle_backspace(self) -> None:
-        """Removes the last character from input buffer."""
-        if self.input_buffer:
-            self.input_buffer = self.input_buffer[:-1]
-            self.cursor_pos = max(0, self.cursor_pos - 1)
+        """Removes the character before cursor position from input buffer."""
+        if self.input_buffer and self.cursor_pos > 0:
+            pos = min(self.cursor_pos, len(self.input_buffer))
+            self.input_buffer = self.input_buffer[: pos - 1] + self.input_buffer[pos:]
+            self.cursor_pos = max(0, pos - 1)
 
     def clear_input(self) -> str:
         """Clears and returns the current input buffer."""
@@ -591,13 +683,16 @@ class CursesTUI:
         except curses.error:
             pass
 
-        # 3. Main Transcript Area (Rows 2 to H - 5)
-        sep_row = h - 4
-        path_row = h - 3
-        telemetry_row = h - 2
-        input_row = h - 1
+        # 3. Main Transcript Area (Rows 2 to H - 5 or dynamic multiline input)
+        raw_lines = self.state.input_buffer.split("\n")
+        num_input_lines = len(raw_lines)
+        input_box_h = max(1, min(6, num_input_lines))
+        input_start_y = h - input_box_h
+        telemetry_row = input_start_y - 1
+        path_row = telemetry_row - 1
+        sep_row = path_row - 1
 
-        transcript_height = max(1, h - 6)
+        transcript_height = max(1, sep_row - 2)
         visible_lines = self.state.get_visible_slice(height=transcript_height, width=w)
         for i, (text, tag) in enumerate(visible_lines):
             row = 2 + i
@@ -653,7 +748,7 @@ class CursesTUI:
                 except curses.error:
                     pass
 
-        # 4. Status Cockpit: Row H - 4 (Sep), Row H - 3 (Path), Row H - 2 (Telemetry)
+        # 4. Status Cockpit: Row input_start_y - 3 (Sep), Row input_start_y - 2 (Path), Row input_start_y - 1 (Telemetry)
         path_label = self.state.cwd or ""
         if self.state.git_branch:
             path_label = f"{path_label} ({self.state.git_branch})" if path_label else f"({self.state.git_branch})"
@@ -699,8 +794,16 @@ class CursesTUI:
         except curses.error:
             pass
 
-        # 5. Floating Slash-Command Menu (drawn above status cockpit, full screen width)
-        matches = self.state.get_matching_commands()
+        # 5. Floating Autocomplete Menu (Workspace Files or Slash Commands)
+        file_matches = self.state.get_matching_file_tags()
+        cmd_matches = self.state.get_matching_commands()
+        matches = file_matches if file_matches else cmd_matches
+        is_file_menu = bool(file_matches)
+        is_skill_menu = (
+            not is_file_menu
+            and self.state.input_buffer.lstrip().lower().startswith(("/skill ", "/skills "))
+        )
+
         if matches:
             idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
             max_items = max(6, min(len(matches), max(6, sep_row - 6)))
@@ -717,8 +820,13 @@ class CursesTUI:
             start_y = max(1, sep_row - box_h)
             start_x = 0
 
-            is_skill_menu = self.state.input_buffer.lstrip().lower().startswith(("/skill ", "/skills "))
-            title_part = " Available Skills " if is_skill_menu else " Available Commands "
+            if is_file_menu:
+                title_part = " Workspace Files "
+            elif is_skill_menu:
+                title_part = " Available Skills "
+            else:
+                title_part = " Available Commands "
+
             dash_count = max(0, box_w - 2 - len(title_part) - 2)
             border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
             mid_sep = "├" + "─" * (box_w - 2) + "┤"
@@ -727,7 +835,13 @@ class CursesTUI:
 
             try:
                 stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
-                cmd_col_w = 22 if is_skill_menu else 12
+                if is_file_menu:
+                    cmd_col_w = max(24, min(42, box_w - 12))
+                elif is_skill_menu:
+                    cmd_col_w = 22
+                else:
+                    cmd_col_w = 12
+
                 for row_i, (cmd, desc) in enumerate(visible_matches):
                     y = start_y + 1 + row_i
                     is_selected = (row_i == rel_idx)
@@ -756,16 +870,36 @@ class CursesTUI:
             except curses.error:
                 pass
 
-        # 6. Bottom Anchored Input Box (Row H - 1)
+        # 6. Bottom Anchored Input Box (Multiline Support)
         prompt_label = "> "
+        cont_label = "  "
         avail_input_w = max(5, w - len(prompt_label) - 2)
-        display_input = self.state.input_buffer[-avail_input_w:]
+
+        before_cursor = self.state.input_buffer[: self.state.cursor_pos]
+        cursor_line_idx = before_cursor.count("\n")
+        cursor_col_in_line = len(before_cursor.split("\n")[-1])
+        start_line_idx = max(0, num_input_lines - input_box_h)
 
         try:
-            stdscr.addstr(input_row, 0, prompt_label, curses.A_BOLD)
-            stdscr.addstr(input_row, len(prompt_label), display_input)
-            cursor_col = min(w - 1, len(prompt_label) + len(display_input))
-            stdscr.move(input_row, cursor_col)
+            for row_i in range(input_box_h):
+                cur_line_idx = start_line_idx + row_i
+                cur_text = raw_lines[cur_line_idx]
+                prefix = prompt_label if cur_line_idx == 0 else cont_label
+                display_chunk = cur_text[-avail_input_w:]
+                row_y = input_start_y + row_i
+                stdscr.addstr(row_y, 0, prefix, curses.A_BOLD if cur_line_idx == 0 else curses.A_DIM)
+                stdscr.addstr(row_y, len(prefix), display_chunk)
+
+            if cursor_line_idx >= start_line_idx:
+                c_y = input_start_y + (cursor_line_idx - start_line_idx)
+                cur_line_text = raw_lines[cursor_line_idx]
+                if len(cur_line_text) > avail_input_w:
+                    disp_offset = len(cur_line_text) - avail_input_w
+                    rel_col = max(0, cursor_col_in_line - disp_offset)
+                else:
+                    rel_col = cursor_col_in_line
+                c_x = min(w - 1, len(prompt_label) + rel_col)
+                stdscr.move(c_y, c_x)
         except curses.error:
             pass
 
@@ -776,10 +910,20 @@ class CursesTUI:
 
         Returns False if the interactive session should terminate (e.g. /exit), else True.
         """
-        matches = self.state.get_matching_commands()
+        file_matches = self.state.get_matching_file_tags()
+        cmd_matches = self.state.get_matching_commands()
 
+        # 1. Shift+Enter / Alt+Enter: Insert newline for multiline input
+        if ch in SHIFT_ENTER_SEQUENCES:
+            self.state.handle_newline()
+            return True
+
+        # 2. Enter: Complete open autocomplete selection or submit
         if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
-            if matches and not self.state.input_buffer.endswith(" "):
+            if file_matches:
+                self.state.complete_selected_file_tag()
+                return True
+            if cmd_matches and not self.state.input_buffer.endswith(" "):
                 self.state.complete_selected_command()
             user_text = self.state.clear_input()
             if not user_text:
@@ -789,31 +933,46 @@ class CursesTUI:
             on_user_submit(user_text)
             return True
 
+        # 3. Tab: Complete selection or cycle forward
         if ch in ("\t", 9):
-            if matches:
-                if len(matches) == 1:
+            if file_matches:
+                if len(file_matches) == 1:
+                    self.state.complete_selected_file_tag()
+                else:
+                    self.state.select_next_command()
+                return True
+            if cmd_matches:
+                if len(cmd_matches) == 1:
                     self.state.complete_selected_command()
                 else:
                     self.state.select_next_command()
+                return True
             return True
 
+        # 4. Up / Shift-Tab: Cycle backward or scroll up
         if ch in (curses.KEY_UP, curses.KEY_BTAB, 353, "\x1b[Z"):
-            if matches:
+            if file_matches or cmd_matches:
                 self.state.select_prev_command()
                 return True
             self.state.scroll_up(5)
             return True
 
+        # 5. Down: Cycle forward or scroll down
         if ch in (curses.KEY_DOWN,):
-            if matches:
+            if file_matches or cmd_matches:
                 self.state.select_next_command()
                 return True
             self.state.scroll_down(5)
             return True
 
+        # 6. Right Arrow: Complete selection
         if ch in (curses.KEY_RIGHT,):
-            if matches:
+            if file_matches:
+                self.state.complete_selected_file_tag()
+                return True
+            if cmd_matches:
                 self.state.complete_selected_command()
+                return True
             return True
 
         if ch in (curses.KEY_PPAGE,):
@@ -824,9 +983,18 @@ class CursesTUI:
             self.state.scroll_down(5)
             return True
 
+        # 7. Escape: Dismiss menu or clear tag query
         if ch in (27, "\x1b"):
-            if matches:
+            if file_matches:
+                tag_info = self.state.get_current_file_tag_query()
+                if tag_info:
+                    at_idx, _ = tag_info
+                    self.state.input_buffer = self.state.input_buffer[:at_idx]
+                    self.state.cursor_pos = at_idx
+                return True
+            if cmd_matches:
                 self.state.clear_input()
+                return True
             return True
 
         if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
@@ -849,6 +1017,13 @@ class CursesTUI:
             stdscr.keypad(True)
             curses.curs_set(1)
 
+            # Request modifyOtherKeys level 2 in modern xterm/iTerm2 to report Shift+Enter
+            try:
+                sys.stdout.write("\x1b[>4;2m")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
             self.draw(stdscr)
 
             while True:
@@ -859,8 +1034,31 @@ class CursesTUI:
                 except curses.error:
                     continue
 
+                if ch in (27, "\x1b"):
+                    stdscr.nodelay(True)
+                    seq = "\x1b"
+                    while True:
+                        try:
+                            nxt = stdscr.get_wch()
+                            if isinstance(nxt, int):
+                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
+                            else:
+                                seq += str(nxt)
+                        except curses.error:
+                            break
+                    stdscr.nodelay(False)
+                    if len(seq) > 1:
+                        ch = seq
+
                 if not self.handle_key(ch, on_user_submit):
                     break
                 self.draw(stdscr)
+
+            # Restore normal key reporting mode
+            try:
+                sys.stdout.write("\x1b[>4;0m")
+                sys.stdout.flush()
+            except Exception:
+                pass
 
         curses.wrapper(_main)

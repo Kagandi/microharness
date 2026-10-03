@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, TypeVar
@@ -121,3 +123,165 @@ def discover_resources(
                 )
 
     return discovered
+
+
+IGNORED_WORKSPACE_DIRS: set[str] = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".tox",
+    ".cache",
+    "build",
+    "dist",
+}
+
+IGNORED_WORKSPACE_EXTENSIONS: set[str] = {
+    ".pyc",
+    ".pyo",
+    ".pyd",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".exe",
+    ".bin",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".webp",
+    ".svg",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".7z",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".mp3",
+    ".mp4",
+    ".wav",
+    ".mov",
+}
+
+
+def discover_workspace_files(
+    workspace_dir: Path | str,
+    max_files: int = 2000,
+) -> list[str]:
+    """Finds relative file paths within the workspace for @ file-tagging and autocomplete."""
+    ws = Path(workspace_dir).resolve()
+    if not ws.is_dir():
+        return []
+
+    collected: list[str] = []
+    for root, dirnames, filenames in os.walk(ws, followlinks=False):
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in IGNORED_WORKSPACE_DIRS
+        ]
+        dirnames.sort()
+
+        for f in sorted(filenames):
+            if f.startswith(".") and f not in (".gitignore", ".env.example"):
+                continue
+            ext = os.path.splitext(f)[1].lower()
+            if ext in IGNORED_WORKSPACE_EXTENSIONS:
+                continue
+
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, ws).replace("\\", "/")
+            collected.append(rel_path)
+            if len(collected) >= max_files:
+                break
+        if len(collected) >= max_files:
+            break
+
+    return sorted(collected)
+
+
+def expand_tagged_files(
+    user_text: str,
+    workspace_dir: Path | str,
+    max_file_chars: int = 50_000,
+) -> tuple[str, list[str]]:
+    """Detects @file tags in user_text, reads referenced workspace files, and appends context.
+
+    Returns:
+        (effective_prompt, attached_files)
+    """
+    ws = Path(workspace_dir).resolve()
+    matches = re.finditer(r"(?:^|\s)@([a-zA-Z0-9_\-\./\\]+)", user_text)
+    seen: set[str] = set()
+    attached: list[str] = []
+    file_sections: list[str] = []
+
+    for m in matches:
+        raw_rel = m.group(1).strip().rstrip(".,;:!?)")
+        clean_rel = raw_rel.replace("\\", "/").rstrip("/")
+        if not clean_rel or clean_rel in seen:
+            continue
+        seen.add(clean_rel)
+
+        file_path = (ws / clean_rel).resolve()
+        try:
+            file_path.relative_to(ws)
+        except ValueError:
+            continue
+
+        if not file_path.is_file():
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            if len(content) > max_file_chars:
+                content = (
+                    content[:max_file_chars]
+                    + f"\n\n[... Truncated: File exceeds {max_file_chars:,} characters ...]"
+                )
+            attached.append(clean_rel)
+            lang = _guess_file_lang(clean_rel)
+            file_sections.append(f"[Attached File: @{clean_rel}]\n```{lang}\n{content}\n```")
+        except Exception:
+            continue
+
+    if not file_sections:
+        return user_text, []
+
+    effective_prompt = user_text + "\n\n" + "\n\n".join(file_sections)
+    return effective_prompt, attached
+
+
+def _guess_file_lang(path_str: str) -> str:
+    ext = os.path.splitext(path_str)[1].lower()
+    mapping = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".json": "json",
+        ".md": "markdown",
+        ".html": "html",
+        ".css": "css",
+        ".sh": "bash",
+        ".zsh": "bash",
+        ".toml": "toml",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".sql": "sql",
+        ".rs": "rust",
+        ".go": "go",
+    }
+    return mapping.get(ext, "")

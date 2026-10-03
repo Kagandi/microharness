@@ -7,6 +7,8 @@ from pathlib import Path
 from core.discovery import (
     DiscoveredResource,
     discover_resources,
+    discover_workspace_files,
+    expand_tagged_files,
     resolve_search_directories,
 )
 
@@ -150,6 +152,88 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertIn("valid", results)
         self.assertEqual(results["valid"].item, "valid")
+
+    def test_discover_workspace_files_filtering_and_sorting(self):
+        """Invariant: discover_workspace_files finds project files, ignores binary/vcs/caches, and sorts results."""
+        workspace = self.base / "ws_files"
+        (workspace / "src").mkdir(parents=True)
+        (workspace / "tests").mkdir(parents=True)
+        (workspace / ".git" / "objects").mkdir(parents=True)
+        (workspace / "__pycache__").mkdir(parents=True)
+        (workspace / ".venv" / "lib").mkdir(parents=True)
+
+        # Valid source files
+        (workspace / "README.md").write_text("# Readme", encoding="utf-8")
+        (workspace / ".gitignore").write_text("*.pyc", encoding="utf-8")
+        (workspace / "src" / "app.py").write_text("print('app')", encoding="utf-8")
+        (workspace / "tests" / "test_app.py").write_text("def test(): pass", encoding="utf-8")
+
+        # Files that MUST be ignored
+        (workspace / ".git" / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
+        (workspace / "__pycache__" / "app.cpython-311.pyc").write_bytes(b"\x00\x01")
+        (workspace / ".venv" / "lib" / "pip.py").write_text("# venv pip", encoding="utf-8")
+        (workspace / "src" / "compiled.so").write_bytes(b"\x7fELF")
+        (workspace / "logo.png").write_bytes(b"\x89PNG")
+        (workspace / ".secret").write_text("hidden", encoding="utf-8")
+
+        files = discover_workspace_files(workspace)
+
+        # Invariant: Only valid non-ignored files are returned, with normalized relative paths
+        expected = [".gitignore", "README.md", "src/app.py", "tests/test_app.py"]
+        self.assertEqual(files, expected)
+
+        # Invariant: Non-existent directory returns empty list
+        self.assertEqual(discover_workspace_files(self.base / "nonexistent_dir"), [])
+
+    def test_expand_tagged_files_context_injection_and_edge_cases(self):
+        """Invariant: expand_tagged_files attaches file contents with markdown blocks and handles edge cases."""
+        workspace = self.base / "ws_expand"
+        (workspace / "core").mkdir(parents=True)
+
+        tui_content = "class CursesTUI:\n    pass\n"
+        readme_content = "# Project Info\nLine 2\n"
+        (workspace / "core" / "tui.py").write_text(tui_content, encoding="utf-8")
+        (workspace / "README.md").write_text(readme_content, encoding="utf-8")
+
+        # 1. Single tagged file
+        text1 = "Please review @core/tui.py today"
+        prompt1, attached1 = expand_tagged_files(text1, workspace)
+        self.assertEqual(attached1, ["core/tui.py"])
+        self.assertIn("Please review @core/tui.py today", prompt1)
+        self.assertIn("[Attached File: @core/tui.py]", prompt1)
+        self.assertIn("```python\nclass CursesTUI:\n    pass\n\n```", prompt1)
+
+        # 2. Multiple tagged files with trailing punctuation
+        text2 = "Compare @core/tui.py, with @README.md."
+        prompt2, attached2 = expand_tagged_files(text2, workspace)
+        self.assertEqual(attached2, ["core/tui.py", "README.md"])
+        self.assertIn("[Attached File: @core/tui.py]", prompt2)
+        self.assertIn("[Attached File: @README.md]", prompt2)
+
+        # 3. Duplicate tags attached only once
+        text3 = "Check @core/tui.py and re-check @core/tui.py"
+        prompt3, attached3 = expand_tagged_files(text3, workspace)
+        self.assertEqual(attached3, ["core/tui.py"])
+        self.assertEqual(prompt3.count("[Attached File: @core/tui.py]"), 1)
+
+        # 4. Non-existent file is safely ignored
+        text4 = "Look at @nonexistent.py"
+        prompt4, attached4 = expand_tagged_files(text4, workspace)
+        self.assertEqual(attached4, [])
+        self.assertEqual(prompt4, text4)
+
+        # 5. Email addresses not treated as file tags
+        text5 = "Contact developer@example.com for info"
+        prompt5, attached5 = expand_tagged_files(text5, workspace)
+        self.assertEqual(attached5, [])
+        self.assertEqual(prompt5, text5)
+
+        # 6. File truncation when exceeding limit
+        long_content = "x" * 150
+        (workspace / "long.txt").write_text(long_content, encoding="utf-8")
+        prompt6, attached6 = expand_tagged_files("@long.txt", workspace, max_file_chars=50)
+        self.assertEqual(attached6, ["long.txt"])
+        self.assertIn("[... Truncated: File exceeds 50 characters ...]", prompt6)
 
 
 if __name__ == "__main__":

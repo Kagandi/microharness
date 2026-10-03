@@ -584,6 +584,132 @@ class TestTUI(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(italic_calls), 1)
 
+    def test_file_tag_query_detection_and_matching(self):
+        """Invariant: TUIState detects @file tag queries and matches workspace files with ranking."""
+        state = TUIState()
+        state.set_workspace_files([
+            "core/harness.py",
+            "core/tui.py",
+            "tests/test_tui.py",
+            "README.md",
+        ])
+
+        # 1. Detection at beginning
+        state.input_buffer = "@"
+        state.cursor_pos = 1
+        self.assertEqual(state.get_current_file_tag_query(), (0, ""))
+
+        state.input_buffer = "@co"
+        state.cursor_pos = 3
+        self.assertEqual(state.get_current_file_tag_query(), (0, "co"))
+
+        # 2. Detection in sentence
+        state.input_buffer = "Review @tui"
+        state.cursor_pos = len(state.input_buffer)
+        self.assertEqual(state.get_current_file_tag_query(), (7, "tui"))
+
+        # 3. Negative detection: email address or plain text
+        state.input_buffer = "email@test.com"
+        state.cursor_pos = len(state.input_buffer)
+        self.assertIsNone(state.get_current_file_tag_query())
+
+        state.input_buffer = "plain text"
+        state.cursor_pos = len(state.input_buffer)
+        self.assertIsNone(state.get_current_file_tag_query())
+
+        # 4. Matching file tags
+        state.input_buffer = "Review @tui"
+        state.cursor_pos = len(state.input_buffer)
+        matches = state.get_matching_file_tags()
+        self.assertEqual(len(matches), 2)
+        # Matches core/tui.py and tests/test_tui.py
+        matched_tags = [tag for tag, _ in matches]
+        self.assertIn("@core/tui.py", matched_tags)
+        self.assertIn("@tests/test_tui.py", matched_tags)
+
+        # 5. Autocompleting chosen file tag in-place with trailing space
+        state.selected_command_idx = 0
+        completed = state.complete_selected_file_tag()
+        self.assertEqual(completed, matches[0][0])
+        self.assertEqual(state.input_buffer, f"Review {matches[0][0]} ")
+        # After completion (trailing space), query is inactive
+        self.assertIsNone(state.get_current_file_tag_query())
+
+    def test_shift_enter_multiline_editing_and_submit(self):
+        """Invariant: Shift+Enter and Alt+Enter insert newlines, while Enter submits full multiline text."""
+        state = TUIState()
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+
+        def dummy_submit(text: str) -> None:
+            submitted.append(text)
+
+        # 1. Type first line
+        state.handle_input_char("First line")
+        self.assertEqual(state.input_buffer, "First line")
+
+        # 2. Shift+Enter via CSI-u sequence \x1b[13;2u
+        ret = tui.handle_key("\x1b[13;2u", dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(submitted, [])
+        self.assertEqual(state.input_buffer, "First line\n")
+
+        # 3. Type second line
+        state.handle_input_char("Second line")
+        self.assertEqual(state.input_buffer, "First line\nSecond line")
+
+        # 4. Alt/Option+Enter via \x1b\r
+        ret = tui.handle_key("\x1b\r", dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(submitted, [])
+        self.assertEqual(state.input_buffer, "First line\nSecond line\n")
+
+        # 5. Type third line
+        state.handle_input_char("Third line")
+        self.assertEqual(state.input_buffer, "First line\nSecond line\nThird line")
+
+        # 6. Backspace removes across characters
+        state.handle_backspace()
+        self.assertEqual(state.input_buffer, "First line\nSecond line\nThird lin")
+
+        # 7. Standard Enter submits complete multiline text and clears buffer
+        ret = tui.handle_key("\n", dummy_submit)
+        self.assertTrue(ret)
+        self.assertEqual(submitted, ["First line\nSecond line\nThird lin"])
+        self.assertEqual(state.input_buffer, "")
+
+    def test_multiline_input_rendering_and_file_autocomplete_menu(self):
+        """Invariant: CursesTUI.draw renders multiline input prompts and Workspace Files menu."""
+        state = TUIState()
+        state.set_workspace_files(["core/harness.py", "core/tui.py"])
+        state.input_buffer = "Line 1\nLine 2 @core"
+        state.cursor_pos = len(state.input_buffer)
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        calls = mock_stdscr.addstr.call_args_list
+
+        # Verify multiline prompt prefix (> and continuation space)
+        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        self.assertIn("> ", rendered_texts)
+        self.assertIn("Line 1", rendered_texts)
+        self.assertIn("Line 2 @core", rendered_texts)
+
+        # Verify Workspace Files popup menu is rendered
+        ws_menu_calls = [c for c in calls if "Workspace Files" in str(c)]
+        self.assertGreaterEqual(len(ws_menu_calls), 1)
+
+        # Verify file item @core/harness.py in menu
+        item_calls = [c for c in calls if "@core/harness.py" in str(c)]
+        self.assertGreaterEqual(len(item_calls), 1)
+
+        # Escape key dismisses the file tag query
+        tui.handle_key(27, lambda text: None)
+        self.assertEqual(state.input_buffer, "Line 1\nLine 2 ")
+
 
 if __name__ == "__main__":
     unittest.main()

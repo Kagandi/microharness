@@ -1885,6 +1885,38 @@ def get_tools(env=None):
                 self.assertIn("/deploy-tool", printed)
                 self.assertIn("/my-linter", printed)
 
+            # 14. File tagging with @ in interactive input
+            sample_file = ws_dir / "sample.py"
+            sample_file.write_text("def hello(): return 'world'", encoding="utf-8")
+
+            act = harness._dispatch_interactive_input(
+                "Review @sample.py please",
+                memory,
+                custom_commands={},
+                skills=discovered,
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(act, "turn")
+            self.assertEqual(len(memory.messages), 5)
+            last_content = memory.messages[-1].content
+            self.assertIn("Review @sample.py please", last_content)
+            self.assertIn("[Attached File: @sample.py]", last_content)
+            self.assertIn("def hello(): return 'world'", last_content)
+
+            # 15. File tagging with direct skill command
+            act = harness._dispatch_interactive_input(
+                "/my-linter @sample.py",
+                memory,
+                custom_commands={},
+                skills=discovered,
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(act, "turn")
+            self.assertEqual(len(memory.messages), 6)
+            skill_content = memory.messages[-1].content
+            self.assertIn("[Active Skill: my-linter]", skill_content)
+            self.assertIn("[Attached File: @sample.py]", skill_content)
+
 
 if __name__ == "__main__":
     unittest.main()

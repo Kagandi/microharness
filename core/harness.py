@@ -7,7 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from core.discovery import discover_resources
+from core.discovery import (
+    discover_resources,
+    discover_workspace_files,
+    expand_tagged_files,
+)
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
@@ -398,6 +402,10 @@ class Harness:
         self.max_step_retries = _cfg("max_step_retries", max_step_retries, int, 3)
         self.step_retry_delay = _cfg("step_retry_delay", step_retry_delay, float, 5.0)
         self.verbose = verbose
+
+    @property
+    def workspace_dir(self) -> Path:
+        return self.explicit_workspace_dir if self.explicit_workspace_dir is not None else Path.cwd()
 
     def set_cache_ttl(self, ttl: str | None) -> str | None:
         """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
@@ -909,6 +917,7 @@ class Harness:
         memory: Memory,
         custom_commands: dict[str, tuple[str, str, str]],
         skills: dict[str, tuple[str, str, str, str]] | None = None,
+        workspace_dir: Path | None = None,
     ) -> str:
         """Processes an interactive user input line.
 
@@ -917,6 +926,7 @@ class Harness:
             "turn" if an agent turn should be executed,
             "skip" if command was handled internally without calling the model.
         """
+        ws = workspace_dir or self.workspace_dir
         cmd = user_input.lower().strip()
         if cmd in ("/exit", "exit", "/quit", "quit"):
             print("Ending session.")
@@ -971,6 +981,9 @@ class Harness:
                 return "skip"
             print(f"\n⚡ {msg} ...\n")
             if eff_prompt:
+                eff_prompt, attached = expand_tagged_files(eff_prompt, ws)
+                if attached:
+                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
                 memory.add_user(eff_prompt)
             return "turn"
 
@@ -980,7 +993,10 @@ class Harness:
             if cmd_key in custom_commands:
                 _, template, scope = custom_commands[cmd_key]
                 expanded_prompt = _expand_command(template, args_part)
+                expanded_prompt, attached = expand_tagged_files(expanded_prompt, ws)
                 print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                if attached:
+                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
                 memory.add_user(expanded_prompt)
                 return "turn"
             elif skills and cmd_key in skills:
@@ -990,13 +1006,19 @@ class Harness:
                     effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nTask:\n{instr}"
                 else:
                     effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nPlease follow the instructions from the '{cmd_key}' skill above."
+                effective_prompt, attached = expand_tagged_files(effective_prompt, ws)
                 print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                if attached:
+                    print(f"⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
                 memory.add_user(effective_prompt)
                 return "turn"
             print(f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n")
             return "skip"
 
-        memory.add_user(user_input)
+        effective_prompt, attached = expand_tagged_files(user_input, ws)
+        if attached:
+            print(f"\n⚡ Attached {len(attached)} file(s): " + ", ".join(f"@{f}" for f in attached) + "\n")
+        memory.add_user(effective_prompt)
         return "turn"
 
     def run_interactive(
@@ -1127,6 +1149,7 @@ class Harness:
         state.git_branch = get_git_branch(env.workspace_dir)
         state.set_custom_commands(custom_commands)
         state.set_skills(skills)
+        state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.update_status(memory.stats(), self.get_cache_stats())
 
         step_idx = 1
@@ -1206,7 +1229,11 @@ class Harness:
             else:
                 effective_prompt = user_text
 
+            effective_prompt, attached_files = expand_tagged_files(effective_prompt, env.workspace_dir)
             state.add_user(user_text)
+            if attached_files:
+                names = ", ".join(f"@{f}" for f in attached_files)
+                state.add_system(f"⚡ Attached {len(attached_files)} file(s): {names}")
             memory.add_user(effective_prompt)
             if tui.stdscr:
                 tui.draw(tui.stdscr)
