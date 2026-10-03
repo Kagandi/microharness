@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, TypeVar
@@ -132,24 +133,19 @@ def discover_resources(
     return discovered
 
 
+# Build-output and VCS directories are ecosystem-specific, so this is a minimal
+# fallback only. Whenever the workspace is a git repository we ask git instead
+# (see `_git_ignored`), which applies the repo's own ignore rules exactly.
+# Dot-directories are already filtered during the walk.
 IGNORED_WORKSPACE_DIRS: set[str] = {
     ".git",
-    ".hg",
-    ".svn",
     "__pycache__",
-    ".venv",
-    "venv",
-    "env",
     "node_modules",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".mypy_cache",
-    ".tox",
-    ".cache",
-    "build",
-    "dist",
 }
 
+# Binary/media extensions, kept as-is: unlike build directories this is an
+# intrinsic property of the file, not a per-ecosystem guess, and most repos
+# commit their images and fonts so git will not filter them.
 IGNORED_WORKSPACE_EXTENSIONS: set[str] = {
     ".pyc",
     ".pyo",
@@ -185,11 +181,45 @@ IGNORED_WORKSPACE_EXTENSIONS: set[str] = {
 }
 
 
+def _git_ignored(ws: Path, rel_paths: list[str]) -> set[str]:
+    """Returns the subset of rel_paths excluded by the repository's own ignore rules.
+
+    Delegates to `git check-ignore` so negation (`!keep.log`), anchoring
+    (`/build`), `**` globs, directory-only rules and nested .gitignore files are
+    honoured exactly, in a single batched subprocess. Returns an empty set when
+    git is unavailable or the workspace is not a repository (exit 128), leaving
+    the caller on the built-in fallback.
+
+    Deliberately does *not* pass ``--no-index``: git never reports a tracked file
+    as ignored, and a file the user committed is source they care about even when
+    it also matches a broad rule such as ``*.log``.
+    """
+    if not rel_paths:
+        return set()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ws), "check-ignore", "--stdin"],
+            input="\n".join(rel_paths) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode not in (0, 1):
+        return set()
+    return {line for line in proc.stdout.splitlines() if line}
+
+
 def discover_workspace_files(
     workspace_dir: Path | str,
     max_files: int = 2000,
 ) -> list[str]:
-    """Finds relative file paths within the workspace for @ file-tagging and autocomplete."""
+    """Finds relative file paths within the workspace for @ file-tagging and autocomplete.
+
+    This list only drives autocomplete; an explicitly tagged `@path` is always
+    readable regardless of what is filtered here.
+    """
     ws = Path(workspace_dir).resolve()
     if not ws.is_dir():
         return []
@@ -216,6 +246,10 @@ def discover_workspace_files(
                 break
         if len(collected) >= max_files:
             break
+
+    ignored = _git_ignored(ws, collected)
+    if ignored:
+        collected = [p for p in collected if p not in ignored]
 
     return sorted(collected)
 
@@ -260,8 +294,7 @@ def expand_tagged_files(
                     + f"\n\n[... Truncated: File exceeds {max_file_chars:,} characters ...]"
                 )
             attached.append(clean_rel)
-            lang = _guess_file_lang(clean_rel)
-            file_sections.append(f"[Attached File: @{clean_rel}]\n```{lang}\n{content}\n```")
+            file_sections.append(f"[Attached File: @{clean_rel}]\n```\n{content}\n```")
         except Exception:
             continue
 
@@ -270,25 +303,3 @@ def expand_tagged_files(
 
     effective_prompt = user_text + "\n\n" + "\n\n".join(file_sections)
     return effective_prompt, attached
-
-
-def _guess_file_lang(path_str: str) -> str:
-    ext = os.path.splitext(path_str)[1].lower()
-    mapping = {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".json": "json",
-        ".md": "markdown",
-        ".html": "html",
-        ".css": "css",
-        ".sh": "bash",
-        ".zsh": "bash",
-        ".toml": "toml",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".sql": "sql",
-        ".rs": "rust",
-        ".go": "go",
-    }
-    return mapping.get(ext, "")

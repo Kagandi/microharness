@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from core.discovery import (
@@ -212,7 +215,7 @@ class TestDiscovery(unittest.TestCase):
         self.assertEqual(attached1, ["core/tui.py"])
         self.assertIn("Please review @core/tui.py today", prompt1)
         self.assertIn("[Attached File: @core/tui.py]", prompt1)
-        self.assertIn("```python\nclass CursesTUI:\n    pass\n\n```", prompt1)
+        self.assertIn("```\nclass CursesTUI:\n    pass\n\n```", prompt1)
 
         # 2. Multiple tagged files with trailing punctuation
         text2 = "Compare @core/tui.py, with @README.md."
@@ -245,6 +248,116 @@ class TestDiscovery(unittest.TestCase):
         prompt6, attached6 = expand_tagged_files("@long.txt", workspace, max_file_chars=50)
         self.assertEqual(attached6, ["long.txt"])
         self.assertIn("[... Truncated: File exceeds 50 characters ...]", prompt6)
+
+    def _make_ws(self, root: Path) -> Path:
+        for sub in ("src", "build", "dist", "node_modules/pkg", "sub/generated"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        (root / "src" / "app.py").write_text("x = 1", encoding="utf-8")
+        (root / "build" / "out.py").write_text("# build output", encoding="utf-8")
+        (root / "dist" / "bundle.js").write_text("bundled", encoding="utf-8")
+        (root / "node_modules" / "pkg" / "i.js").write_text("dep", encoding="utf-8")
+        (root / "sub" / "generated" / "g.ts").write_text("gen", encoding="utf-8")
+        (root / "app.log").write_text("noise", encoding="utf-8")
+        (root / "important.log").write_text("keep me", encoding="utf-8")
+        (root / "secrets.txt").write_text("TOKEN=abc", encoding="utf-8")
+        (root / ".gitignore").write_text(
+            "build/\ndist/\n*.log\nsecrets.txt\n!important.log\n", encoding="utf-8"
+        )
+        return root
+
+    @unittest.skipUnless(shutil.which("git"), "git is required for check-ignore delegation")
+    def test_discover_workspace_files_defers_to_repository_ignore_rules(self):
+        """Invariant: in a git repo the repo's own ignore rules decide, including negation."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = self._make_ws(Path(tmp_dir) / "repo")
+            subprocess.run(["git", "init", "-q", "."], cwd=ws, check=True)
+
+            found = discover_workspace_files(ws)
+
+            # Excluded by the repository's rules.
+            self.assertNotIn("build/out.py", found)
+            self.assertNotIn("dist/bundle.js", found)
+            self.assertNotIn("node_modules/pkg/i.js", found)
+            self.assertNotIn("app.log", found)
+            self.assertNotIn("secrets.txt", found)
+            # Negation (!important.log) must win over the earlier *.log rule.
+            self.assertIn("important.log", found)
+            # Not mentioned by any rule.
+            self.assertIn("src/app.py", found)
+            self.assertIn("sub/generated/g.ts", found)
+            self.assertIn(".gitignore", found)
+
+    def test_discover_workspace_files_falls_back_when_not_a_repository(self):
+        """Invariant: without git the built-in fallback applies and never drops the whole list."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = self._make_ws(Path(tmp_dir) / "plain")
+            # Deliberately not a git repository.
+
+            found = discover_workspace_files(ws)
+
+            self.assertIn("src/app.py", found)
+            # Fallback still excludes the universally-noisy entries.
+            self.assertNotIn("node_modules/pkg/i.js", found)
+            # And still excludes binary extensions.
+            (ws / "logo.png").write_bytes(b"\x89PNG")
+            self.assertNotIn("logo.png", discover_workspace_files(ws))
+
+    def test_discover_workspace_files_keeps_tracked_files_matching_ignore_rules(self):
+        """Invariant: a committed file stays visible even when it matches a broad ignore rule."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = self._make_ws(Path(tmp_dir) / "repo3")
+            subprocess.run(["git", "init", "-q", "."], cwd=ws, check=True)
+            # *.log is ignored, but this one is force-added and therefore tracked.
+            subprocess.run(["git", "add", "-f", "app.log"], cwd=ws, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"],
+                cwd=ws,
+                check=True,
+            )
+
+            found = discover_workspace_files(ws)
+            self.assertIn("app.log", found)
+            # Untracked files matching the same rule stay hidden.
+            self.assertNotIn("secrets.txt", found)
+
+    def test_git_ignored_passes_a_timeout(self):
+        """Invariant: the subprocess is bounded so a wedged git cannot hang TUI startup."""
+        from core.discovery import _git_ignored
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with unittest.mock.patch.object(subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr=""
+                )
+                _git_ignored(Path(tmp_dir), ["a.py"])
+            self.assertIsNotNone(run.call_args.kwargs.get("timeout"))
+
+    def test_git_ignored_helper_degrades_quietly(self):
+        """Invariant: _git_ignored returns an empty set rather than raising when git cannot answer."""
+        from core.discovery import _git_ignored
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = Path(tmp_dir)  # not a repository
+            self.assertEqual(_git_ignored(ws, ["a.py", "b.py"]), set())
+            self.assertEqual(_git_ignored(ws, []), set())
+
+            # A missing git binary must also degrade, not raise.
+            with unittest.mock.patch.object(subprocess, "run", side_effect=FileNotFoundError):
+                self.assertEqual(_git_ignored(ws, ["a.py"]), set())
+            with unittest.mock.patch.object(
+                subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 10)
+            ):
+                self.assertEqual(_git_ignored(ws, ["a.py"]), set())
+
+    def test_explicitly_tagged_file_is_readable_despite_ignore_rules(self):
+        """Invariant: the ignore list only drives autocomplete; @path still attaches anything."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = self._make_ws(Path(tmp_dir) / "repo2")
+            subprocess.run(["git", "init", "-q", "."], cwd=ws, check=True)
+
+            self.assertNotIn("secrets.txt", discover_workspace_files(ws))
+            _, attached = expand_tagged_files("look at @secrets.txt", ws)
+            self.assertEqual(attached, ["secrets.txt"])
 
 
 if __name__ == "__main__":

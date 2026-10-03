@@ -159,6 +159,9 @@ class RunResult:
 ### 3.3 Tool System & Log Spillover (`core/tools.py`)
 Tools implement the `Tool` Protocol: `name`, `description`, `parameters` (JSON Schema), and `execute(**kwargs) -> tuple[int, str]`.
 
+#### Workspace File Discovery (`core/discovery.py`)
+`discover_workspace_files` produces the list backing `@`-file autocomplete in the TUI. It never gates what can be read: an explicitly tagged `@path` is always attached regardless of this list. When the workspace is a git repository, filtering is delegated to a single batched `git check-ignore --stdin` call, so the repository's own rules decide and negation (`!keep.log`), anchoring (`/build`), `**` globs, directory-only patterns, and nested `.gitignore` files are honoured exactly. `--no-index` is deliberately not passed, because git never reports a tracked file as ignored and a committed file is source the user chose to keep. `git check-ignore` is invoked with a 10s timeout and degrades to a minimal built-in list (`__pycache__`, `node_modules`) when git is missing, the workspace is not a repository, or the call fails; binary/media extensions are always filtered regardless, since most repositories commit their images and fonts. Keeping the fallback minimal is deliberate: an enumerated list of build-output directories cannot be complete across ecosystems, whereas the repository already declares its own.
+
 #### Built-in Tools
 1. `bash(command: str)`: Executes shell commands inside the workspace.
 2. `read_file(path: str, start_line: int = 1, end_line: int = -1)`: Reads files with line numbering and slicing.
@@ -359,12 +362,12 @@ $$N_{\text{pings}} = \frac{0.75 \times B}{0.10 \times B} = \mathbf{7.5 \text{ pi
 ---
 
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (264 passing tests in ~7s):
+All features are tested against rigorous, non-tautological standards in `tests/` (270 passing tests in ~7s):
 * `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner, task filtering, and graceful handling of malformed resume rows.
 * `test_harbor.py`: Verifies `task.toml` parsing, missing metadata rejection, missing file errors, evaluator `ContainerEnvironment` enforcement, and task filtering.
 * `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes, Docker container lifecycle, command execution, and timeout enforcement.
 * `test_tools.py`: Tool dispatching, defensive non-dict argument handling, exact head/tail boundary slice preservation, negative path write errors, and plugin trust-boundary enforcement (untrusted project plugins must not execute).
-* `test_discovery.py`: Resource search-directory resolution, including the rule that project tool plugins are only ever discovered under `.microharness/tools/` while other resources retain legacy paths.
+* `test_discovery.py`: Resource search-directory resolution (including the rule that project tool plugins are only ever discovered under `.microharness/tools/`), workspace file discovery delegating to the repository's own ignore rules, and graceful fallback when git is unavailable.
 * `test_tracer.py`: Action/result pairing, telemetry export, per-instance formatter scoping, `trajectory.jsonl` streaming, session reconstruction and loading (including `trace.json`-absent crash recovery), workspace-affinity ordering with bounded-scan short-circuiting, and serialization resilience for non-primitive and unserializable step payloads.
 * `test_memory.py`: Invariants when under budget, 80% proactive high-water mark trigger ratio, immutability of system prompts, stats calculation, forced compaction.
 * `test_model.py`: URL normalization, OpenRouter headers, Message and ToolResult serialization, mock sequencing, cache TTL normalization, 5m/1h/off payload generation, dynamic on-the-fly TTL switching, cumulative cache hit statistics, deadline clamping, and model-name recognition for both `/model` and the `--model` startup flag.
