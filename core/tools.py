@@ -305,95 +305,69 @@ def _is_tool_like(obj: Any) -> bool:
     )
 
 
-def _is_tool_class(cls: type) -> bool:
-    """Checks if a class looks like a Tool implementation."""
-    return isinstance(cls, type) and hasattr(cls, "execute") and callable(getattr(cls, "execute"))
+def _as_tools(val: Any) -> list[Tool]:
+    """Flattens and validates tool instances conforming to the Tool protocol."""
+    candidates = val if isinstance(val, (list, tuple)) else [val]
+    return [t for t in candidates if _is_tool_like(t)]
 
 
 def load_tool_plugin(plugin_path: Path | str, env: Environment | None = None) -> list[Tool]:
     """Dynamically loads tools from a standalone Python plugin file.
 
     Supported plugin conventions:
-    1. Factory function: `get_tools(env)` or `get_tools()` returning list[Tool] or single Tool.
-    2. Module attribute: `tools` or `TOOLS` containing list[Tool] or Tool.
-    3. Tool classes: Any class defined in the module conforming to the Tool protocol.
-       If __init__ accepts `env`, it is instantiated with `env`, otherwise with zero arguments.
+    1. Factory function: `get_tools(env)` or `get_tools()`
+    2. Module attribute: `tools` or `TOOLS = [MyTool()]`
+    3. Direct classes: Any class defined in the file conforming to Tool protocol
     """
     path = Path(plugin_path).resolve()
     if not path.is_file() or path.suffix != ".py":
         return []
 
-    module_name = f"_mh_tool_plugin_{path.stem}_{abs(hash(str(path)))}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        return []
-
-    module = importlib.util.module_from_spec(spec)
     try:
+        spec = importlib.util.spec_from_file_location(
+            f"_mh_tool_{path.stem}_{abs(hash(str(path)))}", path
+        )
+        if not spec or not spec.loader:
+            return []
+        module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     except Exception as exc:
         print(f"⚠️ Warning: Failed to load tool plugin '{path}': {exc}", file=sys.stderr)
         return []
 
-    tools: list[Tool] = []
-
-    # 1. Factory function: get_tools() or get_tools(env)
-    if hasattr(module, "get_tools") and callable(module.get_tools):
+    # 1. Factory function: get_tools(env) or get_tools()
+    if callable(getattr(module, "get_tools", None)):
         try:
-            sig = inspect.signature(module.get_tools)
-            if len(sig.parameters) >= 1 and env is not None:
-                res = module.get_tools(env)
-            else:
-                res = module.get_tools()
-            if isinstance(res, (list, tuple)):
-                tools.extend([t for t in res if _is_tool_like(t)])
-            elif _is_tool_like(res):
-                tools.append(res)
-            return tools
-        except Exception as exc:
-            print(f"⚠️ Warning: Error calling get_tools() in '{path}': {exc}", file=sys.stderr)
-            return []
+            return _as_tools(module.get_tools(env) if env is not None else module.get_tools())
+        except TypeError:
+            return _as_tools(module.get_tools())
 
     # 2. Module attributes: tools or TOOLS
-    for attr_name in ("tools", "TOOLS"):
-        if hasattr(module, attr_name):
-            val = getattr(module, attr_name)
-            if isinstance(val, (list, tuple)):
-                tools.extend([t for t in val if _is_tool_like(t)])
-            elif _is_tool_like(val):
-                tools.append(val)
+    for attr in ("tools", "TOOLS"):
+        if hasattr(module, attr):
+            tools = _as_tools(getattr(module, attr))
             if tools:
                 return tools
 
-    # 3. Tool classes defined in this module
+    # 3. Direct Tool classes defined in the plugin module
+    tools: list[Tool] = []
     for _, cls in inspect.getmembers(module, inspect.isclass):
-        if cls.__module__ == module_name and _is_tool_class(cls):
-            instance = None
-            try:
-                sig = inspect.signature(cls)
-                if "env" in sig.parameters and env is not None:
-                    try:
-                        instance = cls(env=env)
-                    except TypeError:
-                        instance = cls(env)
-                else:
-                    instance = cls()
-            except TypeError:
-                if env is not None:
-                    try:
-                        instance = cls(env=env)
-                    except TypeError:
-                        try:
-                            instance = cls(env)
-                        except Exception:
-                            instance = None
-                else:
-                    instance = None
-            except Exception:
-                instance = None
-
-            if instance is not None and _is_tool_like(instance):
-                tools.append(instance)
+        if cls.__module__ == module.__name__ and hasattr(cls, "execute"):
+            calls = (
+                [lambda c=cls: c(env=env), lambda c=cls: c(env), lambda c=cls: c()]
+                if env is not None
+                else [lambda c=cls: c()]
+            )
+            for call in calls:
+                try:
+                    inst = call()
+                    if _is_tool_like(inst):
+                        tools.append(inst)
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    break
 
     return tools
 
