@@ -279,6 +279,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Timeout in seconds for task execution (e.g. 3600, 7200)",
     )
+    parser.add_argument(
+        "--trust-project-tools",
+        action="store_true",
+        default=None,
+        help="Allow executing custom tool plugins defined in the project workspace (default: false)",
+    )
     return parser
 
 
@@ -408,6 +414,7 @@ def create_benchmark_harness_factory(
     docker_image: str | None = None,
     cache_ttl: str | None = None,
     reasoning_effort: str | None = None,
+    trust_project_tools: bool = False,
     verbose: bool = True,
 ) -> Callable[[Evaluator], Harness]:
     """Creates a harness factory for benchmark suites that resets ResettableModel between tasks."""
@@ -425,6 +432,7 @@ def create_benchmark_harness_factory(
             evaluator=ev,
             cache_ttl=cache_ttl,
             reasoning_effort=reasoning_effort,
+            trust_project_tools=trust_project_tools,
             verbose=verbose,
         )
 
@@ -442,6 +450,7 @@ def _dispatch_benchmark(
     reasoning_effort: str | None,
     use_docker: bool,
     docker_image: str,
+    trust_project_tools: bool = False,
 ) -> bool:
     bench_choice = args.benchmark or args.demo
     if not bench_choice:
@@ -455,6 +464,7 @@ def _dispatch_benchmark(
         docker_image=docker_image,
         cache_ttl=cache_ttl,
         reasoning_effort=reasoning_effort,
+        trust_project_tools=trust_project_tools,
         verbose=True,
     )
 
@@ -575,6 +585,21 @@ def main():
     use_docker = args.docker if args.docker is not None else bool(config.get("docker", False))
     docker_image = args.docker_image or config.get("docker_image", "python:3.11")
 
+    # Trust boundary: project tools must be explicitly trusted via CLI flag or user global config.
+    # Project config is intentionally prohibited from self-granting trust.
+    trust_project_tools = (
+        args.trust_project_tools
+        if args.trust_project_tools is not None
+        else bool(global_config.get("trust_project_tools", False))
+    )
+    if project_config.get("trust_project_tools") and not trust_project_tools:
+        print(
+            "⚠️ Notice: Project config attempted to enable 'trust_project_tools'. "
+            "Project tools can only be trusted via CLI flag (--trust-project-tools) "
+            "or global config (~/.microharness/config.json).",
+            file=sys.stderr,
+        )
+
     # 1. Select Model
     model = _resolve_model(
         args,
@@ -598,6 +623,7 @@ def main():
             reasoning_effort=reasoning_effort,
             use_docker=use_docker,
             docker_image=docker_image,
+            trust_project_tools=trust_project_tools,
         )
         return
 
@@ -613,6 +639,7 @@ def main():
         docker_image=docker_image,
         cache_ttl=cache_ttl,
         reasoning_effort=reasoning_effort,
+        trust_project_tools=trust_project_tools,
         verbose=True,
     )
 

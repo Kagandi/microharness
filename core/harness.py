@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -337,6 +338,7 @@ class Harness:
         extra_tools: list[Tool] | None = None,
         auto_discover_tools: bool | None = None,
         disable_default_tools: bool | None = None,
+        trust_project_tools: bool | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
         max_tool_chars: int | None = None,
@@ -380,6 +382,23 @@ class Harness:
         self.extra_tools = list(extra_tools or [])
         self.auto_discover_tools = _cfg("auto_discover_tools", auto_discover_tools, bool, True)
         self.disable_default_tools = _cfg("disable_default_tools", disable_default_tools, bool, False)
+
+        # Trust boundary: project tools must be explicitly trusted via parameter
+        # or user's global config (~/.microharness/config.json).
+        # Project-level config is intentionally NOT allowed to self-grant trust.
+        if trust_project_tools is not None:
+            self.trust_project_tools = bool(trust_project_tools)
+        else:
+            self.trust_project_tools = bool(self.global_config.get("trust_project_tools", False))
+
+        if self.project_config.get("trust_project_tools") and not self.trust_project_tools:
+            print(
+                "⚠️ Notice: Project config attempted to enable 'trust_project_tools'. "
+                "Project tools can only be trusted via CLI flag (--trust-project-tools) "
+                "or global config (~/.microharness/config.json).",
+                file=sys.stderr,
+            )
+
         self.evaluator = evaluator
 
         runs_val = _cfg("runs_dir", runs_dir, Path, None, require_truthy=True)
@@ -496,8 +515,14 @@ class Harness:
                 workspace_dir=ws_dir,
                 global_dir=self.global_dir,
                 env=env,
+                trust_project_tools=self.trust_project_tools,
             )
             for t in discovered:
+                if t.name in registry:
+                    print(
+                        f"⚠️ Warning: Discovered tool plugin '{t.name}' overrides existing tool '{t.name}'.",
+                        file=sys.stderr,
+                    )
                 registry.register(t)
 
         return registry

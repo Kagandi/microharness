@@ -77,10 +77,9 @@ Check for:
  
 ### 5. Custom Tool Plugins (`.microharness/tools/*.py`) — Zero-Commit Extensibility
 Add new capabilities to the agent dynamically without modifying harness core code or making git commits:
-* **Global Tools** (`~/.microharness/tools/*.py`): Available across all projects on your machine.
-* **Project Tools** (`.microharness/tools/*.py` or `./tools/*.py`): Available in this repository.
-* **Tool Shadowing**: A project tool with the same `name` automatically overrides the global version.
-* **Additive Behavior**: Extra tools are registered alongside baseline tools (`bash`, `read_file`, `write_file`, `edit_file`) rather than replacing them.
+* **Global Tools** (`~/.microharness/tools/*.py`): Available across all projects on your machine (always trusted and loaded automatically).
+* **Project Tools** (`.microharness/tools/*.py` or `./tools/*.py`): Scoped to the current repository. Requires explicit opt-in via `--trust-project-tools` (or `"trust_project_tools": true` in `~/.microharness/config.json`) to prevent untrusted code execution from cloned repositories.
+* **Tool Shadowing & Overrides**: A project tool with the same `name` overrides the global version. If a custom plugin shares a name with a built-in tool (e.g. `bash`), it will override it and emit a warning to ensure full visibility.
 
 #### Authoring Conventions
 A tool plugin file can follow any of these patterns:

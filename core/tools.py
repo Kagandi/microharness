@@ -210,6 +210,12 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def __contains__(self, tool_name: str) -> bool:
+        return tool_name in self._tools
+
+    def get(self, tool_name: str) -> Tool | None:
+        return self._tools.get(tool_name)
+
     def modifies_files(self, tool_name: str) -> bool:
         """Checks if a registered tool is marked as modifying workspace files."""
         tool = self._tools.get(tool_name)
@@ -376,6 +382,7 @@ def discover_tool_plugins(
     workspace_dir: Path | str | None = None,
     global_dir: Path | str | None = None,
     env: Environment | None = None,
+    trust_project_tools: bool = False,
 ) -> list[Tool]:
     """Discovers and loads tool plugins from global and project directories.
 
@@ -383,9 +390,18 @@ def discover_tool_plugins(
     1. Global: `~/.microharness/tools/*.py` (or `global_dir / "tools"`)
     2. Project: `<workspace>/.microharness/tools/*.py`, `<workspace>/tools/*.py`
 
+    Project tools require `trust_project_tools=True` before module execution to
+    prevent untrusted host code execution from cloned repositories.
     Project-level tools cleanly shadow global tools sharing the same tool name.
     """
     def _loader(path: Path, scope: str):
+        if scope == "project" and not trust_project_tools:
+            print(
+                f"⚠️ Warning: Skipping untrusted project tool plugin '{path}'. "
+                "Pass --trust-project-tools to enable.",
+                file=sys.stderr,
+            )
+            return
         for tool in load_tool_plugin(path, env=env):
             yield tool.name, tool
 
