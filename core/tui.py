@@ -635,6 +635,53 @@ class TUIState:
         return val
 
 
+def decode_terminal_sequence(seq: str) -> str | None:
+    """Decodes modifyOtherKeys or CSI-u key sequences into characters if applicable.
+
+    For example, Shift+2 can be encoded as `\x1b[27;2;50~` or `\x1b[50;2u`, which maps to '@'.
+    """
+    if not isinstance(seq, str) or not seq.startswith("\x1b"):
+        return None
+
+    # 1. CSI-u: \x1b[<codepoint>;<modifiers>u
+    m_csi_u = re.match(r"^\x1b\[(\d+)(?:;(\d+))?u$", seq)
+    if m_csi_u:
+        code = int(m_csi_u.group(1))
+        mod = int(m_csi_u.group(2) or "1")
+        if code == 13:
+            return None  # Enter / Shift-Enter handled separately
+        if code == 64:
+            return "@"
+        shift_num_map = {
+            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
+            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
+        }
+        if (mod == 2 or mod == 3) and code in shift_num_map:
+            return shift_num_map[code]
+        if 32 <= code <= 126:
+            return chr(code)
+
+    # 2. modifyOtherKeys: \x1b[27;<modifier>;<keycode>~
+    m_mok = re.match(r"^\x1b\[27;(\d+);(\d+)~$", seq)
+    if m_mok:
+        mod = int(m_mok.group(1))
+        code = int(m_mok.group(2))
+        if code == 13:
+            return None  # Enter / Shift-Enter handled separately
+        if code == 64:
+            return "@"
+        shift_num_map = {
+            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
+            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
+        }
+        if (mod == 2 or mod == 3) and code in shift_num_map:
+            return shift_num_map[code]
+        if 32 <= code <= 126:
+            return chr(code)
+
+    return None
+
+
 class CursesTUI:
     """Curses terminal user interface with bottom-anchored chat and scrollable activity."""
 
@@ -910,6 +957,12 @@ class CursesTUI:
 
         Returns False if the interactive session should terminate (e.g. /exit), else True.
         """
+        # Decode any terminal escape sequences that represent characters (e.g. Shift+2 -> @)
+        if isinstance(ch, str) and ch.startswith("\x1b"):
+            decoded_char = decode_terminal_sequence(ch)
+            if decoded_char:
+                ch = decoded_char
+
         file_matches = self.state.get_matching_file_tags()
         cmd_matches = self.state.get_matching_commands()
 
@@ -1017,9 +1070,9 @@ class CursesTUI:
             stdscr.keypad(True)
             curses.curs_set(1)
 
-            # Request modifyOtherKeys level 2 in modern xterm/iTerm2 to report Shift+Enter
+            # Reset any terminal modifyOtherKeys mode to preserve normal key typing (e.g. Shift+2 -> @)
             try:
-                sys.stdout.write("\x1b[>4;2m")
+                sys.stdout.write("\x1b[>4;0m")
                 sys.stdout.flush()
             except Exception:
                 pass

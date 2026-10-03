@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from core.tui import CursesTUI, TUILine, TUIState, parse_inline_segments
+from core.tui import (
+    CursesTUI,
+    TUILine,
+    TUIState,
+    decode_terminal_sequence,
+    parse_inline_segments,
+)
 
 
 class TestTUI(unittest.TestCase):
@@ -709,6 +715,39 @@ class TestTUI(unittest.TestCase):
         # Escape key dismisses the file tag query
         tui.handle_key(27, lambda text: None)
         self.assertEqual(state.input_buffer, "Line 1\nLine 2 ")
+
+    def test_shift_2_and_terminal_sequence_decoding_for_at_symbol(self):
+        """Invariant: Shift+2 produces '@' via normal character or decoded escape sequences."""
+        # 1. Direct decoder assertions
+        self.assertEqual(decode_terminal_sequence("\x1b[27;2;50~"), "@")  # modifyOtherKeys Shift+2
+        self.assertEqual(decode_terminal_sequence("\x1b[50;2u"), "@")     # CSI-u Shift+2
+        self.assertEqual(decode_terminal_sequence("\x1b[64;2u"), "@")     # CSI-u codepoint 64 with shift
+        self.assertEqual(decode_terminal_sequence("\x1b[64u"), "@")       # CSI-u codepoint 64
+        self.assertEqual(decode_terminal_sequence("\x1b[27;2;49~"), "!")  # Shift+1
+        self.assertEqual(decode_terminal_sequence("\x1b[27;2;51~"), "#")  # Shift+3
+        self.assertIsNone(decode_terminal_sequence("\x1b[13;2u"))         # Enter is not character
+        self.assertIsNone(decode_terminal_sequence("plain"))
+
+        state = TUIState()
+        state.set_workspace_files(["core/tui.py"])
+        tui = CursesTUI(state)
+
+        # 2. Standard character input "@"
+        tui.handle_key("@", lambda text: None)
+        self.assertEqual(state.input_buffer, "@")
+        self.assertEqual(len(state.get_matching_file_tags()), 1)
+
+        # 3. Encoded modifyOtherKeys Shift+2 sequence "\x1b[27;2;50~"
+        state.clear_input()
+        tui.handle_key("\x1b[27;2;50~", lambda text: None)
+        self.assertEqual(state.input_buffer, "@")
+        self.assertEqual(len(state.get_matching_file_tags()), 1)
+
+        # 4. Encoded CSI-u Shift+2 sequence "\x1b[50;2u"
+        state.clear_input()
+        tui.handle_key("\x1b[50;2u", lambda text: None)
+        self.assertEqual(state.input_buffer, "@")
+        self.assertEqual(len(state.get_matching_file_tags()), 1)
 
 
 if __name__ == "__main__":
