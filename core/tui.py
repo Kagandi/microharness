@@ -564,35 +564,57 @@ class CursesTUI:
         except curses.error:
             pass
 
-        # 5. Floating Slash-Command Menu (drawn above input row if matching)
+        # 5. Floating Slash-Command Menu (drawn above status cockpit, full screen width)
         matches = self.state.get_matching_commands()
         if matches:
             idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
-            visible_matches = matches[:6]
-            box_h = len(visible_matches) + 2
-            box_w = min(w - 4, 76)
-            start_y = max(1, input_row - box_h)
-            start_x = 2
+            max_items = max(6, min(len(matches), max(6, sep_row - 6)))
+            if len(matches) <= max_items:
+                visible_matches = matches
+                rel_idx = idx
+            else:
+                start_m = max(0, min(idx - max_items // 2, len(matches) - max_items))
+                visible_matches = matches[start_m : start_m + max_items]
+                rel_idx = idx - start_m
 
-            title_part = " Commands "
-            border_top = "┌─" + title_part + "─" * max(0, box_w - 4 - len(title_part)) + "┐"
+            box_h = len(visible_matches) + 4
+            box_w = max(10, w - 1)
+            start_y = max(1, sep_row - box_h)
+            start_x = 0
+
+            title_part = " Available Commands "
+            dash_count = max(0, box_w - 2 - len(title_part) - 2)
+            border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
+            mid_sep = "├" + "─" * (box_w - 2) + "┤"
+            border_bot = "└" + "─" * (box_w - 2) + "┘"
+            tip_text = "   Tab / ↑ / ↓: Navigate  ·  Enter: Select  ·  Esc: Dismiss"
+
             try:
                 stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
                 for row_i, (cmd, desc) in enumerate(visible_matches):
                     y = start_y + 1 + row_i
-                    is_selected = (row_i == idx)
-                    prefix = " > " if is_selected else "   "
-                    line_content = f"{prefix}{cmd:<10} {desc}"
+                    is_selected = (row_i == rel_idx)
+                    prefix = "  > " if is_selected else "    "
+                    line_content = f"{prefix}{cmd:<12} {desc}"
                     line_content = line_content[: box_w - 2].ljust(box_w - 2)
                     attr = (
-                        (curses.color_pair(1) | curses.A_BOLD)
+                        (curses.color_pair(1) | curses.A_BOLD | curses.A_REVERSE)
                         if (is_selected and self.has_colors)
-                        else (curses.A_BOLD if is_selected else curses.A_NORMAL)
+                        else (curses.A_REVERSE if is_selected else curses.A_NORMAL)
                     )
                     stdscr.addstr(y, start_x, "│", curses.A_DIM)
                     stdscr.addstr(y, start_x + 1, line_content, attr)
                     stdscr.addstr(y, start_x + box_w - 1, "│", curses.A_DIM)
-                border_bot = "└" + "─" * (box_w - 2) + "┘"
+
+                y_sep = start_y + 1 + len(visible_matches)
+                stdscr.addstr(y_sep, start_x, mid_sep[:box_w], curses.A_DIM)
+
+                y_tip = y_sep + 1
+                tip_content = tip_text[: box_w - 2].ljust(box_w - 2)
+                stdscr.addstr(y_tip, start_x, "│", curses.A_DIM)
+                stdscr.addstr(y_tip, start_x + 1, tip_content, curses.A_DIM)
+                stdscr.addstr(y_tip, start_x + box_w - 1, "│", curses.A_DIM)
+
                 stdscr.addstr(start_y + box_h - 1, start_x, border_bot[:box_w], curses.A_DIM)
             except curses.error:
                 pass

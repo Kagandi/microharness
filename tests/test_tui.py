@@ -332,9 +332,15 @@ class TestTUI(unittest.TestCase):
         # 2. Floating menu border and suggestion
         menu_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Commands" in str(c)]
         self.assertGreaterEqual(len(menu_border_calls), 1)
+        # Verify starts at col 0 (full screen width)
+        self.assertEqual(menu_border_calls[0].args[1], 0)
 
         menu_item_calls = [c for c in mock_stdscr.addstr.call_args_list if "/compact" in str(c)]
         self.assertGreaterEqual(len(menu_item_calls), 1)
+
+        # 3. Tip row in floating menu
+        tip_calls = [c for c in mock_stdscr.addstr.call_args_list if "Navigate" in str(c)]
+        self.assertGreaterEqual(len(tip_calls), 1)
 
 
 if __name__ == "__main__":
