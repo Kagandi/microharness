@@ -2056,6 +2056,109 @@ class HijackedBash:
             finally:
                 env.teardown()
 
+    def test_harness_run_executes_shadowed_plugin_tool_end_to_end(self):
+        """Invariant: When a trusted tool plugin shadows built-in bash, Harness.run executes the plugin tool."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_dir = Path(temp_dir) / "shadow_bash_workspace"
+            tools_dir = ws_dir / ".microharness" / "tools"
+            tools_dir.mkdir(parents=True, exist_ok=True)
+
+            plugin_file = tools_dir / "hijacked_bash.py"
+            plugin_file.write_text(
+                """
+class HijackedBash:
+    name = "bash"
+    description = "Mock replacement bash"
+    parameters = {"type": "object", "properties": {"command": {"type": "string"}}}
+    def execute(self, command: str = ""):
+        return 0, f"HIJACKED_BASH: {command}"
+""",
+                encoding="utf-8",
+            )
+
+            # Model calls bash tool
+            script = [
+                ("Executing command", [ToolCall(id="c1", name="bash", arguments={"command": "whoami"})]),
+                ("Done", []),
+            ]
+            mock_model = MockModel(script)
+            harness = Harness(
+                model=mock_model,
+                workspace_dir=ws_dir,
+                runs_dir=self.runs_dir,
+                trust_project_tools=True,
+                verbose=False,
+            )
+
+            task = Task(id="test_shadow", instruction="Call bash")
+            result = harness.run(task)
+
+            self.assertTrue(result.passed)
+            self.assertEqual(result.total_steps, 2)
+
+            trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+            step1_res = trace_data["steps"][0]["tool_results"][0]
+            # Invariant: Step trace proves hijacked bash executed, NOT real system bash
+            self.assertEqual(step1_res["output"], "HIJACKED_BASH: whoami")
+
+    def test_harness_run_executes_project_shadowed_over_global_tool(self):
+        """Invariant: When a project tool shares a name with a global tool, project tool executes in Harness.run."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            global_dir = Path(temp_dir) / "global_dir"
+            ws_dir = Path(temp_dir) / "project_workspace"
+
+            global_tools = global_dir / "tools"
+            project_tools = ws_dir / ".microharness" / "tools"
+            global_tools.mkdir(parents=True, exist_ok=True)
+            project_tools.mkdir(parents=True, exist_ok=True)
+
+            (global_tools / "weather.py").write_text(
+                """
+class GlobalWeather:
+    name = "get_weather"
+    description = "Global weather tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "WEATHER: Global Sunny"
+""",
+                encoding="utf-8",
+            )
+
+            (project_tools / "weather.py").write_text(
+                """
+class ProjectWeather:
+    name = "get_weather"
+    description = "Project weather tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "WEATHER: Project Rainy"
+""",
+                encoding="utf-8",
+            )
+
+            script = [
+                ("Checking weather", [ToolCall(id="w1", name="get_weather", arguments={})]),
+                ("Done", []),
+            ]
+            mock_model = MockModel(script)
+            harness = Harness(
+                model=mock_model,
+                workspace_dir=ws_dir,
+                global_dir=global_dir,
+                runs_dir=self.runs_dir,
+                trust_project_tools=True,
+                verbose=False,
+            )
+
+            task = Task(id="weather_task", instruction="Check weather")
+            result = harness.run(task)
+
+            self.assertTrue(result.passed)
+            trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+            step1_res = trace_data["steps"][0]["tool_results"][0]
+            # Invariant: Project-level tool executed and shadowed global version
+            self.assertEqual(step1_res["output"], "WEATHER: Project Rainy")
+
 
 if __name__ == "__main__":
     unittest.main()

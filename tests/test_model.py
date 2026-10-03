@@ -1105,6 +1105,54 @@ class TestModel(unittest.TestCase):
         # Strictly verify it did NOT pass default self.timeout (90.0)
         self.assertNotEqual(passed_timeout, 90.0)
 
+    @patch("urllib.request.urlopen")
+    def test_send_request_clamps_socket_timeout_when_remaining_exceeds_timeout(self, mock_urlopen):
+        """Invariant: In-flight socket timeout is clamped to self.timeout when remaining deadline > timeout."""
+        import time
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+        mock_urlopen.return_value = mock_resp
+
+        model = HttpChatModel(
+            base_url="https://api.example.com",
+            model="test-model",
+            timeout=15.0,
+        )
+        # Set deadline 100.0s in the future (remaining >> timeout)
+        model.set_deadline(time.time() + 100.0)
+        model._send_request(payload={"prompt": "hi"}, headers={})
+
+        mock_urlopen.assert_called_once()
+        passed_timeout = mock_urlopen.call_args.kwargs.get("timeout")
+        # Invariant: Socket timeout must be clamped to self.timeout (15.0), not remaining deadline (~100.0)
+        self.assertEqual(passed_timeout, 15.0)
+
+    @patch("urllib.request.urlopen")
+    def test_send_request_clamps_socket_timeout_minimum_floor(self, mock_urlopen):
+        """Invariant: In-flight socket timeout enforces a 0.1s minimum floor when remaining deadline is near zero."""
+        import time
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+        mock_urlopen.return_value = mock_resp
+
+        model = HttpChatModel(
+            base_url="https://api.example.com",
+            model="test-model",
+            timeout=15.0,
+        )
+        # Set deadline barely in the future (remaining ~0.02s < 0.1s floor)
+        model.set_deadline(time.time() + 0.02)
+        model._send_request(payload={"prompt": "hi"}, headers={})
+
+        mock_urlopen.assert_called_once()
+        passed_timeout = mock_urlopen.call_args.kwargs.get("timeout")
+        # Invariant: Socket timeout must be clamped to 0.1s minimum floor
+        self.assertEqual(passed_timeout, 0.1)
+
     def test_http_chat_model_reset(self):
         """Invariant: HttpChatModel.reset() zeroes cumulative token counters and clears last_usage."""
         m = HttpChatModel(base_url="https://api.example.com", model="test")

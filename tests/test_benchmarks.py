@@ -17,7 +17,7 @@ from benchmarks.runner import run_benchmark_suite
 from core.environment import Environment
 from core.harness import Harness
 from core.model import MockModel
-from core.types import RunResult, ToolCall
+from core.types import EvalResult, RunResult, Task, ToolCall
 
 
 class TestMiniSWEBenchmarks(unittest.TestCase):
@@ -714,6 +714,7 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         """Invariant: A malformed resume row missing task_id does not discard valid retained rows."""
         task1, eval1 = create_rate_limiter_task()
         task2, eval2 = create_circular_serializer_task()
+        task_empty = Task(id="", instruction="Empty task id should run")
 
         report_file = Path(self.tmp_dir) / "mini_swe_report.json"
         initial_report = {
@@ -734,38 +735,119 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
                     "score": 1.0,
                     "finish_reason": "completed",
                 },
+                # Malformed row with whitespace-only task_id
+                {
+                    "task_id": "   ",
+                    "passed": True,
+                    "score": 1.0,
+                    "finish_reason": "completed",
+                },
             ],
         }
         report_file.write_text(json.dumps(initial_report), encoding="utf-8")
 
         mock_harness = MagicMock()
-        mock_harness.run.return_value = RunResult(
-            task_id=task2.id,
-            passed=True,
-            score=1.0,
-            total_steps=1,
-            duration_s=1.0,
-            finish_reason="completed",
-            trace_path="",
-            workspace_path="",
-        )
+        mock_harness.run.side_effect = [
+            RunResult(
+                task_id=task2.id,
+                passed=True,
+                score=1.0,
+                total_steps=1,
+                duration_s=1.0,
+                finish_reason="completed",
+                trace_path="",
+                workspace_path="",
+            ),
+            RunResult(
+                task_id=task_empty.id,
+                passed=True,
+                score=1.0,
+                total_steps=1,
+                duration_s=1.0,
+                finish_reason="completed",
+                trace_path="",
+                workspace_path="",
+            ),
+        ]
         factory = MagicMock(return_value=mock_harness)
 
         report = run_benchmark_suite(
             harness_factory=factory,
-            tasks=[(task1, eval1), (task2, eval2)],
+            tasks=[(task1, eval1), (task2, eval2), (task_empty, eval1)],
             suite_name="Mini-SWE",
             output_dir=self.tmp_dir,
             verbose=False,
             resume=True,
         )
 
-        # Task 1 was retained from valid row, task 2 ran
-        self.assertEqual(factory.call_count, 1)
-        self.assertEqual(mock_harness.run.call_args[0][0].id, task2.id)
+        # Invariant 1: Task 1 was retained from valid row.
+        # Malformed rows with empty/whitespace task_ids were discarded and NOT retained,
+        # so task 2 and task_empty both had to run (call_count == 2).
+        self.assertEqual(factory.call_count, 2)
+        called_ids = [call[0][0].id for call in mock_harness.run.call_args_list]
+        self.assertEqual(called_ids, [task2.id, ""])
 
         t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
         self.assertTrue(t1_rep.passed)
+
+    def test_run_benchmark_suite_delta_rate_limit_wait_with_shared_accumulating_model(self):
+        """Invariant: Benchmark runner computes per-task rate limit wait deltas (30/60/90)
+
+        across shared-model tasks and aggregates total non-cumulatively (180.0, NOT cumulative 300.0).
+        """
+        task1 = Task(id="task_1", instruction="Run task 1")
+        task2 = Task(id="task_2", instruction="Run task 2")
+        task3 = Task(id="task_3", instruction="Run task 3")
+
+        class SharedAccumulatingModel(MockModel):
+            def __init__(self):
+                super().__init__([("Done", [])])
+                self.total_rate_limit_wait_s = 0.0
+                self.current_task_id = "task_1"
+
+            def generate(self, messages, tools=None):
+                if self.current_task_id == "task_1":
+                    self.total_rate_limit_wait_s += 30.0
+                elif self.current_task_id == "task_2":
+                    self.total_rate_limit_wait_s += 60.0
+                elif self.current_task_id == "task_3":
+                    self.total_rate_limit_wait_s += 90.0
+                return super().generate(messages, tools)
+
+        shared_model = SharedAccumulatingModel()
+
+        def make_harness(evaluator):
+            h = Harness(model=shared_model, runs_dir=self.tmp_dir, verbose=False)
+            orig_run = h.run
+
+            def wrapped_run(task):
+                shared_model.current_task_id = task.id
+                shared_model._step_idx = 0
+                return orig_run(task)
+
+            h.run = wrapped_run
+            return h
+
+        class DummyEvaluator:
+            def evaluate(self, env, steps):
+                return EvalResult(passed=True, score=1.0)
+
+        dummy_eval = DummyEvaluator()
+        report = run_benchmark_suite(
+            harness_factory=make_harness,
+            tasks=[(task1, dummy_eval), (task2, dummy_eval), (task3, dummy_eval)],
+            suite_name="Mini-SWE",
+            output_dir=self.tmp_dir,
+            verbose=False,
+        )
+
+        # Invariants: Per-task deltas must be 30, 60, 90, NOT cumulative 30, 90, 180
+        self.assertEqual(report.tasks[0].rate_limit_wait_s, 30.0)
+        self.assertEqual(report.tasks[1].rate_limit_wait_s, 60.0)
+        self.assertEqual(report.tasks[2].rate_limit_wait_s, 90.0)
+        # Total wait across tasks is 180.0, NOT cumulative 300.0 (30 + 90 + 180)
+        self.assertEqual(report.total_rate_limit_wait_s, 180.0)
+        self.assertEqual(shared_model.total_rate_limit_wait_s, 180.0)
 
     def test_run_benchmark_suite_propagates_rate_limit_wait_s(self):
         """Invariant: run_benchmark_suite propagates RunResult rate_limit_wait_s to TaskReport and aggregates total."""
