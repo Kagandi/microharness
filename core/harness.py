@@ -29,6 +29,7 @@ from core.tools import (
     Tool,
     ToolRegistry,
     WriteFileTool,
+    discover_tool_plugins,
 )
 from core.tracer import Tracer
 from core.types import EvalResult, RunResult, Task
@@ -262,6 +263,10 @@ class Harness:
         docker: bool | None = None,
         docker_image: str | None = None,
         tools: list[Tool] | None = None,
+        custom_tools: list[Tool] | None = None,
+        extra_tools: list[Tool] | None = None,
+        auto_discover_tools: bool | None = None,
+        disable_default_tools: bool | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
         max_tool_chars: int | None = None,
@@ -301,7 +306,10 @@ class Harness:
         self.docker_image = _cfg(
             "docker_image", docker_image, str, "python:3.11", require_truthy=True
         )
-        self.custom_tools = tools
+        self.custom_tools = tools if tools is not None else custom_tools
+        self.extra_tools = list(extra_tools or [])
+        self.auto_discover_tools = _cfg("auto_discover_tools", auto_discover_tools, bool, True)
+        self.disable_default_tools = _cfg("disable_default_tools", disable_default_tools, bool, False)
         self.evaluator = evaluator
 
         runs_val = _cfg("runs_dir", runs_dir, Path, None, require_truthy=True)
@@ -392,14 +400,32 @@ class Harness:
 
     def _init_tools(self, env: Environment) -> ToolRegistry:
         registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
-        if self.custom_tools:
-            for t in self.custom_tools:
-                registry.register(t)
-        else:
+
+        # 1. Base tools (unless disabled or explicit custom_tools override)
+        if not self.disable_default_tools and not self.custom_tools:
             registry.register(BashTool(env))
             registry.register(ReadFileTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
+        elif self.custom_tools:
+            for t in self.custom_tools:
+                registry.register(t)
+
+        # 2. Additive extra_tools explicitly provided
+        for t in self.extra_tools:
+            registry.register(t)
+
+        # 3. Dynamic plugins auto-discovered from global and project directories
+        if self.auto_discover_tools:
+            ws_dir = self.explicit_workspace_dir or env.workspace_dir
+            discovered = discover_tool_plugins(
+                workspace_dir=ws_dir,
+                global_dir=self.global_dir,
+                env=env,
+            )
+            for t in discovered:
+                registry.register(t)
+
         return registry
 
     def _build_system_prompt(

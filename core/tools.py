@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
+import inspect
+import sys
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -284,3 +287,152 @@ class ToolRegistry:
             was_truncated=was_truncated,
             raw_log_path=raw_log_path,
         )
+
+
+def _is_tool_like(obj: Any) -> bool:
+    """Checks if an instantiated object conforms to the Tool protocol."""
+    return (
+        hasattr(obj, "name")
+        and isinstance(getattr(obj, "name"), str)
+        and bool(getattr(obj, "name"))
+        and hasattr(obj, "description")
+        and isinstance(getattr(obj, "description"), str)
+        and hasattr(obj, "parameters")
+        and isinstance(getattr(obj, "parameters"), dict)
+        and hasattr(obj, "execute")
+        and callable(getattr(obj, "execute"))
+    )
+
+
+def _is_tool_class(cls: type) -> bool:
+    """Checks if a class looks like a Tool implementation."""
+    return isinstance(cls, type) and hasattr(cls, "execute") and callable(getattr(cls, "execute"))
+
+
+def load_tool_plugin(plugin_path: Path | str, env: Environment | None = None) -> list[Tool]:
+    """Dynamically loads tools from a standalone Python plugin file.
+
+    Supported plugin conventions:
+    1. Factory function: `get_tools(env)` or `get_tools()` returning list[Tool] or single Tool.
+    2. Module attribute: `tools` or `TOOLS` containing list[Tool] or Tool.
+    3. Tool classes: Any class defined in the module conforming to the Tool protocol.
+       If __init__ accepts `env`, it is instantiated with `env`, otherwise with zero arguments.
+    """
+    path = Path(plugin_path).resolve()
+    if not path.is_file() or path.suffix != ".py":
+        return []
+
+    module_name = f"_mh_tool_plugin_{path.stem}_{abs(hash(str(path)))}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        return []
+
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        print(f"⚠️ Warning: Failed to load tool plugin '{path}': {exc}", file=sys.stderr)
+        return []
+
+    tools: list[Tool] = []
+
+    # 1. Factory function: get_tools() or get_tools(env)
+    if hasattr(module, "get_tools") and callable(module.get_tools):
+        try:
+            sig = inspect.signature(module.get_tools)
+            if len(sig.parameters) >= 1 and env is not None:
+                res = module.get_tools(env)
+            else:
+                res = module.get_tools()
+            if isinstance(res, (list, tuple)):
+                tools.extend([t for t in res if _is_tool_like(t)])
+            elif _is_tool_like(res):
+                tools.append(res)
+            return tools
+        except Exception as exc:
+            print(f"⚠️ Warning: Error calling get_tools() in '{path}': {exc}", file=sys.stderr)
+            return []
+
+    # 2. Module attributes: tools or TOOLS
+    for attr_name in ("tools", "TOOLS"):
+        if hasattr(module, attr_name):
+            val = getattr(module, attr_name)
+            if isinstance(val, (list, tuple)):
+                tools.extend([t for t in val if _is_tool_like(t)])
+            elif _is_tool_like(val):
+                tools.append(val)
+            if tools:
+                return tools
+
+    # 3. Tool classes defined in this module
+    for _, cls in inspect.getmembers(module, inspect.isclass):
+        if cls.__module__ == module_name and _is_tool_class(cls):
+            instance = None
+            try:
+                sig = inspect.signature(cls)
+                if "env" in sig.parameters and env is not None:
+                    try:
+                        instance = cls(env=env)
+                    except TypeError:
+                        instance = cls(env)
+                else:
+                    instance = cls()
+            except TypeError:
+                if env is not None:
+                    try:
+                        instance = cls(env=env)
+                    except TypeError:
+                        try:
+                            instance = cls(env)
+                        except Exception:
+                            instance = None
+                else:
+                    instance = None
+            except Exception:
+                instance = None
+
+            if instance is not None and _is_tool_like(instance):
+                tools.append(instance)
+
+    return tools
+
+
+def discover_tool_plugins(
+    workspace_dir: Path | str | None = None,
+    global_dir: Path | str | None = None,
+    env: Environment | None = None,
+) -> list[Tool]:
+    """Discovers and loads tool plugins from global and project directories.
+
+    Locations searched:
+    1. Global: `~/.microharness/tools/*.py` (or `global_dir / "tools"`)
+    2. Project: `<workspace>/.microharness/tools/*.py`
+
+    Project-level tools shadow global tools with matching tool names.
+    """
+    discovered_map: dict[str, Tool] = {}
+
+    # 1. Global tools
+    g_dir = Path(global_dir).resolve() if global_dir else Path.home() / ".microharness"
+    global_tools_dir = g_dir / "tools"
+    if global_tools_dir.is_dir():
+        for py_file in sorted(global_tools_dir.glob("*.py")):
+            if py_file.name.startswith(("_", ".")):
+                continue
+            loaded = load_tool_plugin(py_file, env=env)
+            for tool in loaded:
+                discovered_map[tool.name] = tool
+
+    # 2. Project tools (shadows global tools with same name)
+    if workspace_dir:
+        ws_tools_dir = Path(workspace_dir).resolve() / ".microharness" / "tools"
+        if ws_tools_dir.is_dir():
+            for py_file in sorted(ws_tools_dir.glob("*.py")):
+                if py_file.name.startswith(("_", ".")):
+                    continue
+                loaded = load_tool_plugin(py_file, env=env)
+                for tool in loaded:
+                    discovered_map[tool.name] = tool
+
+    return list(discovered_map.values())
+

@@ -9,7 +9,9 @@ from core.tools import (
     ReadFileTool,
     ToolRegistry,
     WriteFileTool,
+    discover_tool_plugins,
     format_tool_output,
+    load_tool_plugin,
 )
 from core.types import ToolCall
 
@@ -169,6 +171,192 @@ class TestTools(unittest.TestCase):
         self.assertTrue(self.registry.modifies_files("edit_file"))
         self.assertFalse(self.registry.modifies_files("read_file"))
         self.assertFalse(self.registry.modifies_files("bash"))
+
+    def test_load_tool_plugin_with_factory_function(self):
+        """Invariant: load_tool_plugin executes get_tools(env) and returns conforming Tool instances."""
+        plugin_file = Path(self.temp_dir) / "ping_plugin.py"
+        plugin_file.write_text(
+            """
+class PingTool:
+    name = "ping"
+    description = "Pings with custom message"
+    parameters = {
+        "type": "object",
+        "properties": {"msg": {"type": "string"}},
+        "required": ["msg"],
+    }
+    def __init__(self, env=None):
+        self.env = env
+    def execute(self, msg: str):
+        return 0, f"pong: {msg}"
+
+def get_tools(env=None):
+    return [PingTool(env)]
+""",
+            encoding="utf-8",
+        )
+
+        tools = load_tool_plugin(plugin_file, env=self.env)
+        self.assertEqual(len(tools), 1)
+        tool = tools[0]
+        self.assertEqual(tool.name, "ping")
+        self.assertEqual(tool.description, "Pings with custom message")
+        code, out = tool.execute(msg="hello")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "pong: hello")
+
+    def test_load_tool_plugin_with_direct_tool_class(self):
+        """Invariant: load_tool_plugin automatically instantiates Tool classes when get_tools is absent."""
+        plugin_file = Path(self.temp_dir) / "direct_class_plugin.py"
+        plugin_file.write_text(
+            """
+class CalculatorTool:
+    name = "calculator"
+    description = "Computes sum"
+    parameters = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "required": ["a", "b"],
+    }
+    def execute(self, a: int, b: int):
+        return 0, str(a + b)
+""",
+            encoding="utf-8",
+        )
+
+        tools = load_tool_plugin(plugin_file)
+        self.assertEqual(len(tools), 1)
+        tool = tools[0]
+        self.assertEqual(tool.name, "calculator")
+        code, out = tool.execute(a=19, b=23)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "42")
+
+    def test_load_tool_plugin_with_tools_list_attribute(self):
+        """Invariant: load_tool_plugin detects `tools` list attribute in plugin module."""
+        plugin_file = Path(self.temp_dir) / "list_plugin.py"
+        plugin_file.write_text(
+            """
+class ToolOne:
+    name = "tool_one"
+    description = "First tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "one"
+
+class ToolTwo:
+    name = "tool_two"
+    description = "Second tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "two"
+
+tools = [ToolOne(), ToolTwo()]
+""",
+            encoding="utf-8",
+        )
+
+        tools = load_tool_plugin(plugin_file)
+        self.assertEqual(len(tools), 2)
+        names = [t.name for t in tools]
+        self.assertEqual(names, ["tool_one", "tool_two"])
+
+    def test_load_tool_plugin_negative_cases(self):
+        """Invariant: load_tool_plugin gracefully returns empty list on invalid files or syntax errors."""
+        # 1. Non-existent file
+        self.assertEqual(load_tool_plugin(Path(self.temp_dir) / "does_not_exist.py"), [])
+
+        # 2. Non-py extension
+        txt_file = Path(self.temp_dir) / "not_python.txt"
+        txt_file.write_text("class Foo: pass", encoding="utf-8")
+        self.assertEqual(load_tool_plugin(txt_file), [])
+
+        # 3. Syntax error in python file
+        syntax_err_file = Path(self.temp_dir) / "syntax_err.py"
+        syntax_err_file.write_text("def broken(: syntax error", encoding="utf-8")
+        self.assertEqual(load_tool_plugin(syntax_err_file), [])
+
+    def test_discover_tool_plugins_global_and_project_with_shadowing(self):
+        """Invariant: discover_tool_plugins loads global and project tools, with project tools shadowing global ones."""
+        global_dir = Path(self.temp_dir) / "global_harness"
+        project_dir = Path(self.temp_dir) / "project_workspace"
+
+        global_tools_dir = global_dir / "tools"
+        project_tools_dir = project_dir / ".microharness" / "tools"
+        global_tools_dir.mkdir(parents=True, exist_ok=True)
+        project_tools_dir.mkdir(parents=True, exist_ok=True)
+
+        # Global tool 1: shared_weather (v1)
+        (global_tools_dir / "weather.py").write_text(
+            """
+class WeatherTool:
+    name = "weather"
+    description = "Global weather tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "Global sunny"
+""",
+            encoding="utf-8",
+        )
+
+        # Global tool 2: global_sql
+        (global_tools_dir / "sql.py").write_text(
+            """
+class SqlTool:
+    name = "sql_query"
+    description = "Global SQL runner"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "SELECT 1"
+""",
+            encoding="utf-8",
+        )
+
+        # Project tool 1: shadows global weather with project-specific implementation
+        (project_tools_dir / "custom_weather.py").write_text(
+            """
+class ProjectWeatherTool:
+    name = "weather"
+    description = "Project specialized weather tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "Project rainy"
+""",
+            encoding="utf-8",
+        )
+
+        # Project tool 2: project_docker
+        (project_tools_dir / "docker.py").write_text(
+            """
+class ProjectDockerTool:
+    name = "docker_status"
+    description = "Project container tool"
+    parameters = {"type": "object", "properties": {}}
+    def execute(self):
+        return 0, "Containers running"
+""",
+            encoding="utf-8",
+        )
+
+        discovered = discover_tool_plugins(
+            workspace_dir=project_dir,
+            global_dir=global_dir,
+            env=self.env,
+        )
+
+        tool_map = {t.name: t for t in discovered}
+        self.assertEqual(len(tool_map), 3)
+        self.assertIn("weather", tool_map)
+        self.assertIn("sql_query", tool_map)
+        self.assertIn("docker_status", tool_map)
+
+        # Invariant: Project version shadowed global version
+        self.assertEqual(tool_map["weather"].description, "Project specialized weather tool")
+        _, out = tool_map["weather"].execute()
+        self.assertEqual(out, "Project rainy")
+
+        # Global non-shadowed tool is intact
+        self.assertEqual(tool_map["sql_query"].description, "Global SQL runner")
 
 
 if __name__ == "__main__":

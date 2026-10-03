@@ -1629,6 +1629,116 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result2.cached_tokens, 150)
         self.assertEqual(result2.cache_hit_rate_pct, 50.0)
 
+    def test_harness_additive_extra_tools_preserves_default_tools(self):
+        """Invariant: Passing extra_tools appends to default tools without erasing bash/file tools."""
+        class CustomInspectorTool:
+            name = "custom_inspect"
+            description = "Inspect custom data"
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self):
+                return 0, "inspected"
+
+        # Script model to call both custom_inspect and baseline bash tool
+        script = [
+            (
+                "Inspecting",
+                [ToolCall(id="c1", name="custom_inspect", arguments={})],
+            ),
+            (
+                "Echoing",
+                [ToolCall(id="b1", name="bash", arguments={"command": "echo 'additive_ok'"})],
+            ),
+            ("Done", []),
+        ]
+        mock_model = MockModel(script)
+        harness = Harness(
+            model=mock_model,
+            extra_tools=[CustomInspectorTool()],
+            runs_dir=self.runs_dir,
+            auto_discover_tools=False,
+            verbose=False,
+        )
+
+        task = Task(id="extra_tool_task", instruction="Test extra tools")
+        result = harness.run(task)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.total_steps, 3)
+
+        # Inspect trace to verify both tools executed properly
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        step1_out = trace_data["steps"][0]["tool_results"][0]["output"]
+        self.assertEqual(step1_out, "inspected")
+        step2_out = trace_data["steps"][1]["tool_results"][0]["output"]
+        self.assertEqual(step2_out, "additive_ok\n")
+
+        # Verify registered tools in tool registry include default 4 + extra tool
+        env = Environment(workspace_dir=Path(result.workspace_path), logs_dir=Path(self.runs_dir))
+        registry = harness._init_tools(env)
+        registered = list(registry._tools.keys())
+        self.assertEqual(len(registered), 5)
+        self.assertIn("bash", registered)
+        self.assertIn("read_file", registered)
+        self.assertIn("write_file", registered)
+        self.assertIn("edit_file", registered)
+        self.assertIn("custom_inspect", registered)
+
+    def test_harness_auto_discovers_tool_plugins_from_workspace_and_executes(self):
+        """Invariant: Harness auto-discovers tool plugins from project .microharness/tools/ and executes them."""
+        with tempfile.TemporaryDirectory() as project_temp:
+            project_dir = Path(project_temp)
+            tools_dir = project_dir / ".microharness" / "tools"
+            tools_dir.mkdir(parents=True, exist_ok=True)
+
+            plugin_code = """
+class GreetTool:
+    name = "greet_user"
+    description = "Greets a person by name"
+    parameters = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    def execute(self, name: str):
+        return 0, f"Welcome to microharness, {name}!"
+
+def get_tools(env=None):
+    return [GreetTool()]
+"""
+            (tools_dir / "greet.py").write_text(plugin_code, encoding="utf-8")
+
+            # Script model to call the discovered greet_user tool
+            script = [
+                (
+                    "Greeting",
+                    [ToolCall(id="g1", name="greet_user", arguments={"name": "Alice"})],
+                ),
+                ("Done", []),
+            ]
+            mock_model = MockModel(script)
+
+            harness = Harness(
+                model=mock_model,
+                workspace_dir=project_dir,
+                runs_dir=self.runs_dir,
+                auto_discover_tools=True,
+                verbose=False,
+            )
+
+            task = Task(id="plugin_task", instruction="Call greet_user")
+            result = harness.run(task)
+
+            self.assertTrue(result.passed)
+            self.assertEqual(result.total_steps, 2)
+
+            trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+            step1_out = trace_data["steps"][0]["tool_results"][0]["output"]
+            self.assertEqual(step1_out, "Welcome to microharness, Alice!")
+
+            env = Environment(workspace_dir=project_dir, logs_dir=Path(self.runs_dir))
+            registry = harness._init_tools(env)
+            self.assertIn("greet_user", registry._tools)
+
 
 if __name__ == "__main__":
     unittest.main()
