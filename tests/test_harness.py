@@ -2005,6 +2005,52 @@ class CustomTool:
             )
             self.assertTrue(harness_global.trust_project_tools)
 
+    def test_main_cli_project_config_self_grant_notice(self):
+        """Invariant: main() prints warning to stderr and does not crash when project config attempts self-grant."""
+        import io
+        import sys
+
+        from main import main
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws_dir = Path(temp_dir) / "project"
+            config_dir = ws_dir / ".microharness"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            (config_dir / "config.json").write_text(
+                json.dumps({"trust_project_tools": True}), encoding="utf-8"
+            )
+
+            stderr_buf = io.StringIO()
+            old_stderr = sys.stderr
+            try:
+                sys.stderr = stderr_buf
+                with patch("main._resolve_model", return_value=MockModel([("Done", [])])):
+                    with patch(
+                        "core.harness.Harness.run",
+                        return_value=MagicMock(
+                            passed=True,
+                            score=1.0,
+                            total_steps=1,
+                            trace_path="",
+                            workspace_path="",
+                            duration_s=0.1,
+                            patch_path=None,
+                            eval_result=None,
+                            finish_reason="completed",
+                            prompt_tokens=0,
+                            completion_tokens=0,
+                            cached_tokens=0,
+                            cache_hit_rate_pct=0.0,
+                            rate_limit_wait_s=0.0,
+                        ),
+                    ):
+                        main(["--dir", str(ws_dir), "--batch", "say hi"])
+            finally:
+                sys.stderr = old_stderr
+
+            err_output = stderr_buf.getvalue()
+            self.assertIn("Project config attempted to enable 'trust_project_tools'", err_output)
+
     def test_harness_tool_shadowing_emits_warning(self):
         """Invariant: Registering a tool plugin that shadows a built-in emits a stderr warning and overrides it."""
         import io

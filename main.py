@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -567,10 +568,10 @@ def _dispatch_benchmark(
     return False
 
 
-def main():
+def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     parser = _build_arg_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Resolve target directory, global config (~/.microharness/config.json), and project config (.microharness/config.json)
     target_dir = Path(args.dir).resolve()

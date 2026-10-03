@@ -270,6 +270,7 @@ class TestTracer(unittest.TestCase):
         """Invariant: Tracer instance formatters do not leak between instances or mutate global defaults."""
         import io
         import sys
+
         from core.tracer import _ACTION_FORMATTERS, Tracer
         from core.types import StepTrace
 

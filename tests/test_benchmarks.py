@@ -711,16 +711,36 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertEqual(saved_ids, [task1.id, task2.id, task3.id])
 
     def test_runner_resume_skips_malformed_rows_gracefully(self):
-        """Invariant: A malformed resume row missing task_id does not discard valid retained rows."""
+        """Invariant: Malformed resume rows (missing/whitespace task_id, non-dict) placed before,
+
+        between, and after valid rows do not discard or corrupt valid retained tasks.
+        """
         task1, eval1 = create_rate_limiter_task()
         task2, eval2 = create_circular_serializer_task()
-        task_empty = Task(id="", instruction="Empty task id should run")
+        task3, eval3 = create_rate_limiter_task()
+        task3.id = "rate_limiter_retained"
 
         report_file = Path(self.tmp_dir) / "mini_swe_report.json"
         initial_report = {
             "suite_name": "Mini-SWE",
-            "total_tasks": 2,
+            "total_tasks": 3,
             "tasks": [
+                # 1. Malformed row BEFORE valid task1: missing task_id
+                {
+                    "passed": True,
+                    "score": 1.0,
+                    "finish_reason": "completed",
+                },
+                # 2. Malformed row BEFORE valid task1: whitespace-only task_id
+                {
+                    "task_id": "   ",
+                    "passed": True,
+                    "score": 1.0,
+                    "finish_reason": "completed",
+                },
+                # 3. Malformed entry BEFORE valid task1: not a dict
+                "not_a_dictionary_entry",
+                # 4. Valid row for task1
                 {
                     "task_id": task1.id,
                     "passed": True,
@@ -729,66 +749,65 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
                     "duration_s": 2.0,
                     "finish_reason": "completed",
                 },
-                # Malformed row with missing task_id
+                # 5. Malformed row BETWEEN valid task1 and task3: missing task_id
                 {
+                    "score": 0.0,
+                    "finish_reason": "error",
+                },
+                # 6. Valid row for task3
+                {
+                    "task_id": task3.id,
                     "passed": True,
                     "score": 1.0,
+                    "total_steps": 2,
+                    "duration_s": 1.5,
                     "finish_reason": "completed",
                 },
-                # Malformed row with whitespace-only task_id
+                # 7. Malformed row AFTER valid task3: empty task_id
                 {
-                    "task_id": "   ",
-                    "passed": True,
-                    "score": 1.0,
-                    "finish_reason": "completed",
+                    "task_id": "",
+                    "passed": False,
                 },
             ],
         }
         report_file.write_text(json.dumps(initial_report), encoding="utf-8")
 
         mock_harness = MagicMock()
-        mock_harness.run.side_effect = [
-            RunResult(
-                task_id=task2.id,
-                passed=True,
-                score=1.0,
-                total_steps=1,
-                duration_s=1.0,
-                finish_reason="completed",
-                trace_path="",
-                workspace_path="",
-            ),
-            RunResult(
-                task_id=task_empty.id,
-                passed=True,
-                score=1.0,
-                total_steps=1,
-                duration_s=1.0,
-                finish_reason="completed",
-                trace_path="",
-                workspace_path="",
-            ),
-        ]
+        mock_harness.run.return_value = RunResult(
+            task_id=task2.id,
+            passed=True,
+            score=1.0,
+            total_steps=1,
+            duration_s=1.0,
+            finish_reason="completed",
+            trace_path="",
+            workspace_path="",
+        )
         factory = MagicMock(return_value=mock_harness)
 
         report = run_benchmark_suite(
             harness_factory=factory,
-            tasks=[(task1, eval1), (task2, eval2), (task_empty, eval1)],
+            tasks=[(task1, eval1), (task2, eval2), (task3, eval3)],
             suite_name="Mini-SWE",
             output_dir=self.tmp_dir,
             verbose=False,
             resume=True,
         )
 
-        # Invariant 1: Task 1 was retained from valid row.
-        # Malformed rows with empty/whitespace task_ids were discarded and NOT retained,
-        # so task 2 and task_empty both had to run (call_count == 2).
-        self.assertEqual(factory.call_count, 2)
+        # Invariant 1: Both task1 and task3 are retained from previous run.
+        # Malformed rows before, between, and after them are skipped without aborting.
+        # Only task2 is executed (factory.call_count == 1).
+        self.assertEqual(factory.call_count, 1)
         called_ids = [call[0][0].id for call in mock_harness.run.call_args_list]
-        self.assertEqual(called_ids, [task2.id, ""])
+        self.assertEqual(called_ids, [task2.id])
 
         t1_rep = next(t for t in report.tasks if t.task_id == task1.id)
         self.assertTrue(t1_rep.passed)
+        self.assertEqual(t1_rep.total_steps, 3)
+
+        t3_rep = next(t for t in report.tasks if t.task_id == task3.id)
+        self.assertTrue(t3_rep.passed)
+        self.assertEqual(t3_rep.total_steps, 2)
 
     def test_run_benchmark_suite_delta_rate_limit_wait_with_shared_accumulating_model(self):
         """Invariant: Benchmark runner computes per-task rate limit wait deltas (30/60/90)

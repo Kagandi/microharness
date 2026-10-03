@@ -656,11 +656,8 @@ class Harness:
                 tracer.log("\n⚠️ Task reached maximum allowed timeout.")
                 return False, "timeout", step_idx
 
-            if effective_deadline:
-                if isinstance(self.model, DeadlineAwareModel):
-                    self.model.set_deadline(effective_deadline)
-                elif hasattr(self.model, "set_deadline"):
-                    self.model.set_deadline(effective_deadline)
+            if effective_deadline and isinstance(self.model, DeadlineAwareModel):
+                self.model.set_deadline(effective_deadline)
 
             try:
                 is_finished, step_trace = loop.step(step_index=step_idx)
@@ -736,8 +733,6 @@ class Harness:
 
         task_deadline = (run_start + task.timeout_seconds) if task.timeout_seconds else None
         if isinstance(self.model, DeadlineAwareModel):
-            self.model.set_deadline(task_deadline)
-        elif hasattr(self.model, "set_deadline"):
             self.model.set_deadline(task_deadline)
 
         try:
@@ -854,8 +849,6 @@ class Harness:
             )
         finally:
             if isinstance(self.model, DeadlineAwareModel):
-                self.model.set_deadline(None)
-            elif hasattr(self.model, "set_deadline"):
                 self.model.set_deadline(None)
             env.teardown()
 

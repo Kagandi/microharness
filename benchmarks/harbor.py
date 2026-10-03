@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
-from core.environment import ContainerEnvironment, DockerEnvironment, Environment
+from core.environment import ContainerEnvironment, Environment
 from core.types import EvalResult, StepTrace, Task
 
 DEEPSWE_MINI_TASKS: list[str] = [

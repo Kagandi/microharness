@@ -135,6 +135,7 @@ class TestHarborBenchmark(unittest.TestCase):
     def test_harbor_evaluator_accepts_pluggable_container_env_not_docker_subclass(self):
         """Invariant: HarborEvaluator accepts any ContainerEnvironment protocol implementer without requiring DockerEnvironment inheritance."""
         import json
+
         from core.environment import ContainerEnvironment, DockerEnvironment
 
         class PluggableContainerEnv:
