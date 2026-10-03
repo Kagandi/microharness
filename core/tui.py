@@ -37,12 +37,68 @@ def compact_path(path_str: str) -> str:
         return path_str
 
 
+INLINE_MD_PATTERN = re.compile(
+    r"(?:\*\*\*(?P<bi>[^*]+)\*\*\*)"
+    r"|(?:___(?P<bi2>[^_]+)___)"
+    r"|(?:\*\*(?P<b>[^*]+)\*\*)"
+    r"|(?:__(?P<b2>[^_]+)__)"
+    r"|(?:\*(?P<i>[^*]+)\*)"
+    r"|(?:(?<!\w)_(?P<i2>[^_]+)_(?!\w))"
+    r"|(?:`(?P<code>[^`]+)`)"
+)
+
+
 def _clean_markdown_inline(text: str) -> str:
     """Strips inline markdown formatting markers (`code`, **bold**, *italic*) while preserving identifiers."""
     t = re.sub(r"`([^`]+)`", r"\1", text)
+    t = re.sub(r"\*\*\*([^*]+)\*\*\*", r"\1", t)
+    t = re.sub(r"___([^_]+)___", r"\1", t)
     t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+    t = re.sub(r"__([^_]+)__", r"\1", t)
     t = re.sub(r"\*([^*]+)\*", r"\1", t)
+    t = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", t)
     return t.strip()
+
+
+def parse_inline_segments(text: str) -> list[tuple[str, str]]:
+    """Splits a line into styled segments (normal, bold, italic, bold_italic, code).
+
+    Markdown delimiter characters are stripped, allowing native terminal formatting.
+    """
+    if not text:
+        return [("", "normal")]
+
+    tokens: list[tuple[str, str]] = []
+    last_idx = 0
+    for m in INLINE_MD_PATTERN.finditer(text):
+        if m.start() > last_idx:
+            tokens.append((text[last_idx : m.start()], "normal"))
+        if m.group("bi") or m.group("bi2"):
+            val = m.group("bi") or m.group("bi2")
+            tokens.append((val, "bold_italic"))
+        elif m.group("b") or m.group("b2"):
+            val = m.group("b") or m.group("b2")
+            tokens.append((val, "bold"))
+        elif m.group("i") or m.group("i2"):
+            val = m.group("i") or m.group("i2")
+            tokens.append((val, "italic"))
+        elif m.group("code"):
+            tokens.append((m.group("code"), "code"))
+        last_idx = m.end()
+
+    if last_idx < len(text):
+        tokens.append((text[last_idx:], "normal"))
+
+    cleaned: list[tuple[str, str]] = []
+    for t_str, style in tokens:
+        if style == "normal":
+            cleaned_str = re.sub(r"^\*\*|\*\*$|^_|_$|^\*|\*$", "", t_str)
+            if cleaned_str:
+                cleaned.append((cleaned_str, style))
+        else:
+            cleaned.append((t_str, style))
+
+    return cleaned or [("", "normal")]
 
 
 def get_git_branch(workspace: Path | str) -> str:
@@ -282,22 +338,48 @@ class TUIState:
         self.cwd: str = ""
         self.git_branch: str = ""
         self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
+        self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
         self.selected_command_idx: int = 0
 
-    def set_custom_commands(self, custom_commands: dict[str, Any]) -> None:
-        """Loads custom workspace commands into the auto-completion catalog."""
-        self.command_catalog = list(DEFAULT_COMMANDS)
-        for cmd_name, cmd_info in sorted(custom_commands.items()):
+    def _rebuild_command_catalog(self) -> None:
+        """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
+        catalog = list(DEFAULT_COMMANDS)
+        for cmd_name, cmd_info in sorted(self.custom_commands.items()):
             desc = f"Custom command: /{cmd_name}"
-            if isinstance(cmd_info, tuple) and len(cmd_info) >= 3:
+            if isinstance(cmd_info, (tuple, list)) and len(cmd_info) >= 3:
                 scope = cmd_info[2]
                 desc = f"Custom command [{scope}]"
-            self.command_catalog.append((f"/{cmd_name}", desc))
+            catalog.append((f"/{cmd_name}", desc))
+
+        existing_cmds = {cmd.lower() for cmd, _ in catalog}
+        for s_name, s_info in sorted(self.skills.items()):
+            slash_skill = f"/{s_name}"
+            if slash_skill.lower() not in existing_cmds:
+                summary = (
+                    s_info[0]
+                    if isinstance(s_info, (tuple, list)) and len(s_info) > 0
+                    else s_name
+                )
+                scope = (
+                    s_info[2]
+                    if isinstance(s_info, (tuple, list)) and len(s_info) > 2
+                    else "project"
+                )
+                catalog.append((slash_skill, f"Skill [{scope}] {summary}"))
+                existing_cmds.add(slash_skill.lower())
+
+        self.command_catalog = catalog
+
+    def set_custom_commands(self, custom_commands: dict[str, Any]) -> None:
+        """Loads custom workspace commands into the auto-completion catalog."""
+        self.custom_commands = dict(custom_commands)
+        self._rebuild_command_catalog()
 
     def set_skills(self, skills: dict[str, Any]) -> None:
         """Loads discovered skills into the auto-completion catalog."""
         self.skills = dict(skills)
+        self._rebuild_command_catalog()
 
     def get_matching_commands(self) -> list[tuple[str, str]]:
         """Filters command catalog matching current slash-command prefix in input buffer."""
@@ -541,10 +623,35 @@ class CursesTUI:
             elif tag == "agent":
                 attr = curses.color_pair(6) if self.has_colors else curses.A_NORMAL
 
-            try:
-                stdscr.addstr(row, 1, text[: w - 2], attr)
-            except curses.error:
-                pass
+            if tag in ("agent", "user", "blockquote", "table_row"):
+                segments = parse_inline_segments(text)
+                col = 1
+                italic_attr = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
+                for seg_text, style in segments:
+                    if col >= w - 1:
+                        break
+                    avail = w - 1 - col
+                    chunk = seg_text[:avail]
+                    seg_attr = attr
+                    if style == "bold":
+                        seg_attr |= curses.A_BOLD
+                    elif style == "italic":
+                        seg_attr |= italic_attr
+                    elif style == "bold_italic":
+                        seg_attr |= (curses.A_BOLD | italic_attr)
+                    elif style == "code":
+                        seg_attr = (curses.color_pair(2) | curses.A_BOLD) if self.has_colors else curses.A_BOLD
+
+                    try:
+                        stdscr.addstr(row, col, chunk, seg_attr)
+                    except curses.error:
+                        pass
+                    col += len(chunk)
+            else:
+                try:
+                    stdscr.addstr(row, 1, text[: w - 2], attr)
+                except curses.error:
+                    pass
 
         # 4. Status Cockpit: Row H - 4 (Sep), Row H - 3 (Path), Row H - 2 (Telemetry)
         path_label = self.state.cwd or ""

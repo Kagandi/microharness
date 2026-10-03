@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
-from core.tui import CursesTUI, TUILine, TUIState
+from core.tui import CursesTUI, TUILine, TUIState, parse_inline_segments
 
 
 class TestTUI(unittest.TestCase):
@@ -473,6 +473,116 @@ class TestTUI(unittest.TestCase):
         self.assertGreaterEqual(len(skill_border_calls), 1)
         skill_item_calls = [c for c in mock_stdscr.addstr.call_args_list if "/skill deploy-tool" in str(c)]
         self.assertGreaterEqual(len(skill_item_calls), 1)
+
+    def test_direct_skill_slash_command_autocomplete(self):
+        """Invariant: Discovered skills are registered as direct /{skill} commands in the catalog and autocompleted."""
+        state = TUIState()
+        skills = {
+            "deploy-tool": ("Deploy app to production", "skills/deploy/SKILL.md", "project", "deploy instructions"),
+            "my-linter": ("Lint code with ruff", "skills/lint/SKILL.md", "global", "lint instructions"),
+        }
+        state.set_skills(skills)
+
+        # 1. Matching /dep matches direct skill /deploy-tool
+        state.input_buffer = "/dep"
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0], "/deploy-tool")
+        self.assertEqual(m[0][1], "Skill [project] Deploy app to production")
+
+        # 2. Matching /my matches direct skill /my-linter
+        state.input_buffer = "/my"
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0], "/my-linter")
+        self.assertEqual(m[0][1], "Skill [global] Lint code with ruff")
+
+        # 3. Tab completion completes direct skill name
+        completed = state.complete_selected_command()
+        self.assertEqual(completed, "/my-linter")
+        self.assertEqual(state.input_buffer, "/my-linter")
+
+        # 4. Custom command overrides skill if name collides
+        state.set_custom_commands({"deploy-tool": ("Override deploy", "echo override", "workspace")})
+        state.input_buffer = "/dep"
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0], "/deploy-tool")
+        self.assertEqual(m[0][1], "Custom command [workspace]")
+
+    def test_inline_markdown_parsing_and_styling(self):
+        """Invariant: parse_inline_segments correctly classifies bold, italic, code, and preserves snake_case."""
+        # 1. Empty or plain text
+        self.assertEqual(parse_inline_segments(""), [("", "normal")])
+        self.assertEqual(parse_inline_segments("plain text"), [("plain text", "normal")])
+
+        # 2. Asterisks bold and underscores bold
+        self.assertEqual(parse_inline_segments("**bold text**"), [("bold text", "bold")])
+        self.assertEqual(parse_inline_segments("__bold text__"), [("bold text", "bold")])
+
+        # 3. Asterisks italic and underscores italic
+        self.assertEqual(parse_inline_segments("*italic text*"), [("italic text", "italic")])
+        self.assertEqual(parse_inline_segments("_italic text_"), [("italic text", "italic")])
+
+        # 4. Bold italic combinations
+        self.assertEqual(parse_inline_segments("***bold italic***"), [("bold italic", "bold_italic")])
+        self.assertEqual(parse_inline_segments("___bold italic___"), [("bold italic", "bold_italic")])
+
+        # 5. Inline code
+        self.assertEqual(parse_inline_segments("`code snippet`"), [("code snippet", "code")])
+
+        # 6. Mixed text in a single line
+        mixed = "Check **important** and *crucial* with `git status`!"
+        segments = parse_inline_segments(mixed)
+        expected = [
+            ("Check ", "normal"),
+            ("important", "bold"),
+            (" and ", "normal"),
+            ("crucial", "italic"),
+            (" with ", "normal"),
+            ("git status", "code"),
+            ("!", "normal"),
+        ]
+        self.assertEqual(segments, expected)
+
+        # 7. Preserve snake_case identifiers without treating underscores as italic
+        ident = "use micro_harness_v2 and test_case_runner now"
+        self.assertEqual(parse_inline_segments(ident), [(ident, "normal")])
+
+    def test_tui_draw_renders_inline_markdown_with_curses_attributes(self):
+        """Invariant: CursesTUI.draw applies curses bold and italic attributes and strips markdown markers."""
+        import curses
+
+        state = TUIState()
+        state.add_agent("Result: **strong result** and *careful note*")
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        # Check call arguments of addstr
+        calls = mock_stdscr.addstr.call_args_list
+
+        # Verify raw ** and * markers are NOT in any text rendered
+        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        for t in rendered_texts:
+            self.assertNotIn("**", t)
+
+        # Verify that bold text was rendered with curses.A_BOLD
+        bold_calls = [
+            c for c in calls
+            if len(c.args) >= 4 and (c.args[3] & curses.A_BOLD) and c.args[2] == "strong result"
+        ]
+        self.assertGreaterEqual(len(bold_calls), 1)
+
+        # Verify that italic text was rendered with italic attribute (A_ITALIC or fallback A_UNDERLINE)
+        italic_attr = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
+        italic_calls = [
+            c for c in calls
+            if len(c.args) >= 4 and (c.args[3] & italic_attr) and c.args[2] == "careful note"
+        ]
+        self.assertGreaterEqual(len(italic_calls), 1)
 
 
 if __name__ == "__main__":

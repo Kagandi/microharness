@@ -817,9 +817,9 @@ class Harness:
             for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
                 print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
         if skills:
-            print("\nAvailable skills (from skills/):")
+            print("\nAvailable skills (run /<name> or /skill <name>):")
             for s_name, (s_desc, _, s_scope, _) in sorted(skills.items()):
-                print(f"  {s_name:<11} - [{s_scope}] {s_desc}")
+                print(f"  /{s_name:<10} - [{s_scope}] {s_desc}")
         print()
 
     def _print_context_status(self, memory: Memory) -> None:
@@ -983,6 +983,16 @@ class Harness:
                 print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
                 memory.add_user(expanded_prompt)
                 return "turn"
+            elif skills and cmd_key in skills:
+                _, _, scope, content = skills[cmd_key]
+                instr = args_part.strip()
+                if instr:
+                    effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nTask:\n{instr}"
+                else:
+                    effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nPlease follow the instructions from the '{cmd_key}' skill above."
+                print(f"\n⚡ Executing /{cmd_key} [{scope}] ...\n")
+                memory.add_user(effective_prompt)
+                return "turn"
             print(f"\n❌ Unknown command '/{cmd_key}'. Type /help to see available commands.\n")
             return "skip"
 
@@ -1132,7 +1142,7 @@ class Harness:
                 if custom_commands:
                     state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
                 if skills:
-                    state.add_system("Available skills: " + ", ".join(s for s in sorted(skills.keys())))
+                    state.add_system("Available skills (run /<name>): " + ", ".join(f"/{s}" for s in sorted(skills.keys())))
                 return
 
             if cmd in ("/status", "status"):
@@ -1182,6 +1192,14 @@ class Harness:
                     _, template, scope = custom_commands[cmd_key]
                     effective_prompt = _expand_command(template, args_part)
                     state.add_system(f"Executing /{cmd_key} [{scope}] ...")
+                elif skills and cmd_key in skills:
+                    _, _, scope, content = skills[cmd_key]
+                    instr = args_part.strip()
+                    if instr:
+                        effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nTask:\n{instr}"
+                    else:
+                        effective_prompt = f"[Active Skill: {cmd_key}]\n{content}\n\nPlease follow the instructions from the '{cmd_key}' skill above."
+                    state.add_system(f"⚡ Activated skill: /{cmd_key} [{scope}]")
                 else:
                     state.add_error(f"Unknown command '/{cmd_key}'. Type /help for commands.")
                     return

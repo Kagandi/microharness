@@ -1843,6 +1843,48 @@ def get_tools(env=None):
             self.assertEqual(len(memory.messages), 2)
             self.assertIn("[Active Skill: deploy-tool]", memory.messages[-1].content)
 
+            # 10. Direct skill slash command execution (e.g. /deploy-tool deploy to staging)
+            act = harness._dispatch_interactive_input(
+                "/deploy-tool deploy to staging",
+                memory,
+                custom_commands={},
+                skills=discovered,
+            )
+            self.assertEqual(act, "turn")
+            self.assertEqual(len(memory.messages), 3)
+            self.assertIn("[Active Skill: deploy-tool]", memory.messages[-1].content)
+            self.assertIn("Task:\ndeploy to staging", memory.messages[-1].content)
+
+            # 11. Direct skill slash command execution without extra instructions
+            act = harness._dispatch_interactive_input(
+                "/my-linter",
+                memory,
+                custom_commands={},
+                skills=discovered,
+            )
+            self.assertEqual(act, "turn")
+            self.assertEqual(len(memory.messages), 4)
+            self.assertIn("[Active Skill: my-linter]", memory.messages[-1].content)
+            self.assertIn("Please follow the instructions from the 'my-linter' skill above.", memory.messages[-1].content)
+
+            # 12. Negative test: Unknown slash command returns skip without mutating memory
+            act = harness._dispatch_interactive_input(
+                "/unknown-skill",
+                memory,
+                custom_commands={},
+                skills=discovered,
+            )
+            self.assertEqual(act, "skip")
+            self.assertEqual(len(memory.messages), 4)
+
+            # 13. Interactive help text mentions direct /<name> invocation
+            with patch("builtins.print") as mock_print:
+                harness._print_interactive_help(custom_commands={}, skills=discovered)
+                printed = " ".join(str(c) for c in mock_print.call_args_list)
+                self.assertIn("Available skills (run /<name> or /skill <name>):", printed)
+                self.assertIn("/deploy-tool", printed)
+                self.assertIn("/my-linter", printed)
+
 
 if __name__ == "__main__":
     unittest.main()
