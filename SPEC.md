@@ -41,15 +41,27 @@ microharness/
 │   └── runner.py               # Benchmark orchestrator, scorecard table & JSON export
 ├── core/
 │   ├── types.py                # Data contracts (Message, ToolCall, Task, Trajectory, RunResult)
-│   ├── prompts.py              # System prompt templates
+│   ├── prompts.py              # System prompt templates & prompt assembly
 │   ├── environment.py          # Workspace & bash execution (in-place & sandbox)
 │   ├── tools.py                # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py               # Context manager, stats & compaction policies
-│   ├── model.py                # Pluggable Model protocol, generic HttpChatModel & MockModel
+│   ├── protocols.py            # Model protocol + optional capability protocols
+│   ├── ratelimit.py            # Rate-limit classification, retry-delay parsing & RetryPolicy
+│   ├── usage.py                # Token normalization, per-model telemetry & run totals
+│   ├── providers.py            # Provider registry, model-spec resolution & client construction
+│   ├── model.py                # Generic HttpChatModel & MockModel clients
+│   ├── config.py               # Cascading configuration, JSONC reading & setting resolution
+│   ├── skills.py               # Progressive skills: discovery, summaries & activation
+│   ├── commands.py             # Custom slash commands & slash-input resolution
+│   ├── discovery.py            # Hierarchical resource discovery & @file-tagging
+│   ├── interactive.py          # Command router shared by the CLI session & the TUI
+│   ├── session.py              # Step driver (retries & deadlines) & session resumption
 │   ├── loop.py                 # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py            # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py               # Telemetry collector & trace exporter
-│   └── harness.py              # Harness orchestrator (batch and interactive chat)
+│   ├── tui.py                  # Full-screen curses TUI
+│   ├── tui_session.py          # TUI turn driver: step rendering & cooperative cancellation
+│   └── harness.py              # Harness orchestrator (batch, CLI chat & TUI)
 └── tests/
     ├── test_benchmarks.py      # Mini-SWE baseline failure, anti-cheating & reference tests
     ├── test_environment.py     # Path sandboxing, traversal rejection & bash timeout tests
@@ -57,7 +69,18 @@ microharness/
     ├── test_memory.py          # Conversation history, stats, immutability & compaction tests
     ├── test_model.py           # Endpoint normalization & mock model tests
     ├── test_evaluator.py       # Grader assertions & negative failure tests
-    └── test_harness.py         # End-to-end lifecycle, multi-turn chat, skills & guardrails tests
+    ├── test_config.py          # Config cascade, JSONC parsing & tool-trust boundary
+    ├── test_protocols.py       # Capability protocol detection
+    ├── test_ratelimit.py       # Retry-delay parsing, quota classification & backoff
+    ├── test_usage.py           # Token normalization & telemetry accounting
+    ├── test_providers.py       # Provider registry, model specs & available models
+    ├── test_skills.py          # Skill discovery, summaries & activation
+    ├── test_commands.py        # Slash-command discovery, expansion & resolution
+    ├── test_prompts.py         # Prompt assembly & AGENTS.md cascading
+    ├── test_session.py         # Step driver retries, deadlines & session resumption
+    ├── test_interactive.py     # Command router & rendering
+    ├── test_tui_session.py     # TUI turn rendering & cancellation
+    └── test_harness.py         # End-to-end lifecycle, multi-turn chat, skills & guardrails
 ```
 
 ---
@@ -194,13 +217,31 @@ Maintains message history across multi-turn sessions with proactive and on-deman
 
 ---
 
-### 3.5 Pluggable Model Interface (`core/model.py`)
+### 3.5 Pluggable Model Interface (`core/protocols.py`, `core/model.py`, `core/ratelimit.py`, `core/usage.py`, `core/providers.py`)
 ```python
 class Model(Protocol):
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]: ...
 ```
+
+`generate` is the **only** required method. Everything else is an optional capability
+expressed as a small `runtime_checkable` protocol in `core/protocols.py`, which the harness
+probes with `isinstance` and degrades gracefully when absent:
+
+| Capability | Protocol | Enables |
+| :--- | :--- | :--- |
+| Reset between tasks | `ResettableModel` | Benchmark runs reusing one client |
+| Prompt cache TTL | `CacheAwareModel` | `/cache` switching and cache telemetry |
+| Reasoning effort | `ReasoningAwareModel` | `/reasoning` switching |
+| Task deadline | `DeadlineAwareModel` | Bounding in-flight HTTP requests |
+| Cooperative cancel | `CancellableModel` | Esc during a retry backoff |
+| Rate-limit telemetry | `RateLimitAwareModel` | Deadline accounting and reporting |
+| Per-step usage | `UsageReportingModel` | Step-level token totals in the trace |
+| Identity | `NamedModel`, `EndpointAwareModel`, `ProviderAwareModel` | Model/endpoint/provider display |
+
+Adding a new provider capability therefore means adding one protocol, never editing the harness.
+
 * **`HttpChatModel`**: Universal client using Python's standard library `urllib.request`.
   * Normalizes both base URLs (`https://openrouter.ai/api/v1`) and full endpoints (`.../chat/completions`).
   * Automatically sets OpenRouter-recommended headers (`HTTP-Referer`, `X-Title`).
@@ -209,7 +250,7 @@ class Model(Protocol):
 
 ---
 
-### 3.6 Configuration, Steering & Progressive Skills (`core/harness.py`)
+### 3.6 Configuration, Steering & Progressive Skills (`core/config.py`, `core/skills.py`, `core/commands.py`)
 The harness discovers global machine configuration, steering guidelines, skills, and custom commands across global and project scopes:
 1. **Configuration Files (`config.json`)**:
    * Global machine-level defaults in `~/.microharness/config.json`.
@@ -240,7 +281,7 @@ The harness discovers global machine configuration, steering guidelines, skills,
 
 ---
 
-### 3.7 The Agent Loop (`core/loop.py`)
+### 3.7 The Agent Loop & Run Lifecycle (`core/loop.py`, `core/session.py`)
 The native tool-calling loop is intentionally pure (~40 lines). It accepts `model`, `memory`, and `tools`, executing:
 ```python
 while not done:
@@ -256,15 +297,28 @@ while not done:
         memory.add_tool_result(result)
 ```
 
+`core/session.py` layers run lifecycle concerns on top of that loop without touching it:
+* **`run_steps`** drives a turn with a retry-and-give-up policy, classifies the reason a turn
+  ended (`completed`, `max_steps_exceeded`, `timeout`, `interrupted`, `rate_limited`, `error`),
+  and adds provider rate-limit backoff back onto the task deadline so throttling is not charged
+  to the user's budget.
+* **`resolve_session_dir` / `load_session`** resolve a session selector (run id, 1-based index,
+  path substring, or recency) to a run directory, so `/resume` and `--resume` agree.
+
 ---
 
-### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/harness.py`)
+### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/interactive.py`, `core/harness.py`)
 * **Real-time Terminal Streaming**: Clean emoji indicators for Thoughts (`🧠`), Actions (`⚡`), Observations (`👁️`), Compactions (`🧹`), and User Input (`👤`).
 * **Artifact Persistence & Crash Recovery**: Every run writes:
   * `trajectory.jsonl`: Append-only, per-step streaming persistence. Each step is written and flushed to disk as it completes, so a process or container crash mid-turn loses at most the in-flight step. Records are serialized with `default=str`, so non-JSON-native values (Decimals, `Path`, sets, custom objects) degrade to their string form instead of dropping the step. A step that cannot be serialized at all (circular references, non-primitive dict keys) is replaced by a placeholder carrying `serialization_error: true` and empty `prompt_messages`; the placeholder preserves `step_index` so the stream never contains index holes, and message reconstruction skips it in favour of the last step that recorded a real prompt. Recovery is therefore complete up to the most recent serializable step, not guaranteed unconditionally.
   * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, reconstructed messages, and patch diff.
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
+* **One Command Table, Two Frontends**: the plain-text session and the full-screen TUI answer the
+  same `/`-commands and differ only in presentation. `core/interactive.py` holds the command table
+  and the handlers; each frontend supplies a `SessionUI` sink (`ConsoleUI` prints, `TuiUI` writes to
+  `TUIState`). Handlers perform the work and report through the sink, then return one of `exit`,
+  `turn`, or `skip`. A command is added once, not once per frontend.
 * **Interactive Meta-Commands & Resilience**:
   * Graceful interruption: `Ctrl+C` aborts the active step immediately (including a blocked request) and returns cleanly to the prompt without aborting the session. `Esc` is a cooperative cancel observed at step boundaries and between model retry attempts; it announces `⚠️ Cancelling…` as soon as it is seen. See §5.1 for why the two differ and §5.2 for the planned work to unify them.
   * `/model [name|number]`: Inspects available models or switches the active model dynamically on the fly. A supplied name is resolved against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (accepting both `openai` and `openai/gpt-4o`). An unrecognized name is rejected with the list of valid models rather than silently constructing a client for a model that does not exist. A numeric argument selects from the same list.
@@ -298,7 +352,7 @@ while not done:
 
 ---
 
-### 3.10 Prompt Caching Economics & Dynamic TTL Architecture (`core/model.py`, `core/harness.py`)
+### 3.10 Prompt Caching Economics & Dynamic TTL Architecture (`core/config.py`, `core/model.py`, `core/usage.py`, `core/harness.py`)
 Modern coding agent transcripts regularly start at **25,000 to 60,000+ tokens** on step 1 due to extensive system instructions, `AGENTS.md` conventions, tool schemas, skills, git history, and directory trees. Because Anthropic/OpenRouter caching triggers at just **1,024 tokens**, every coding turn operates in high-stakes context territory.
 
 #### 1. Provider Cache Tiers & Breakeven Economics
