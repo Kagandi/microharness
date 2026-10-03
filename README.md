@@ -34,7 +34,11 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
   "max_context_chars": 32000,
   "trigger_ratio": 0.80,
   "max_tool_chars": 2000,
-  "sandbox": false
+  "sandbox": false,
+  "models": {
+    "fast": { "model": "gemini-2.5-flash", "provider": "google", "description": "Fast flash model" },
+    "smart": { "model": "anthropic/claude-3.5-sonnet", "provider": "openrouter", "description": "Frontier reasoning model" }
+  }
 }
 ```
 
@@ -191,6 +195,8 @@ When you chat with the agent, the harness maintains persistent memory and render
 ### Slash Commands (No Model Call)
 You can inspect or control the harness runtime directly:
 
+* **`/model [name|number]`**: Inspect available models or switch active model dynamically on the fly (e.g. `/model fast` or `/model 2`). In TUI mode, Tab autocompletes configured model names.
+* **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place.
 * **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
 * **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
 * **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
@@ -211,9 +217,22 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 107 unit and integration tests run in ~6s)*
+*(All 250+ unit and integration tests run in ~6s)*
 
-### 3. Run Mini-SWE for Rapid Sanity Testing
+### 3. Interactive and TUI Sessions
+```bash
+# Launch interactive mode (or full-screen TUI with --tui):
+uv run microharness
+uv run microharness --tui
+
+# Resume previous interactive session:
+uv run microharness --resume
+
+# Resume a specific session by ID:
+uv run microharness --resume run-2026-10-03-xxxx
+```
+
+### 4. Run Mini-SWE for Rapid Sanity Testing
 Run the lightweight 5-task sanity test suite before launching heavy benchmarks:
 ```bash
 # Run the entire Mini-SWE sanity benchmark suite:

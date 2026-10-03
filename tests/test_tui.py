@@ -683,8 +683,8 @@ class TestTUI(unittest.TestCase):
         # Input "/" -> all built-in commands
         state.input_buffer = "/"
         matches = state.get_matching_commands()
-        self.assertEqual(len(matches), 6)
-        self.assertEqual([m[0] for m in matches], ["/compact", "/status", "/new", "/skill", "/help", "/exit"])
+        self.assertEqual(len(matches), 8)
+        self.assertEqual([m[0] for m in matches], ["/model", "/resume", "/compact", "/status", "/new", "/skill", "/help", "/exit"])
 
         # Input "/c" -> matches /compact
         state.input_buffer = "/c"
@@ -699,7 +699,7 @@ class TestTUI(unittest.TestCase):
 
         # Custom workspace commands
         state.set_custom_commands({"review": ("template", "prompt", "project")})
-        state.input_buffer = "/r"
+        state.input_buffer = "/rev"
         r_matches = state.get_matching_commands()
         self.assertEqual(len(r_matches), 1)
         self.assertEqual(r_matches[0][0], "/review")
@@ -783,18 +783,18 @@ class TestTUI(unittest.TestCase):
         tui.handle_key(353, dummy_submit)  # Shift-Tab integer
         self.assertEqual(state.selected_command_idx, 0)
         tui.handle_key("\x1b[Z", dummy_submit)  # Shift-Tab ANSI escape sequence
-        self.assertEqual(state.selected_command_idx, 5)
+        self.assertEqual(state.selected_command_idx, 7)
         tui.handle_key(curses.KEY_UP, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 4)
+        self.assertEqual(state.selected_command_idx, 6)
 
         # 5. Down arrow cycling forward
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 5)
+        self.assertEqual(state.selected_command_idx, 7)
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
         self.assertEqual(state.selected_command_idx, 0)
 
         # 6. Right Arrow autocompletion into input buffer
-        state.selected_command_idx = 4  # /help
+        state.selected_command_idx = 6  # /help
         tui.handle_key(curses.KEY_RIGHT, dummy_submit)
         self.assertEqual(state.input_buffer, "/help")
 
@@ -1160,6 +1160,58 @@ class TestTUI(unittest.TestCase):
         tui.handle_key("\x1b[50;2u", lambda text: None)
         self.assertEqual(state.input_buffer, "@")
         self.assertEqual(len(state.get_matching_file_tags()), 1)
+
+    def test_model_and_resume_subcommand_autocomplete(self):
+        """Invariant: /model and /resume provide subcommand autocomplete for models and previous runs."""
+        state = TUIState()
+        models = [
+            {"name": "fast", "model": "gemini-2.5-flash", "provider": "google", "description": "Fast flash model"},
+            {"name": "smart", "model": "claude-3-5-sonnet", "provider": "anthropic", "description": "Smart sonnet"},
+        ]
+        state.set_available_models(models)
+
+        sessions = [
+            {"run_id": "run-2026-10-03-alpha", "total_steps": 5, "preview": "Fix caching bug in harness"},
+            {"run_id": "run-2026-10-02-beta", "total_steps": 12, "preview": "Refactor discovery"},
+        ]
+        state.set_available_sessions(sessions)
+
+        # 1. /model with space matches all available models
+        state.input_buffer = "/model "
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m[0][0], "/model fast")
+        self.assertEqual(m[0][1], "[google] Fast flash model")
+        self.assertEqual(m[1][0], "/model smart")
+
+        # 2. /model fa matches fast
+        state.input_buffer = "/model fa"
+        m_fa = state.get_matching_commands()
+        self.assertEqual(len(m_fa), 1)
+        self.assertEqual(m_fa[0][0], "/model fast")
+
+        # 3. Tab completion on /model fa completes buffer to /model fast
+        completed = state.complete_selected_command()
+        self.assertEqual(completed, "/model fast")
+        self.assertEqual(state.input_buffer, "/model fast")
+
+        # 4. /resume with space matches all available sessions
+        state.input_buffer = "/resume "
+        s = state.get_matching_commands()
+        self.assertEqual(len(s), 2)
+        self.assertEqual(s[0][0], "/resume run-2026-10-03-alpha")
+        self.assertEqual(s[0][1], "(5 steps) Fix caching bug in harness")
+
+        # 5. /resume run-2026-10-02 matches beta
+        state.input_buffer = "/resume run-2026-10-02"
+        s_beta = state.get_matching_commands()
+        self.assertEqual(len(s_beta), 1)
+        self.assertEqual(s_beta[0][0], "/resume run-2026-10-02-beta")
+
+        # 6. Tab completion completes session id
+        completed_sess = state.complete_selected_command()
+        self.assertEqual(completed_sess, "/resume run-2026-10-02-beta")
+        self.assertEqual(state.input_buffer, "/resume run-2026-10-02-beta")
 
 
 if __name__ == "__main__":

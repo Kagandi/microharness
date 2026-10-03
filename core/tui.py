@@ -24,6 +24,8 @@ SHIFT_ENTER_SEQUENCES: set[str | int] = {
 }
 
 DEFAULT_COMMANDS: list[tuple[str, str]] = [
+    ("/model", "Switch active model or show models from config"),
+    ("/resume", "Show previous sessions or resume with /resume <id>"),
     ("/compact", "Free context tokens by compacting older turn observations"),
     ("/status", "Show current token usage, cache rate, and context breakdown"),
     ("/new", "Start fresh session while preserving workspace changes"),
@@ -423,9 +425,19 @@ class TUIState:
         self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
         self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
+        self.available_models: list[dict[str, Any]] = []
+        self.available_sessions: list[dict[str, Any]] = []
         self.workspace_files: list[str] = []
         self.selected_command_idx: int = 0
         self.turn_active: bool = False
+
+    def set_available_models(self, models: list[dict[str, Any]]) -> None:
+        """Loads available models for /model autocomplete."""
+        self.available_models = list(models)
+
+    def set_available_sessions(self, sessions: list[dict[str, Any]]) -> None:
+        """Loads available previous sessions for /resume autocomplete."""
+        self.available_sessions = list(sessions)
 
     def set_workspace_files(self, files: list[str]) -> None:
         """Loads workspace relative file paths for @ file tagging and autocomplete."""
@@ -552,6 +564,32 @@ class TUIState:
                     )
                     res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
             return res
+
+        # If user is typing /model <subcommand>, match against available models
+        if buf.startswith(("/model ", "/models ")):
+            prefix = buf.split(" ", 1)[0]
+            sub = buf.split(" ", 1)[1].lstrip()
+            res_m: list[tuple[str, str]] = []
+            for m in self.available_models:
+                m_name = m.get("name", "")
+                if m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
+                    prov = m.get("provider") or "model"
+                    desc = m.get("description") or f"Model {m_name}"
+                    res_m.append((f"{prefix} {m_name}", f"[{prov}] {desc}"))
+            return res_m
+
+        # If user is typing /resume <subcommand>, match against available previous sessions
+        if buf.startswith(("/resume ", "/resumes ")):
+            prefix = buf.split(" ", 1)[0]
+            sub = buf.split(" ", 1)[1].lstrip()
+            res_s: list[tuple[str, str]] = []
+            for s in self.available_sessions:
+                run_id = s.get("run_id", "")
+                if run_id.lower().startswith(sub):
+                    steps = s.get("total_steps", 0)
+                    prev = s.get("preview", "")[:35]
+                    res_s.append((f"{prefix} {run_id}", f"({steps} steps) {prev}"))
+            return res_s
 
         if " " in buf:
             return []

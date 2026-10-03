@@ -331,6 +331,263 @@ class TestTracer(unittest.TestCase):
         # Invariant 3: Global _ACTION_FORMATTERS was untouched
         self.assertEqual(_ACTION_FORMATTERS, initial_globals)
 
+    def test_trajectory_jsonl_streaming_per_step(self):
+        """Invariant: record_step immediately appends valid JSON to trajectory.jsonl on each step."""
+        from core.types import StepTrace
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            tracer = Tracer(
+                task=Task(id="task_stream", instruction="Test streaming"),
+                output_dir=out_dir,
+                verbose=False,
+                workspace=Path("/some/repo"),
+            )
+            jsonl_path = out_dir / "trajectory.jsonl"
+            self.assertFalse(jsonl_path.exists())
+
+            # Step 1
+            step1 = StepTrace(
+                step_index=1,
+                prompt_messages=[{"role": "user", "content": "hello"}],
+                model_response={"content": "response 1", "tool_calls": []},
+                tool_results=[],
+                duration_s=0.5,
+            )
+            tracer.record_step(step1)
+
+            self.assertTrue(jsonl_path.is_file())
+            lines = jsonl_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            row1 = json.loads(lines[0])
+            self.assertEqual(row1["step_index"], 1)
+            self.assertEqual(row1["model_response"]["content"], "response 1")
+
+            # Step 2
+            step2 = StepTrace(
+                step_index=2,
+                prompt_messages=[
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "response 1"},
+                ],
+                model_response={"content": "response 2", "tool_calls": []},
+                tool_results=[],
+                duration_s=0.3,
+            )
+            tracer.record_step(step2)
+
+            lines = jsonl_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 2)
+            row2 = json.loads(lines[1])
+            self.assertEqual(row2["step_index"], 2)
+            self.assertEqual(row2["model_response"]["content"], "response 2")
+
+            # Finalize creates trace.json with messages and workspace
+            tracer.finalize(finish_reason="goal_reached")
+            trace_json = out_dir / "trace.json"
+            self.assertTrue(trace_json.is_file())
+            data = json.loads(trace_json.read_text(encoding="utf-8"))
+            self.assertEqual(data["workspace"], "/some/repo")
+            self.assertEqual(data["finish_reason"], "goal_reached")
+            self.assertEqual(len(data["messages"]), 3)
+            self.assertEqual(data["messages"][0]["role"], "user")
+            self.assertEqual(data["messages"][1]["role"], "assistant")
+            self.assertEqual(data["messages"][1]["content"], "response 1")
+            self.assertEqual(data["messages"][2]["role"], "assistant")
+            self.assertEqual(data["messages"][2]["content"], "response 2")
+
+    def test_reconstruct_messages_from_steps(self):
+        """Invariant: reconstruct_messages_from_steps builds complete history including assistant calls and tool results."""
+        from core.tracer import reconstruct_messages_from_steps
+
+        # Empty steps -> empty messages
+        self.assertEqual(reconstruct_messages_from_steps([]), [])
+
+        steps = [
+            {
+                "step_index": 1,
+                "prompt_messages": [
+                    {"role": "system", "content": "sys prompt"},
+                    {"role": "user", "content": "run ls"},
+                ],
+                "model_response": {
+                    "content": "calling bash",
+                    "tool_calls": [
+                        {
+                            "id": "c_1",
+                            "name": "bash",
+                            "arguments": {"command": "ls"},
+                            "extra_content": "extra_note",
+                        }
+                    ],
+                },
+                "tool_results": [
+                    {"call_id": "c_1", "output": "file1.txt\nfile2.txt", "exit_code": 0}
+                ],
+            }
+        ]
+        reconstructed = reconstruct_messages_from_steps(steps)
+        self.assertEqual(len(reconstructed), 4)
+        self.assertEqual(reconstructed[0]["role"], "system")
+        self.assertEqual(reconstructed[0]["content"], "sys prompt")
+        self.assertEqual(reconstructed[1]["role"], "user")
+        self.assertEqual(reconstructed[1]["content"], "run ls")
+        self.assertEqual(reconstructed[2]["role"], "assistant")
+        self.assertEqual(reconstructed[2]["content"], "calling bash")
+        self.assertEqual(len(reconstructed[2]["tool_calls"]), 1)
+        self.assertEqual(reconstructed[2]["tool_calls"][0]["id"], "c_1")
+        self.assertEqual(reconstructed[2]["tool_calls"][0]["function"]["name"], "bash")
+        self.assertEqual(
+            json.loads(reconstructed[2]["tool_calls"][0]["function"]["arguments"]),
+            {"command": "ls"},
+        )
+        self.assertEqual(reconstructed[2]["tool_calls"][0]["extra_content"], "extra_note")
+        self.assertEqual(reconstructed[3]["role"], "tool")
+        self.assertEqual(reconstructed[3]["content"], "file1.txt\nfile2.txt")
+        self.assertEqual(reconstructed[3]["tool_call_id"], "c_1")
+
+    def test_load_session_messages_variants(self):
+        """Invariant: load_session_messages recovers from trace.json, legacy steps-only trace, and crashed trajectory.jsonl."""
+        from core.tracer import load_session_messages
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+
+            # 1. Non-existent returns empty messages and default metadata
+            msgs, meta = load_session_messages(run_dir / "nonexistent")
+            self.assertEqual(msgs, [])
+            self.assertEqual(meta["total_steps"], 0)
+            self.assertEqual(meta["finish_reason"], "unknown")
+
+            # 2. Modern trace.json with explicit messages
+            dir_modern = run_dir / "sess_modern"
+            dir_modern.mkdir()
+            trace_modern = {
+                "workspace": "/repo/foo",
+                "total_steps": 3,
+                "finish_reason": "goal_reached",
+                "messages": [
+                    {"role": "user", "content": "hello modern"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+            }
+            (dir_modern / "trace.json").write_text(json.dumps(trace_modern), encoding="utf-8")
+            msgs, meta = load_session_messages(dir_modern)
+            self.assertEqual(len(msgs), 2)
+            self.assertEqual(msgs[0]["content"], "hello modern")
+            self.assertEqual(meta["total_steps"], 3)
+            self.assertEqual(meta["workspace"], "/repo/foo")
+            self.assertEqual(meta["finish_reason"], "goal_reached")
+
+            # 3. Legacy trace.json without messages but with steps
+            dir_legacy = run_dir / "sess_legacy"
+            dir_legacy.mkdir()
+            trace_legacy = {
+                "workspace": "/repo/legacy",
+                "total_steps": 1,
+                "finish_reason": "max_steps",
+                "steps": [
+                    {
+                        "step_index": 1,
+                        "prompt_messages": [{"role": "user", "content": "hello legacy"}],
+                        "model_response": {"content": "legacy response", "tool_calls": []},
+                        "tool_results": [],
+                    }
+                ],
+            }
+            (dir_legacy / "trace.json").write_text(json.dumps(trace_legacy), encoding="utf-8")
+            msgs, meta = load_session_messages(dir_legacy)
+            self.assertEqual(len(msgs), 2)
+            self.assertEqual(msgs[0]["content"], "hello legacy")
+            self.assertEqual(msgs[1]["content"], "legacy response")
+            self.assertEqual(meta["workspace"], "/repo/legacy")
+
+            # 4. Crashed session: NO trace.json, only trajectory.jsonl
+            dir_crashed = run_dir / "sess_crashed"
+            dir_crashed.mkdir()
+            step_line = json.dumps({
+                "step_index": 1,
+                "prompt_messages": [{"role": "user", "content": "crashed turn"}],
+                "model_response": {"content": "in progress", "tool_calls": []},
+                "tool_results": [],
+            })
+            (dir_crashed / "trajectory.jsonl").write_text(step_line + "\n", encoding="utf-8")
+            msgs, meta = load_session_messages(dir_crashed)
+            self.assertEqual(len(msgs), 2)
+            self.assertEqual(msgs[0]["content"], "crashed turn")
+            self.assertEqual(msgs[1]["content"], "in progress")
+            self.assertEqual(meta["total_steps"], 1)
+            self.assertEqual(meta["finish_reason"], "unknown")
+
+    def test_find_recent_sessions_ordering_and_affinity(self):
+        """Invariant: find_recent_sessions sorts by workspace affinity and recency with limit enforcement."""
+        import os
+
+        from core.tracer import find_recent_sessions
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runs_dir = Path(tmp_dir)
+            ws_target = Path(tmp_dir) / "target_repo"
+            ws_other = Path(tmp_dir) / "other_repo"
+
+            # Create session 1: older, other repo
+            s1 = runs_dir / "run_old_other"
+            s1.mkdir()
+            (s1 / "trace.json").write_text(
+                json.dumps({
+                    "workspace": str(ws_other.resolve()),
+                    "total_steps": 2,
+                    "task": {"id": "t1", "instruction": "Old other instruction"},
+                }),
+                encoding="utf-8",
+            )
+            os.utime(s1, (1000, 1000))
+
+            # Create session 2: newer, other repo
+            s2 = runs_dir / "run_new_other"
+            s2.mkdir()
+            (s2 / "trace.json").write_text(
+                json.dumps({
+                    "workspace": str(ws_other.resolve()),
+                    "total_steps": 5,
+                    "task": {"id": "t2", "instruction": "New other instruction"},
+                }),
+                encoding="utf-8",
+            )
+            os.utime(s2, (2000, 2000))
+
+            # Create session 3: target workspace match
+            s3 = runs_dir / "run_target"
+            s3.mkdir()
+            (s3 / "trace.json").write_text(
+                json.dumps({
+                    "workspace": str(ws_target.resolve()),
+                    "total_steps": 1,
+                    "messages": [{"role": "user", "content": "Fix bug in target"}],
+                }),
+                encoding="utf-8",
+            )
+            os.utime(s3, (1500, 1500))
+
+            # When querying with workspace=ws_target:
+            # s3 must be ranked FIRST due to workspace match, even though s2 has newer mtime (2000 > 1500)
+            res = find_recent_sessions(runs_dir, workspace=ws_target, limit=10)
+            self.assertEqual(len(res), 3)
+            self.assertEqual(res[0]["run_id"], "run_target")
+            self.assertTrue(res[0]["matches_workspace"])
+            self.assertEqual(res[0]["preview"], "Fix bug in target")
+
+            # Between non-matching, s2 is newer than s1
+            self.assertEqual(res[1]["run_id"], "run_new_other")
+            self.assertFalse(res[1]["matches_workspace"])
+            self.assertEqual(res[2]["run_id"], "run_old_other")
+
+            # Limit parameter
+            res_limited = find_recent_sessions(runs_dir, workspace=ws_target, limit=2)
+            self.assertEqual(len(res_limited), 2)
+            self.assertEqual([r["run_id"] for r in res_limited], ["run_target", "run_new_other"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -257,12 +257,15 @@ while not done:
 
 ### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/harness.py`)
 * **Real-time Terminal Streaming**: Clean emoji indicators for Thoughts (`🧠`), Actions (`⚡`), Observations (`👁️`), Compactions (`🧹`), and User Input (`👤`).
-* **Artifact Persistence**: Every run writes:
-  * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, and patch diff.
+* **Artifact Persistence & Crash Recovery**: Every run writes:
+  * `trajectory.jsonl`: Append-only, per-step streaming persistence. Each step is flushed immediately to disk as JSON Lines, ensuring $O(1)$ durability and complete session recovery even if the process or container crashes mid-turn.
+  * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, reconstructed messages, and patch diff.
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
 * **Interactive Meta-Commands & Resilience**:
-  * Graceful interruption: Hitting `Ctrl+C` during an active tool step cancels the step and returns cleanly to the prompt without aborting the session.
+  * Graceful interruption: Hitting `Ctrl+C` or `Esc` cancels the active step/turn and returns cleanly to the prompt without aborting the session.
+  * `/model [name|number]`: Inspects available models or switches active model dynamically on the fly (supporting alias maps, model lists, and provider presets from `config.json`).
+  * `/resume [id|number]`: Discovers recent sessions from `~/.microharness/runs/` with workspace affinity and restores conversational message history in-place.
   * `/cache [5m|1h|off]`: Inspects or dynamically toggles prompt caching TTL on the fly (`5m` standard ephemeral or `1h` extended beta).
   * `/status`: Displays context window usage (chars and estimated tokens), message role counts, and prompt cache hit metrics.
   * `/compact`: Triggers manual memory compaction.

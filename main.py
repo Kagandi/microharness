@@ -214,8 +214,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resume",
-        action="store_true",
-        help="Resume previous benchmark execution from runs-dir, skipping tasks that already passed",
+        nargs="?",
+        const=True,
+        default=False,
+        help="Resume previous session or benchmark execution (optional: run_id to resume specific session)",
     )
     parser.add_argument(
         "--demo",
@@ -512,7 +514,7 @@ def _dispatch_benchmark(
             suite_name="Mini-SWE",
             output_dir=runs_dir,
             verbose=True,
-            resume=args.resume,
+            resume=bool(args.resume),
             config=benchmark_metadata,
         )
         return True
@@ -551,7 +553,7 @@ def _dispatch_benchmark(
             suite_name="DeepSWE-mini",
             output_dir=runs_dir,
             verbose=True,
-            resume=args.resume,
+            resume=bool(args.resume),
             config=benchmark_metadata,
         )
         return True
@@ -672,9 +674,9 @@ def main(argv: list[str] | None = None) -> None:
 
     # Default: Interactive Mode in the target project directory
     if args.tui:
-        harness.run_tui(initial_instruction=args.instruction)
+        harness.run_tui(initial_instruction=args.instruction, resume=args.resume)
     else:
-        harness.run_interactive(initial_instruction=args.instruction)
+        harness.run_interactive(initial_instruction=args.instruction, resume=args.resume)
 
 
 if __name__ == "__main__":

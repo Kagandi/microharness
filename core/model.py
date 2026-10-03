@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import urllib.error
@@ -431,6 +432,227 @@ def find_provider_by_endpoint(
     return None, {}
 
 
+def get_available_models_from_config(
+    config: dict[str, Any],
+    registry: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Extracts a structured list of available models from config and provider registry.
+
+    Supports:
+    1. config['models'] as a list: ["gpt-4o", "claude-3-5-sonnet", ...]
+    2. config['models'] as a dict: {"fast": "gemini-2.5-flash", "smart": {"model": "gpt-4o", "provider": "openai"}}
+    3. Fallback: config['model'] and default models from the provider registry.
+    """
+    if registry is None:
+        registry = load_builtin_providers()
+
+    models: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    cfg_models = config.get("models")
+    if isinstance(cfg_models, list):
+        for item in cfg_models:
+            if isinstance(item, str) and item.strip():
+                m_str = item.strip()
+                p_name, prof = resolve_provider(registry, m_str.split("/")[0] if "/" in m_str else None)
+                models.append(
+                    {
+                        "name": m_str,
+                        "model": m_str,
+                        "provider": p_name or "",
+                        "description": prof.get("description", f"Model {m_str}"),
+                    }
+                )
+                seen_names.add(m_str.lower())
+            elif isinstance(item, dict) and item.get("model"):
+                m_name = str(item["model"]).strip()
+                p_name = item.get("provider") or (m_name.split("/")[0] if "/" in m_name else "")
+                alias = item.get("name") or item.get("alias") or m_name
+                models.append(
+                    {
+                        "name": alias,
+                        "model": m_name,
+                        "provider": p_name,
+                        "endpoint": item.get("endpoint"),
+                        "api_key": item.get("api_key"),
+                        "description": item.get("description", f"Model {m_name}"),
+                    }
+                )
+                seen_names.add(alias.lower())
+                seen_names.add(m_name.lower())
+    elif isinstance(cfg_models, dict):
+        for alias, item in cfg_models.items():
+            if isinstance(item, str) and item.strip():
+                m_str = item.strip()
+                p_name, prof = resolve_provider(registry, m_str.split("/")[0] if "/" in m_str else None)
+                models.append(
+                    {
+                        "name": str(alias),
+                        "model": m_str,
+                        "provider": p_name or "",
+                        "description": prof.get("description", f"Model {m_str}"),
+                    }
+                )
+                seen_names.add(str(alias).lower())
+                seen_names.add(m_str.lower())
+            elif isinstance(item, dict) and (item.get("model") or item.get("endpoint")):
+                m_name = str(item.get("model") or alias).strip()
+                p_name = item.get("provider") or (m_name.split("/")[0] if "/" in m_name else "")
+                models.append(
+                    {
+                        "name": str(alias),
+                        "model": m_name,
+                        "provider": p_name,
+                        "endpoint": item.get("endpoint"),
+                        "api_key": item.get("api_key"),
+                        "description": item.get("description", f"Model {m_name}"),
+                    }
+                )
+                seen_names.add(str(alias).lower())
+                seen_names.add(m_name.lower())
+
+    # If no explicit "models" in config, populate from config["model"] and registry providers
+    if not models:
+        current_cfg_model = config.get("model")
+        if current_cfg_model and str(current_cfg_model).lower() not in seen_names:
+            m_str = str(current_cfg_model).strip()
+            p_name = config.get("provider") or (m_str.split("/")[0] if "/" in m_str else "")
+            models.append(
+                {
+                    "name": m_str,
+                    "model": m_str,
+                    "provider": p_name,
+                    "description": f"Configured default model ({m_str})",
+                }
+            )
+            seen_names.add(m_str.lower())
+
+        for p_key, prof in sorted(registry.items()):
+            def_m = prof.get("default_model")
+            if def_m and def_m.lower() not in seen_names:
+                models.append(
+                    {
+                        "name": f"{p_key}/{def_m}",
+                        "model": def_m,
+                        "provider": p_key,
+                        "description": f"{p_key.title()} default ({def_m})",
+                    }
+                )
+                seen_names.add(def_m.lower())
+                seen_names.add(f"{p_key}/{def_m}".lower())
+
+    return models
+
+
+def build_model_from_spec(
+    spec: str | dict[str, Any],
+    config: dict[str, Any] | None = None,
+    registry: dict[str, dict[str, Any]] | None = None,
+    cache_ttl: str | None = None,
+    reasoning_effort: str | None = None,
+) -> Model:
+    """Instantiates a Model instance from a model name, alias, or dictionary specification."""
+    if not spec:
+        raise ValueError("Model specification cannot be empty.")
+    if not isinstance(spec, (str, dict)):
+        raise ValueError(f"Expected model spec as str or dict, got {type(spec).__name__}")
+    cfg = dict(config or {})
+    if registry is None:
+        registry = load_builtin_providers()
+
+    model_name: str | None = None
+    provider_name: str | None = None
+    explicit_endpoint: str | None = None
+    explicit_key: str | None = None
+    explicit_headers: dict[str, Any] = {}
+
+    # Check if spec matches an alias in config["models"]
+    cfg_models = cfg.get("models")
+    if isinstance(spec, str) and isinstance(cfg_models, dict) and spec in cfg_models:
+        spec = cfg_models[spec]
+
+    if isinstance(spec, dict):
+        model_name = spec.get("model")
+        provider_name = spec.get("provider")
+        explicit_endpoint = spec.get("endpoint")
+        explicit_key = spec.get("api_key")
+        if isinstance(spec.get("headers"), dict):
+            explicit_headers = spec["headers"]
+    elif isinstance(spec, str):
+        raw_spec = spec.strip()
+        parts = raw_spec.split("/", 1)
+        if len(parts) == 2 and parts[0].lower() in registry:
+            provider_name = parts[0].lower()
+            model_name = parts[1]
+        else:
+            model_name = raw_spec
+
+    provider_name = provider_name or cfg.get("provider")
+    resolved_prov_name, profile = resolve_provider(registry, provider_name)
+
+    # If provider wasn't explicitly named, attempt to detect by endpoint
+    endpoint_candidate = explicit_endpoint or cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+    if not profile and endpoint_candidate:
+        det_name, det_prof = find_provider_by_endpoint(registry, endpoint_candidate)
+        if det_prof:
+            resolved_prov_name = det_name
+            profile = det_prof
+
+    default_endpoint = profile.get("endpoint")
+    default_model = profile.get("default_model", "cohere/north-mini-code:free")
+
+    endpoint = explicit_endpoint or endpoint_candidate or default_endpoint
+    final_model = model_name or cfg.get("model") or os.getenv("MODEL_NAME") or default_model
+
+    # Resolve API Key
+    api_key = explicit_key or os.getenv("MODEL_API_KEY")
+    if not api_key and profile.get("env_keys"):
+        for env_k in profile["env_keys"]:
+            if val := os.getenv(env_k):
+                api_key = val
+                break
+    if not api_key:
+        fallback_env_keys = [
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GROQ_API_KEY",
+        ]
+        for env_k in fallback_env_keys:
+            if val := os.getenv(env_k):
+                api_key = val
+                break
+    if not api_key:
+        api_key = cfg.get("api_key")
+
+    headers = dict(profile.get("headers") or {})
+    if isinstance(cfg.get("headers"), dict):
+        headers.update(cfg["headers"])
+    if explicit_headers:
+        headers.update(explicit_headers)
+
+    reasoning_format = profile.get("reasoning_format", "standard")
+    cache_strategy = profile.get("cache_strategy", "implicit")
+
+    if endpoint:
+        return HttpChatModel(
+            base_url=endpoint,
+            model=final_model,
+            api_key=api_key,
+            headers=headers,
+            cache_ttl=cache_ttl,
+            reasoning_effort=reasoning_effort,
+            reasoning_format=reasoning_format,
+            cache_strategy=cache_strategy,
+            provider=resolved_prov_name or profile.get("name"),
+        )
+
+    return MockModel([("Mock response (offline mode)", [])])
+
+
 class _CacheTelemetryMixin:
     """Provides common prompt cache telemetry and token usage accounting."""
 
@@ -567,6 +789,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         reasoning_format: str | None = None,
         cache_strategy: str | None = None,
         deadline: float | None = None,
+        provider: str | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -581,7 +804,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         default_reasoning_format = profile.get("reasoning_format", "standard")
         default_cache_strategy = profile.get("cache_strategy", "implicit")
 
-        self.provider = prov_name
+        self.provider = provider or prov_name
         self.model = model
         self.api_key = api_key
         # Merge declarative profile headers with explicitly passed headers (explicit wins)

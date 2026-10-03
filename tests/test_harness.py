@@ -2205,6 +2205,160 @@ class ProjectWeather:
             # Invariant: Project-level tool executed and shadowed global version
             self.assertEqual(step1_res["output"], "WEATHER: Project Rainy")
 
+    def test_harness_model_switching(self):
+        """Invariant: switch_model switches both harness.model and active_loop.model by name and index, rejecting invalid inputs."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ws = Path(tmp_dir)
+            cfg_dir = ws / ".microharness"
+            cfg_dir.mkdir()
+            (cfg_dir / "config.json").write_text(
+                json.dumps({
+                    "models": {
+                        "fast": {"model": "gemini-2.5-flash", "provider": "google"},
+                        "smart": {"model": "claude-3-5-sonnet", "provider": "anthropic"},
+                    }
+                }),
+                encoding="utf-8",
+            )
+            initial_model = MockModel(script=[("hi", [])])
+            harness = Harness(
+                model=initial_model,
+                workspace_dir=ws,
+                runs_dir=self.runs_dir,
+                verbose=False,
+            )
+
+            # Available models from config
+            models = harness.get_available_models()
+            self.assertEqual(len(models), 2)
+            names = [m["name"] for m in models]
+            self.assertIn("fast", names)
+            self.assertIn("smart", names)
+
+            # Simulate active loop
+            dummy_loop = MagicMock()
+            harness.active_loop = dummy_loop
+
+            # 1. Switch by name
+            ok, msg, new_m = harness.switch_model("fast")
+            self.assertTrue(ok)
+            self.assertIn("Switched model to gemini-2.5-flash", msg)
+            self.assertEqual(harness.model.model, "gemini-2.5-flash")
+            self.assertEqual(dummy_loop.model, harness.model)
+
+            # 2. Switch by 1-based index (index 2 -> "smart")
+            ok2, msg2, new_m2 = harness.switch_model("2")
+            self.assertTrue(ok2)
+            self.assertIn("claude-3-5-sonnet", msg2)
+            self.assertEqual(harness.model.model, "claude-3-5-sonnet")
+
+            # 3. Negative: out-of-range index
+            ok_bad, msg_bad, _ = harness.switch_model("99")
+            self.assertFalse(ok_bad)
+            self.assertIn("Invalid model selection", msg_bad)
+
+            # 4. Negative: empty spec
+            ok_bad2, msg_bad2, _ = harness.switch_model("")
+            self.assertFalse(ok_bad2)
+            self.assertIn("cannot be empty", msg_bad2)
+
+            # 5. Negative: non-string, non-dict type
+            ok_bad3, msg_bad3, _ = harness.switch_model(None)  # type: ignore
+            self.assertFalse(ok_bad3)
+
+    def test_harness_session_resumption_and_dispatch(self):
+        """Invariant: Harness finds, loads, and restores prior sessions via API and interactive commands."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runs_dir = Path(tmp_dir) / "runs"
+            runs_dir.mkdir()
+            ws_dir = Path(tmp_dir) / "workspace"
+            ws_dir.mkdir()
+
+            # Create run 1 with explicit messages
+            r1_dir = runs_dir / "run_sess_1"
+            r1_dir.mkdir()
+            (r1_dir / "trace.json").write_text(
+                json.dumps({
+                    "workspace": str(ws_dir.resolve()),
+                    "total_steps": 3,
+                    "task": {"id": "task_1", "instruction": "Initial goal"},
+                    "messages": [
+                        {"role": "user", "content": "Initial user turn"},
+                        {"role": "assistant", "content": "Initial assistant turn"},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+            mock_model = MockModel(script=[])
+            harness = Harness(
+                model=mock_model,
+                workspace_dir=ws_dir,
+                runs_dir=runs_dir,
+                verbose=False,
+            )
+
+            # 1. find_recent_sessions discovers run_sess_1
+            sessions = harness.find_recent_sessions(limit=5)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["run_id"], "run_sess_1")
+            self.assertTrue(sessions[0]["matches_workspace"])
+
+            # 2. load_session by name
+            msgs, meta = harness.load_session("run_sess_1")
+            self.assertEqual(len(msgs), 2)
+            self.assertEqual(msgs[0].role, "user")
+            self.assertEqual(msgs[0].content, "Initial user turn")
+            self.assertEqual(meta["run_id"], "run_sess_1")
+
+            # 3. load_session by 1-based index
+            msgs_idx, meta_idx = harness.load_session("1")
+            self.assertEqual(len(msgs_idx), 2)
+            self.assertEqual(meta_idx["run_id"], "run_sess_1")
+
+            # 4. load_session None defaults to latest
+            msgs_none, meta_none = harness.load_session(None)
+            self.assertEqual(len(msgs_none), 2)
+            self.assertEqual(meta_none["run_id"], "run_sess_1")
+
+            # 5. Negative: invalid index and unknown session
+            msgs_bad, meta_bad = harness.load_session("99")
+            self.assertEqual(msgs_bad, [])
+            self.assertIn("Invalid session index", meta_bad.get("error", ""))
+
+            msgs_bad2, meta_bad2 = harness.load_session("nonexistent_run")
+            self.assertEqual(msgs_bad2, [])
+            self.assertIn("not found", meta_bad2.get("error", ""))
+
+            # 6. Interactive dispatch: /resume 1 restores messages into Memory
+            memory = Memory(system_prompt="CURRENT_SYS", user_prompt="")
+            action = harness._dispatch_interactive_input(
+                "/resume 1",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(action, "skip")
+            mem_msgs = memory.get_messages()
+            self.assertEqual(len(mem_msgs), 3)
+            self.assertEqual(mem_msgs[0].role, "system")
+            self.assertEqual(mem_msgs[0].content, "CURRENT_SYS")
+            self.assertEqual(mem_msgs[1].role, "user")
+            self.assertEqual(mem_msgs[1].content, "Initial user turn")
+            self.assertEqual(mem_msgs[2].role, "assistant")
+            self.assertEqual(mem_msgs[2].content, "Initial assistant turn")
+
+            # 7. Interactive dispatch: /model listing
+            action_m_list = harness._dispatch_interactive_input(
+                "/model",
+                memory=memory,
+                custom_commands={},
+                skills={},
+                workspace_dir=ws_dir,
+            )
+            self.assertEqual(action_m_list, "skip")
+
 
 if __name__ == "__main__":
     unittest.main()

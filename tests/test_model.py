@@ -11,8 +11,10 @@ from core.model import (
     ReasoningAwareModel,
     _format_delay,
     _is_unrecoverable_quota_error,
+    build_model_from_spec,
     extract_retry_delay,
     find_provider_by_endpoint,
+    get_available_models_from_config,
     load_builtin_providers,
     load_provider_registry,
     normalize_cache_ttl,
@@ -1209,6 +1211,105 @@ class TestModel(unittest.TestCase):
         self.assertFalse(isinstance(dummy, NamedModel))
         self.assertFalse(isinstance(dummy, EndpointAwareModel))
         self.assertFalse(isinstance(dummy, ProviderAwareModel))
+
+    def test_get_available_models_from_config_list_and_aliases(self):
+        """Invariant: get_available_models_from_config normalizes list, dictionary aliases, and falls back to provider defaults."""
+        # 1. Config with list of models
+        cfg_list = {
+            "models": ["gemini-2.5-flash", "gpt-4o"],
+            "provider": "google",
+        }
+        res_list = get_available_models_from_config(cfg_list)
+        self.assertEqual(len(res_list), 2)
+        self.assertEqual(res_list[0]["name"], "gemini-2.5-flash")
+        self.assertEqual(res_list[0]["model"], "gemini-2.5-flash")
+        self.assertEqual(res_list[1]["name"], "gpt-4o")
+
+        # 2. Config with dictionary aliases
+        cfg_dict = {
+            "models": {
+                "fast": {
+                    "model": "gemini-2.5-flash",
+                    "provider": "google",
+                    "description": "Fast low-latency model",
+                },
+                "smart": "claude-3-5-sonnet",
+            }
+        }
+        res_dict = get_available_models_from_config(cfg_dict)
+        self.assertEqual(len(res_dict), 2)
+        by_name = {m["name"]: m for m in res_dict}
+        self.assertIn("fast", by_name)
+        self.assertEqual(by_name["fast"]["model"], "gemini-2.5-flash")
+        self.assertEqual(by_name["fast"]["provider"], "google")
+        self.assertEqual(by_name["fast"]["description"], "Fast low-latency model")
+        self.assertIn("smart", by_name)
+        self.assertEqual(by_name["smart"]["model"], "claude-3-5-sonnet")
+
+        # 3. Fallback when config has no models key: discovers active provider defaults
+        mock_registry = {
+            "google": {
+                "name": "Google Gemini",
+                "default_model": "gemini-2.5-pro",
+                "api_key_env": "GEMINI_API_KEY",
+                "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "models": ["gemini-2.5-pro", "gemini-2.5-flash"],
+            }
+        }
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "fake_key"}):
+            res_fb = get_available_models_from_config({}, registry=mock_registry)
+            self.assertGreaterEqual(len(res_fb), 1)
+            model_names = [m["model"] for m in res_fb]
+            self.assertIn("gemini-2.5-pro", model_names)
+
+    def test_build_model_from_spec_and_options(self):
+        """Invariant: build_model_from_spec creates configured models with proper endpoints, cache_ttl, and reasoning."""
+        config = {
+            "provider": "openai",
+            "model": "gpt-4o",
+        }
+        registry = {
+            "openai": {
+                "name": "OpenAI",
+                "default_model": "gpt-4o",
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "api_key_env": "OPENAI_API_KEY",
+            }
+        }
+
+        # 1. Spec as string name
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}):
+            model1 = build_model_from_spec(
+                "gpt-4o-mini",
+                config=config,
+                registry=registry,
+                cache_ttl="5m",
+                reasoning_effort="low",
+            )
+            self.assertIsInstance(model1, HttpChatModel)
+            self.assertEqual(model1.model, "gpt-4o-mini")
+            self.assertEqual(model1.cache_ttl, "5m")
+            self.assertEqual(model1.reasoning_effort, "low")
+
+        # 2. Spec as dictionary specification
+        spec_dict = {
+            "model": "deepseek-coder",
+            "provider": "custom_provider",
+            "endpoint": "https://api.custom.com/v1/chat/completions",
+            "api_key": "custom-key",
+            "description": "Custom coder model",
+        }
+        model2 = build_model_from_spec(spec_dict, config=config, registry=registry)
+        self.assertIsInstance(model2, HttpChatModel)
+        self.assertEqual(model2.model, "deepseek-coder")
+        self.assertEqual(model2.provider, "custom_provider")
+        self.assertEqual(model2.endpoint, "https://api.custom.com/v1/chat/completions")
+
+        # 3. Negative case: invalid spec raises ValueError
+        with self.assertRaises(ValueError):
+            build_model_from_spec("", config=config, registry=registry)
+        with self.assertRaises(ValueError):
+            build_model_from_spec(123, config=config, registry=registry)  # type: ignore
 
 
 if __name__ == "__main__":

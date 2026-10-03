@@ -157,6 +157,7 @@ class Tracer:
         self,
         task: Task,
         output_dir: Path,
+        workspace: Path | str | None = None,
         verbose: bool = True,
         compact: bool = False,
         formatters: dict[str, ActionFormatter] | None = None,
@@ -164,6 +165,8 @@ class Tracer:
         self.task = task
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace = str(Path(workspace).resolve()) if workspace else None
+        self.jsonl_path = self.output_dir / "trajectory.jsonl"
         self.verbose = verbose
         self.compact = compact
         self.formatters: dict[str, ActionFormatter] = {
@@ -180,8 +183,26 @@ class Tracer:
         if self.verbose:
             print(text)
 
+    def _append_jsonl(self, step: StepTrace) -> None:
+        try:
+            record = {
+                "step_index": step.step_index,
+                "duration_s": step.duration_s,
+                "compaction_applied": step.compaction_applied,
+                "usage": step.usage,
+                "prompt_messages": step.prompt_messages,
+                "model_response": step.model_response,
+                "tool_results": step.tool_results,
+            }
+            with self.jsonl_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+        except Exception:
+            pass
+
     def record_step(self, step: StepTrace) -> None:
         self.steps.append(step)
+        self._append_jsonl(step)
 
         if not self.verbose:
             return
@@ -317,6 +338,19 @@ class Tracer:
 
         return json_path, md_path
 
+    def _reconstruct_final_messages(self) -> list[dict[str, Any]]:
+        return reconstruct_messages_from_steps(
+            [
+                {
+                    "step_index": s.step_index,
+                    "prompt_messages": s.prompt_messages,
+                    "model_response": s.model_response,
+                    "tool_results": s.tool_results,
+                }
+                for s in self.steps
+            ]
+        )
+
     def _export_json(self, path: Path) -> None:
         data = {
             "task": {
@@ -324,6 +358,7 @@ class Tracer:
                 "instruction": self.task.instruction,
                 "max_steps": self.task.max_steps,
             },
+            "workspace": self.workspace,
             "finish_reason": self.finish_reason,
             "total_steps": len(self.steps),
             "telemetry": self.telemetry,
@@ -333,6 +368,7 @@ class Tracer:
                 "score": self.eval_result.score if self.eval_result else None,
                 "feedback": self.eval_result.feedback if self.eval_result else None,
             },
+            "messages": self._reconstruct_final_messages(),
             "steps": [
                 {
                     "step_index": s.step_index,
@@ -450,3 +486,193 @@ class Tracer:
             )
 
         path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def reconstruct_messages_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reconstructs full conversation message history from a list of step trace dictionaries."""
+    if not steps:
+        return []
+    last_step = steps[-1]
+    msgs: list[dict[str, Any]] = [dict(m) for m in (last_step.get("prompt_messages") or [])]
+    resp = last_step.get("model_response") or {}
+    content = resp.get("content") or ""
+    tool_calls = resp.get("tool_calls") or []
+    if content or tool_calls:
+        assistant_msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": content,
+        }
+        if tool_calls:
+            formatted_calls: list[dict[str, Any]] = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    cid = tc.get("id", "")
+                    fn = tc.get("function") or {}
+                    name = fn.get("name") or tc.get("name", "")
+                    args = fn.get("arguments") or tc.get("arguments") or {}
+                    if isinstance(args, str):
+                        raw_args = args
+                    else:
+                        raw_args = json.dumps(args) if isinstance(args, dict) else str(args)
+                    call_dict = {
+                        "id": cid,
+                        "type": "function",
+                        "function": {"name": name, "arguments": raw_args},
+                    }
+                    if tc.get("extra_content"):
+                        call_dict["extra_content"] = tc.get("extra_content")
+                    formatted_calls.append(call_dict)
+            if formatted_calls:
+                assistant_msg["tool_calls"] = formatted_calls
+        msgs.append(assistant_msg)
+
+    for tr in last_step.get("tool_results") or []:
+        if isinstance(tr, dict) and "call_id" in tr:
+            msgs.append(
+                {
+                    "role": "tool",
+                    "content": tr.get("output", ""),
+                    "tool_call_id": tr.get("call_id"),
+                    "raw_log_path": tr.get("raw_log_path"),
+                }
+            )
+    return msgs
+
+
+def load_session_messages(run_dir: Path | str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Loads reconstructed messages and metadata from a session directory."""
+    dir_path = Path(run_dir)
+    trace_file = dir_path / "trace.json"
+    jsonl_file = dir_path / "trajectory.jsonl"
+    metadata: dict[str, Any] = {
+        "run_id": dir_path.name,
+        "run_dir": str(dir_path),
+        "total_steps": 0,
+        "workspace": None,
+        "finish_reason": "unknown",
+    }
+
+    # 1. Try trace.json
+    if trace_file.is_file():
+        try:
+            data = json.loads(trace_file.read_text(encoding="utf-8"))
+            metadata["total_steps"] = int(data.get("total_steps") or 0)
+            metadata["workspace"] = data.get("workspace")
+            metadata["finish_reason"] = data.get("finish_reason", "unknown")
+            metadata["task"] = data.get("task", {})
+            if "messages" in data and isinstance(data["messages"], list) and data["messages"]:
+                return data["messages"], metadata
+            steps = data.get("steps") or []
+            if steps:
+                msgs = reconstruct_messages_from_steps(steps)
+                return msgs, metadata
+        except Exception:
+            pass
+
+    # 2. Try trajectory.jsonl (if trace.json was absent or corrupted after sudden crash)
+    if jsonl_file.is_file():
+        try:
+            steps = []
+            for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    steps.append(json.loads(line))
+            if steps:
+                metadata["total_steps"] = len(steps)
+                msgs = reconstruct_messages_from_steps(steps)
+                return msgs, metadata
+        except Exception:
+            pass
+
+    return [], metadata
+
+
+def find_recent_sessions(
+    runs_dir: Path | str,
+    workspace: Path | str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Discovers previous sessions from runs_dir, sorted by recency and workspace affinity."""
+    base = Path(runs_dir)
+    if not base.is_dir():
+        return []
+
+    target_ws = str(Path(workspace).resolve()) if workspace else None
+    sessions: list[dict[str, Any]] = []
+
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        trace_json = entry / "trace.json"
+        traj_jsonl = entry / "trajectory.jsonl"
+        if not (trace_json.is_file() or traj_jsonl.is_file()):
+            continue
+
+        try:
+            mtime = entry.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+
+        total_steps = 0
+        preview = ""
+        sess_ws = None
+        finish_reason = ""
+        task_id = entry.name
+
+        if trace_json.is_file():
+            try:
+                data = json.loads(trace_json.read_text(encoding="utf-8"))
+                total_steps = int(data.get("total_steps") or 0)
+                sess_ws = data.get("workspace")
+                finish_reason = data.get("finish_reason", "")
+                task_info = data.get("task") or {}
+                task_id = task_info.get("id") or entry.name
+                preview = (task_info.get("instruction") or "").strip()
+                if not preview and data.get("messages"):
+                    for m in data["messages"]:
+                        if m.get("role") == "user" and m.get("content"):
+                            preview = m["content"].strip()
+                            break
+                elif not preview and data.get("steps"):
+                    last_step = data["steps"][-1]
+                    for m in (last_step.get("prompt_messages") or []):
+                        if m.get("role") == "user" and m.get("content"):
+                            preview = m["content"].strip()
+                            break
+            except Exception:
+                pass
+
+        if not preview and traj_jsonl.is_file():
+            try:
+                lines = [line for line in traj_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()]
+                total_steps = max(total_steps, len(lines))
+                if lines:
+                    last_step = json.loads(lines[-1])
+                    for m in (last_step.get("prompt_messages") or []):
+                        if m.get("role") == "user" and m.get("content"):
+                            preview = m["content"].strip()
+                            break
+            except Exception:
+                pass
+
+        if len(preview) > 60:
+            preview = preview[:57] + "..."
+
+        is_match = bool(target_ws is not None and sess_ws is not None and target_ws == sess_ws)
+
+        sessions.append(
+            {
+                "run_id": entry.name,
+                "run_dir": str(entry),
+                "task_id": task_id,
+                "total_steps": total_steps,
+                "preview": preview or "(no user prompt)",
+                "workspace": sess_ws,
+                "mtime": mtime,
+                "finish_reason": finish_reason,
+                "matches_workspace": is_match,
+            }
+        )
+
+    # Sort: matching workspace first, then newest mtime
+    sessions.sort(key=lambda s: (1 if s["matches_workspace"] else 0, s["mtime"]), reverse=True)
+    return sessions[:limit]

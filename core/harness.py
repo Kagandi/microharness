@@ -42,7 +42,7 @@ from core.tools import (
     discover_tool_plugins,
 )
 from core.tracer import ActionFormatter, Tracer, _dim
-from core.types import EvalResult, RunResult, Task
+from core.types import EvalResult, Message, RunResult, Task
 
 
 def get_default_global_dir() -> Path:
@@ -428,6 +428,15 @@ class Harness:
         self.action_formatters = action_formatters
         self.verbose = verbose
 
+        from core.model import load_provider_registry
+
+        self.provider_registry = load_provider_registry(
+            global_dir=self.global_dir,
+            project_dir=self.explicit_workspace_dir,
+            inline_providers=self.merged_config.get("providers"),
+        )
+        self.active_loop: AgentLoop | None = None
+
     @property
     def workspace_dir(self) -> Path:
         return self.explicit_workspace_dir if self.explicit_workspace_dir is not None else Path.cwd()
@@ -461,6 +470,100 @@ class Harness:
             if isinstance(effort, str) or effort is None:
                 return effort
         return getattr(self, "reasoning_effort", None)
+
+    def get_available_models(self) -> list[dict[str, Any]]:
+        """Returns configured and available models for dynamic /model switching."""
+        from core.model import get_available_models_from_config
+
+        return get_available_models_from_config(self.merged_config, self.provider_registry)
+
+    def switch_model(self, spec: str | dict[str, Any]) -> tuple[bool, str, Model]:
+        """Switches active model dynamically using config and provider registry."""
+        from core.model import build_model_from_spec
+
+        try:
+            target_spec = spec
+            if isinstance(spec, str) and spec.strip().isdigit():
+                idx = int(spec.strip()) - 1
+                avail = self.get_available_models()
+                if 0 <= idx < len(avail):
+                    target_spec = avail[idx]["name"]
+                else:
+                    return (
+                        False,
+                        f"Invalid model selection: index {spec} out of range (1-{len(avail)})",
+                        self.model,
+                    )
+
+            new_model = build_model_from_spec(
+                spec=target_spec,
+                config=self.merged_config,
+                registry=self.provider_registry,
+                cache_ttl=self.cache_ttl,
+                reasoning_effort=self.reasoning_effort,
+            )
+            self.model = new_model
+            if hasattr(self, "active_loop") and self.active_loop is not None:
+                self.active_loop.model = new_model
+
+            m_name = (
+                getattr(new_model, "model", "")
+                or getattr(new_model, "model_name", "")
+                or str(target_spec)
+            )
+            p_name = getattr(new_model, "provider", "") or ""
+            prov_str = f" [{p_name}]" if p_name else ""
+            return True, f"Switched model to {m_name}{prov_str}", new_model
+        except Exception as exc:
+            return False, f"Failed to switch model to '{spec}': {exc}", self.model
+
+    def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Finds recent runs in runs_dir with workspace affinity."""
+        from core.tracer import find_recent_sessions
+
+        return find_recent_sessions(
+            runs_dir=self.runs_dir,
+            workspace=self.explicit_workspace_dir,
+            limit=limit,
+        )
+
+    def load_session(
+        self, session_id_or_path: str | Path | None = None
+    ) -> tuple[list[Message], dict[str, Any]]:
+        """Loads previous session messages and metadata."""
+        from core.tracer import load_session_messages
+        from core.types import Message
+
+        target_dir: Path | None = None
+        if session_id_or_path:
+            p = Path(session_id_or_path)
+            if p.is_dir():
+                target_dir = p
+            elif (self.runs_dir / str(session_id_or_path)).is_dir():
+                target_dir = self.runs_dir / str(session_id_or_path)
+            elif str(session_id_or_path).strip().isdigit():
+                idx = int(str(session_id_or_path).strip()) - 1
+                recent = self.find_recent_sessions(limit=max(idx + 1, 10))
+                if 0 <= idx < len(recent):
+                    target_dir = Path(recent[idx]["run_dir"])
+                else:
+                    return [], {"error": f"Invalid session index: {session_id_or_path} (found {len(recent)} sessions)"}
+            else:
+                for s in self.find_recent_sessions(limit=50):
+                    if str(session_id_or_path) in s["run_id"]:
+                        target_dir = Path(s["run_dir"])
+                        break
+        else:
+            recent = self.find_recent_sessions(limit=1)
+            if recent:
+                target_dir = Path(recent[0]["run_dir"])
+
+        if not target_dir or not target_dir.is_dir():
+            return [], {"error": f"Session not found: {session_id_or_path}"}
+
+        raw_msgs, meta = load_session_messages(target_dir)
+        messages = [Message.from_dict(m) for m in raw_msgs]
+        return messages, meta
 
     def _create_environment(
         self,
@@ -617,10 +720,12 @@ class Harness:
         tracer = Tracer(
             task=task,
             output_dir=run_dir,
+            workspace=workspace,
             verbose=self.verbose,
             formatters=self.action_formatters,
         )
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
+        self.active_loop = loop
 
         return env, tool_registry, memory, tracer, loop, run_dir
 
@@ -858,6 +963,8 @@ class Harness:
         skills: dict[str, tuple[str, str, str, str]] | None = None,
     ) -> None:
         print("\nAvailable commands:")
+        print("  /model [name|idx]             - View configured models or switch active model")
+        print("  /resume [id|idx]              - View or resume a previous conversation session")
         print("  /reasoning [low|med|high|off] - View or switch reasoning / thinking effort")
         print("  /cache [5m|1h|off]            - View or switch prompt caching duration on the fly")
         print("  /status                       - Show context window size, message breakdown, and budget")
@@ -993,6 +1100,67 @@ class Harness:
             self._handle_cache_command(user_input)
             return "skip"
 
+        if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
+            ("/model ", "/models ", "model ", "models ")
+        ):
+            arg = ""
+            if " " in user_input.strip():
+                arg = user_input.strip().split(" ", 1)[1].strip()
+            if not arg:
+                models = self.get_available_models()
+                curr_model = (
+                    getattr(self.model, "model", "")
+                    or getattr(self.model, "model_name", "")
+                    or ""
+                )
+                print("\n🤖 Available Models (from config):")
+                if not models:
+                    print(f"  • {curr_model} [active]")
+                else:
+                    for i, m in enumerate(models, 1):
+                        is_active = (
+                            m["name"].lower() == curr_model.lower()
+                            or m.get("model", "").lower() == curr_model.lower()
+                        )
+                        active_lbl = " [active]" if is_active else ""
+                        prov = f"[{m['provider']}] " if m.get("provider") else ""
+                        print(f"  {i}. {m['name']}{active_lbl} - {prov}{m.get('description', '')}")
+                print("\nTip: Type /model <name|number> to switch active model.\n")
+                return "skip"
+
+            ok, msg, _ = self.switch_model(arg)
+            if ok:
+                print(f"\n✅ {msg}\n")
+            else:
+                print(f"\n❌ {msg}\n")
+            return "skip"
+
+        if cmd in ("/resume", "resume") or cmd.startswith(("/resume ", "resume ")):
+            arg = ""
+            if " " in user_input.strip():
+                arg = user_input.strip().split(" ", 1)[1].strip()
+            if not arg:
+                sessions = self.find_recent_sessions(limit=8)
+                print("\n📂 Recent Sessions:")
+                if not sessions:
+                    print("  No previous sessions found in runs directory.")
+                else:
+                    for i, s in enumerate(sessions, 1):
+                        ws_badge = " [this repo]" if s.get("matches_workspace") else ""
+                        print(f"  {i}. {s['run_id']}{ws_badge} ({s['total_steps']} steps) - {s['preview']}")
+                print("\nTip: Type /resume <number|session_id> to load a previous session.\n")
+                return "skip"
+
+            messages, meta = self.load_session(arg)
+            if not messages:
+                err = meta.get("error", f"Could not load session '{arg}'")
+                print(f"\n❌ {err}\n")
+                return "skip"
+
+            memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+            print(f"\n🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded).\n")
+            return "skip"
+
         if cmd in ("/compact", "compact"):
             old_chars = memory.total_chars()
             did_compact = memory.compact_if_needed(force=True)
@@ -1070,6 +1238,7 @@ class Harness:
         self,
         initial_instruction: str | None = None,
         task_id: str = "interactive_session",
+        resume: bool | str | Path | None = None,
     ) -> None:
         """Interactive multi-turn session with slash commands and context usage tracking."""
         env, _, memory, tracer, loop, run_dir = self._setup_run(
@@ -1079,6 +1248,21 @@ class Harness:
             initial_files={},
         )
 
+        step_idx = 1
+        if resume:
+            res_target = None if resume is True else resume
+            messages, meta = self.load_session(res_target)
+            if messages:
+                memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+                step_idx = meta.get("total_steps", 0) + 1
+                print(
+                    f"\n🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded, continuing at step {step_idx}).\n"
+                )
+            else:
+                print(
+                    f"\n⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh session.\n"
+                )
+
         custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
         skills = _discover_skills(env.workspace_dir, self.global_dir)
         tracer.compact = True
@@ -1087,15 +1271,18 @@ class Harness:
         print(f"📁 Project Workspace: {env.workspace_dir}")
         if self.docker:
             print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
+        curr_model = getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+        curr_prov = getattr(self.model, "provider", "") or ""
+        prov_lbl = f" [{curr_prov}]" if curr_prov else ""
+        print(f"🤖 Active Model: {curr_model}{prov_lbl}")
         cache_label = self.cache_ttl.upper() if self.cache_ttl else "OFF"
         print(f"⚡ Prompt Caching: {cache_label}")
         reasoning_label = self.get_reasoning_effort()
         print(f"🧠 Reasoning Effort: {reasoning_label.upper() if reasoning_label else 'OFF'}")
         print(
-            "💡 Commands: /reasoning [low|med|high|off] | /cache [5m|1h|off] | /compact | /status | /new | /skill | /help | /exit\n"
+            "💡 Commands: /model | /resume | /reasoning | /cache | /compact | /status | /new | /skill | /help | /exit\n"
         )
 
-        step_idx = 1
         has_pending_turn = False
         max_steps_per_turn = 30
 
@@ -1167,6 +1354,7 @@ class Harness:
         self,
         initial_instruction: str | None = None,
         task_id: str = "tui_session",
+        resume: bool | str | Path | None = None,
     ) -> None:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
         from core.tracer import _format_action_summary, _pair_calls_with_results
@@ -1203,9 +1391,36 @@ class Harness:
         state.set_custom_commands(custom_commands)
         state.set_skills(skills)
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
-        state.update_status(memory.stats(), self.get_cache_stats())
+        state.set_available_models(self.get_available_models())
+        state.set_available_sessions(self.find_recent_sessions(limit=15))
 
         step_idx = 1
+        if resume:
+            res_target = None if resume is True else resume
+            res_msgs, res_meta = self.load_session(res_target)
+            if res_msgs:
+                memory.restore_messages(res_msgs, refresh_system_prompt=memory.system_prompt)
+                step_idx = res_meta.get("total_steps", 0) + 1
+                for m in res_msgs:
+                    if m.role == "user" and m.content:
+                        state.add_user(m.content)
+                    elif m.role == "assistant":
+                        if m.content:
+                            state.add_agent(m.content)
+                        if m.tool_calls:
+                            for tc in m.tool_calls:
+                                act = _format_action_summary(tc.name, tc.arguments, color=False)
+                                state.add_action(act)
+                state.add_system(
+                    f"🔄 Resumed session '{res_meta.get('run_id')}' ({len(res_msgs)} messages loaded, continuing at step {step_idx})."
+                )
+            else:
+                state.add_system(
+                    f"⚠️ Could not resume session ({res_meta.get('error', 'not found')}). Starting fresh."
+                )
+
+        state.update_status(memory.stats(), self.get_cache_stats())
+
         max_steps_per_turn = 30
         tui = CursesTUI(state)
 
@@ -1214,12 +1429,95 @@ class Harness:
 
             cmd = user_text.lower().strip()
             if cmd in ("/help", "help"):
-                state.add_system("Available commands: /help, /status, /compact, /new, /skill, /exit")
+                state.add_system("Available commands: /help, /model, /resume, /status, /compact, /new, /skill, /exit")
                 state.add_system("Press Esc on an empty prompt to exit; Esc clears text or dismisses menus.")
                 if custom_commands:
                     state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
                 if skills:
                     state.add_system("Available skills (run /<name>): " + ", ".join(f"/{s}" for s in sorted(skills.keys())))
+                return
+
+            if cmd in ("/model", "/models", "model", "models") or cmd.startswith(
+                ("/model ", "/models ", "model ", "models ")
+            ):
+                arg = ""
+                if " " in user_text.strip():
+                    arg = user_text.strip().split(" ", 1)[1].strip()
+                if not arg:
+                    models = self.get_available_models()
+                    curr_model = (
+                        getattr(self.model, "model", "")
+                        or getattr(self.model, "model_name", "")
+                        or ""
+                    )
+                    state.add_system("🤖 Available Models (from config):")
+                    for i, m in enumerate(models, 1):
+                        is_active = (
+                            m["name"].lower() == curr_model.lower()
+                            or m.get("model", "").lower() == curr_model.lower()
+                        )
+                        active_lbl = " [active]" if is_active else ""
+                        prov = f"[{m['provider']}] " if m.get("provider") else ""
+                        state.add_system(f"  {i}. {m['name']}{active_lbl} - {prov}{m.get('description', '')}")
+                    state.add_system("Type /model <name|number> to switch active model.")
+                    return
+
+                ok, msg, new_m = self.switch_model(arg)
+                if ok:
+                    loop.model = new_m
+                    state.model_name = (
+                        getattr(new_m, "model", "")
+                        or getattr(new_m, "model_name", "")
+                        or ""
+                    )
+                    state.provider_name = getattr(new_m, "provider", "") or ""
+                    state.add_system(f"✅ {msg}")
+                    state.set_available_models(self.get_available_models())
+                    state.update_status(memory.stats(), self.get_cache_stats())
+                else:
+                    state.add_error(f"Failed to switch model: {msg}")
+                return
+
+            if cmd in ("/resume", "resume") or cmd.startswith(("/resume ", "resume ")):
+                arg = ""
+                if " " in user_text.strip():
+                    arg = user_text.strip().split(" ", 1)[1].strip()
+                if not arg:
+                    sessions = self.find_recent_sessions(limit=8)
+                    state.add_system("📂 Recent Sessions:")
+                    if not sessions:
+                        state.add_system("  No previous sessions found in runs directory.")
+                    else:
+                        for i, s in enumerate(sessions, 1):
+                            ws_badge = " [this repo]" if s.get("matches_workspace") else ""
+                            state.add_system(f"  {i}. {s['run_id']}{ws_badge} ({s['total_steps']} steps) - {s['preview']}")
+                    state.add_system("Type /resume <number|session_id> to load a previous session.")
+                    return
+
+                messages, meta = self.load_session(arg)
+                if not messages:
+                    err = meta.get("error", f"Could not load session '{arg}'")
+                    state.add_error(f"Failed to resume session: {err}")
+                    return
+
+                memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
+                step_idx = meta.get("total_steps", 0) + 1
+                state.lines.clear()
+                for m in messages:
+                    if m.role == "user" and m.content:
+                        state.add_user(m.content)
+                    elif m.role == "assistant":
+                        if m.content:
+                            state.add_agent(m.content)
+                        if m.tool_calls:
+                            for tc in m.tool_calls:
+                                act = _format_action_summary(tc.name, tc.arguments, color=False)
+                                state.add_action(act)
+                state.add_system(
+                    f"🔄 Resumed session '{meta.get('run_id')}' ({len(messages)} messages loaded, continuing at step {step_idx})."
+                )
+                state.set_available_sessions(self.find_recent_sessions(limit=15))
+                state.update_status(memory.stats(), self.get_cache_stats())
                 return
 
             if cmd in ("/status", "status"):

@@ -1,7 +1,7 @@
 import unittest
 
 from core.memory import Memory
-from core.types import ToolCall, ToolResult
+from core.types import Message, ToolCall, ToolResult
 
 
 class TestMemory(unittest.TestCase):
@@ -354,6 +354,101 @@ class TestMemory(unittest.TestCase):
         # Reset clears modified files
         mem.reset(new_instruction="NEW_TASK")
         self.assertEqual(mem.stats()["modified_files"], [])
+
+    def test_message_from_dict_deserialization(self):
+        """Invariant: Message.from_dict deserializes all message shapes, tool calls, and handles malformed args."""
+        # 1. Plain user message
+        m1 = Message.from_dict({"role": "user", "content": "hello world"})
+        self.assertEqual(m1.role, "user")
+        self.assertEqual(m1.content, "hello world")
+        self.assertIsNone(m1.tool_calls)
+        self.assertIsNone(m1.tool_call_id)
+
+        # 2. Assistant message with function tool call (JSON string arguments)
+        m2 = Message.from_dict({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "pwd"}'},
+                    "extra_content": "some_extra",
+                }
+            ],
+        })
+        self.assertEqual(m2.role, "assistant")
+        self.assertIsNotNone(m2.tool_calls)
+        self.assertEqual(len(m2.tool_calls), 1)
+        tc1 = m2.tool_calls[0]
+        self.assertEqual(tc1.id, "call_1")
+        self.assertEqual(tc1.name, "bash")
+        self.assertEqual(tc1.arguments, {"command": "pwd"})
+        self.assertEqual(tc1.extra_content, "some_extra")
+
+        # 3. Direct dictionary arguments (non-standard / alternative format)
+        m3 = Message.from_dict({
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_2", "name": "read_file", "arguments": {"path": "a.txt"}}
+            ],
+        })
+        self.assertEqual(m3.tool_calls[0].arguments, {"path": "a.txt"})
+
+        # 4. Malformed JSON string arguments fallback
+        m4 = Message.from_dict({
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_3", "name": "custom", "arguments": "not valid json"}
+            ],
+        })
+        self.assertEqual(m4.tool_calls[0].arguments, {"raw": "not valid json"})
+
+        # 5. Tool result message with tool_call_id and raw_log_path
+        m5 = Message.from_dict({
+            "role": "tool",
+            "content": "output text",
+            "tool_call_id": "call_1",
+            "raw_log_path": "/tmp/raw.log",
+        })
+        self.assertEqual(m5.role, "tool")
+        self.assertEqual(m5.content, "output text")
+        self.assertEqual(m5.tool_call_id, "call_1")
+        self.assertEqual(m5.raw_log_path, "/tmp/raw.log")
+
+    def test_memory_restore_messages(self):
+        """Invariant: restore_messages reconstructs history and properly handles system prompt refresh."""
+        mem = Memory(system_prompt="OLD_SYSTEM", user_prompt="OLD_USER")
+
+        # 1. Restoring empty list is a no-op
+        mem.restore_messages([])
+        self.assertEqual(len(mem.get_messages()), 2)
+
+        # 2. Restoring with refresh_system_prompt when messages start with system message
+        restored = [
+            Message(role="system", content="OLD_PERSISTED_SYSTEM"),
+            Message(role="user", content="Turn 1 prompt"),
+            Message(role="assistant", content="Turn 1 reply"),
+        ]
+        mem.restore_messages(restored, refresh_system_prompt="NEW_UPDATED_SYSTEM")
+        msgs = mem.get_messages()
+        self.assertEqual(len(msgs), 3)
+        self.assertEqual(msgs[0].role, "system")
+        self.assertEqual(msgs[0].content, "NEW_UPDATED_SYSTEM")
+        self.assertEqual(msgs[1].content, "Turn 1 prompt")
+        self.assertEqual(msgs[2].content, "Turn 1 reply")
+
+        # 3. Restoring when messages lack system message at index 0 prepends refreshed system message
+        no_sys = [
+            Message(role="user", content="Direct prompt"),
+            Message(role="assistant", content="Direct reply"),
+        ]
+        mem.restore_messages(no_sys, refresh_system_prompt="PREPENDED_SYSTEM")
+        msgs_prepended = mem.get_messages()
+        self.assertEqual(len(msgs_prepended), 3)
+        self.assertEqual(msgs_prepended[0].role, "system")
+        self.assertEqual(msgs_prepended[0].content, "PREPENDED_SYSTEM")
+        self.assertEqual(msgs_prepended[1].content, "Direct prompt")
 
 
 if __name__ == "__main__":

@@ -46,6 +46,47 @@ class Message:
             data["tool_calls"] = calls_list
         return data
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Message:
+        role = data.get("role", "user")
+        content = data.get("content", "")
+        tool_call_id = data.get("tool_call_id")
+        raw_log_path = data.get("raw_log_path")
+        tool_calls: list[ToolCall] | None = None
+        raw_calls = data.get("tool_calls")
+        if raw_calls and isinstance(raw_calls, list):
+            tool_calls = []
+            for tc in raw_calls:
+                if isinstance(tc, dict):
+                    cid = tc.get("id", "")
+                    fn = tc.get("function") or {}
+                    name = fn.get("name") or tc.get("name", "")
+                    raw_args = fn.get("arguments") or tc.get("arguments") or {}
+                    if isinstance(raw_args, str):
+                        try:
+                            args = json.loads(raw_args)
+                        except Exception:
+                            args = {"raw": raw_args}
+                    elif isinstance(raw_args, dict):
+                        args = raw_args
+                    else:
+                        args = {}
+                    tool_calls.append(
+                        ToolCall(
+                            id=cid,
+                            name=name,
+                            arguments=args,
+                            extra_content=tc.get("extra_content"),
+                        )
+                    )
+        return cls(
+            role=role,
+            content=content,
+            tool_call_id=tool_call_id,
+            tool_calls=tool_calls,
+            raw_log_path=raw_log_path,
+        )
+
 
 @dataclass
 class ToolResult:

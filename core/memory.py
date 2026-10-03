@@ -31,6 +31,21 @@ class Memory:
         if user_prompt:
             self.messages.append(Message(role="user", content=user_prompt))
 
+    def restore_messages(
+        self, messages: list[Message], refresh_system_prompt: str | None = None
+    ) -> None:
+        """Restores memory messages from a previous session, optionally updating system prompt."""
+        if not messages:
+            return
+        restored = list(messages)
+        if refresh_system_prompt is not None:
+            self.system_prompt = refresh_system_prompt
+            if restored and restored[0].role == "system":
+                restored[0] = Message(role="system", content=refresh_system_prompt)
+            else:
+                restored.insert(0, Message(role="system", content=refresh_system_prompt))
+        self.messages = restored
+
     def add_user(self, content: str) -> None:
         self.messages.append(Message(role="user", content=content or ""))
 
