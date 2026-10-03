@@ -425,6 +425,7 @@ class TUIState:
         self.skills: dict[str, Any] = {}
         self.workspace_files: list[str] = []
         self.selected_command_idx: int = 0
+        self.turn_active: bool = False
 
     def set_workspace_files(self, files: list[str]) -> None:
         """Loads workspace relative file paths for @ file tagging and autocomplete."""
@@ -900,6 +901,9 @@ class CursesTUI:
         if self.state.scroll_offset > 0:
             parts.append(f"[scrolled +{self.state.scroll_offset}]")
 
+        if self.state.turn_active:
+            parts.append("[running · Esc to cancel]")
+
         status_text = " " + " · ".join(parts) + " "
 
         try:
@@ -1021,6 +1025,44 @@ class CursesTUI:
 
         stdscr.refresh()
 
+    def check_cancel_requested(self) -> bool:
+        """Non-blocking check if Escape key was pressed by user during execution."""
+        if not self.stdscr:
+            return False
+        try:
+            try:
+                self.stdscr.nodelay(True)
+            except Exception:
+                pass
+            cancel_requested = False
+            while True:
+                try:
+                    ch = self.stdscr.get_wch()
+                except (curses.error, EOFError, StopIteration):
+                    break
+                except KeyboardInterrupt:
+                    raise
+                if ch in (27, "\x1b"):
+                    seq = "\x1b"
+                    while True:
+                        try:
+                            nxt = self.stdscr.get_wch()
+                            if isinstance(nxt, int):
+                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
+                            else:
+                                seq += str(nxt)
+                        except (curses.error, EOFError, StopIteration):
+                            break
+                    if len(seq) == 1:
+                        cancel_requested = True
+                        break
+            return cancel_requested
+        finally:
+            try:
+                self.stdscr.nodelay(False)
+            except Exception:
+                pass
+
     def handle_key(self, ch: str | int, on_user_submit: Callable[[str], None]) -> bool:
         """Processes a single keystroke event.
 
@@ -1108,6 +1150,8 @@ class CursesTUI:
         # 7. Escape: cancel the running turn, else dismiss menu / clear tag query,
         #    else (with an empty prompt) exit the session.
         if ch in (27, "\x1b"):
+            if self.state.turn_active:
+                return True
             if file_matches:
                 tag_info = self.state.get_current_file_tag_query()
                 if tag_info:

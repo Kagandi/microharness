@@ -236,6 +236,111 @@ class TestTUIInterrupt(unittest.TestCase):
                 f"the dangling tool_call should have been trimmed, got {lines}",
             )
 
+    def test_esc_during_turn_cancels_turn_without_crashing_or_exiting_session(self):
+        """Invariant: Esc mid-turn cancels the turn cleanly, drops dangling messages, and keeps the session active."""
+        import tempfile
+        from pathlib import Path
+
+        from core.harness import Harness
+        from core.model import MockModel
+        from core.types import ToolCall
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = Harness(
+                model=MockModel(
+                    script=[
+                        (
+                            "step 1 output",
+                            [ToolCall(id="c1", name="bash", arguments={"command": "echo step1"})],
+                        ),
+                        (
+                            "step 2 output",
+                            [ToolCall(id="c2", name="bash", arguments={"command": "echo step2"})],
+                        ),
+                    ]
+                ),
+                workspace_dir=tmp_path / "ws",
+                global_dir=tmp_path / "global",
+                runs_dir=tmp_path / "runs",
+                sandbox=False,
+                verbose=False,
+            )
+
+            captured = {}
+            call_count = {"n": 0}
+
+            def mock_check_cancel(tui_self):
+                call_count["n"] += 1
+                return call_count["n"] >= 2
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                captured["state"] = tui_instance.state
+                captured["tui"] = tui_instance
+                on_user_submit("run two steps")
+
+            with patch("core.tui.CursesTUI.check_cancel_requested", mock_check_cancel):
+                with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True):
+                    harness.run_tui()
+
+            lines = [line.text for line in captured["state"].lines]
+            self.assertTrue(
+                any("Turn cancelled by user (Esc)" in text for text in lines),
+                f"expected a cancellation notice, got {lines}",
+            )
+            self.assertFalse(captured["state"].turn_active)
+
+    def test_check_cancel_requested_variants(self):
+        """Invariant: check_cancel_requested detects standalone Esc and ignores sequences or non-Esc keys."""
+        import curses
+
+        state = TUIState()
+        tui = CursesTUI(state)
+
+        # 1. stdscr is None -> False
+        self.assertFalse(tui.check_cancel_requested())
+
+        # 2. stdscr raises curses.error (no input) -> False
+        mock_scr = MagicMock()
+        mock_scr.get_wch.side_effect = curses.error("no input")
+        tui.stdscr = mock_scr
+        self.assertFalse(tui.check_cancel_requested())
+
+        # 3. stdscr has standalone Esc (27) followed by curses.error -> True
+        mock_scr.get_wch.side_effect = [27, curses.error("end of sequence")]
+        self.assertTrue(tui.check_cancel_requested())
+
+        # 4. stdscr has standalone Esc as '\x1b' -> True
+        mock_scr.get_wch.side_effect = ["\x1b", curses.error("end of sequence")]
+        self.assertTrue(tui.check_cancel_requested())
+
+        # 5. stdscr has arrow key sequence (\x1b, '[', 'A') -> False
+        mock_scr.get_wch.side_effect = ["\x1b", "[", "A", curses.error("end")]
+        self.assertFalse(tui.check_cancel_requested())
+
+    def test_status_bar_displays_running_indicator_when_turn_active(self):
+        """Invariant: status bar telemetry includes [running · Esc to cancel] while turn_active is True."""
+        state = TUIState()
+        state.turn_active = True
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        calls = mock_stdscr.addstr.call_args_list
+        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        self.assertTrue(
+            any("running · Esc to cancel" in text for text in rendered_texts),
+            f"expected running status in telemetry, got {rendered_texts}",
+        )
+
+    def test_escape_key_during_turn_active_keeps_session_alive(self):
+        """Invariant: Esc during turn_active does not terminate the session."""
+        state = TUIState()
+        state.turn_active = True
+        tui = CursesTUI(state)
+        self.assertTrue(tui.handle_key(27, lambda _t: None))
+
     def test_initial_instruction_is_submitted_after_first_draw(self):
         """Invariant: run() draws a frame before submitting initial_instruction.
 

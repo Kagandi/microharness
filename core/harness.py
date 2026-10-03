@@ -1300,56 +1300,85 @@ class Harness:
                 tui.draw(tui.stdscr)
 
             turn_start = step_idx
-            while (step_idx - turn_start) < max_steps_per_turn:
-                try:
-                    is_finished, step_trace = loop.step(step_index=step_idx)
-                except KeyboardInterrupt:
-                    dropped = memory.drop_incomplete_tool_turn()
-                    state.add_system(
-                        f"⚠️ Turn interrupted by user (Ctrl+C) at step {step_idx}. Session is still active."
-                        + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
-                    )
+            state.turn_active = True
+            try:
+                while (step_idx - turn_start) < max_steps_per_turn:
+                    if tui.check_cancel_requested():
+                        dropped = memory.drop_incomplete_tool_turn()
+                        state.add_system(
+                            f"⚠️ Turn cancelled by user (Esc) at step {step_idx}. Session is still active."
+                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
+                        )
+                        state.update_status(memory.stats(), self.get_cache_stats())
+                        if tui.stdscr:
+                            tui.draw(tui.stdscr)
+                        break
+
+                    try:
+                        is_finished, step_trace = loop.step(step_index=step_idx)
+                    except KeyboardInterrupt:
+                        dropped = memory.drop_incomplete_tool_turn()
+                        state.add_system(
+                            f"⚠️ Turn interrupted by user (Ctrl+C) at step {step_idx}. Session is still active."
+                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
+                        )
+                        state.update_status(memory.stats(), self.get_cache_stats())
+                        if tui.stdscr:
+                            tui.draw(tui.stdscr)
+                        break
+                    except Exception as exc:
+                        state.add_error(f"Step {step_idx} error: {exc}")
+                        break
+
+                    tracer.record_step(step_trace)
+                    step_idx += 1
+
+                    model_text = step_trace.model_response.get("content") or ""
+                    tool_calls = step_trace.model_response.get("tool_calls") or []
+
+                    if tool_calls:
+                        if model_text.strip():
+                            first_line = model_text.strip().splitlines()[0]
+                            preview = (first_line[:80] + "...") if len(first_line) > 80 else first_line
+                            state.add_thought(preview)
+
+                        for tc, tr in _pair_calls_with_results(tool_calls, step_trace.tool_results):
+                            name = tc.get("name", "") if tc else ""
+                            args = tc.get("arguments", {}) if tc else {}
+                            action_text = _format_action_summary(name, args, color=False)
+                            exit_code = tr.get("exit_code", 0) if tr else 0
+                            if exit_code == 0:
+                                state.add_action(f"{action_text} ({step_trace.duration_s:.1f}s)")
+                            else:
+                                out_lines = tr.get("output", "").strip().splitlines() if tr else []
+                                err_msg = out_lines[0] if out_lines else "Failed"
+                                state.add_error(f"{action_text} (exit {exit_code}: {err_msg[:60]})")
+                    else:
+                        if model_text.strip():
+                            state.add_agent(model_text.strip())
+
                     state.update_status(memory.stats(), self.get_cache_stats())
                     if tui.stdscr:
                         tui.draw(tui.stdscr)
-                    break
-                except Exception as exc:
-                    state.add_error(f"Step {step_idx} error: {exc}")
-                    break
 
-                tracer.record_step(step_trace)
-                step_idx += 1
+                    if is_finished:
+                        break
 
-                model_text = step_trace.model_response.get("content") or ""
-                tool_calls = step_trace.model_response.get("tool_calls") or []
-
-                if tool_calls:
-                    if model_text.strip():
-                        first_line = model_text.strip().splitlines()[0]
-                        preview = (first_line[:80] + "...") if len(first_line) > 80 else first_line
-                        state.add_thought(preview)
-
-                    for tc, tr in _pair_calls_with_results(tool_calls, step_trace.tool_results):
-                        name = tc.get("name", "") if tc else ""
-                        args = tc.get("arguments", {}) if tc else {}
-                        action_text = _format_action_summary(name, args, color=False)
-                        exit_code = tr.get("exit_code", 0) if tr else 0
-                        if exit_code == 0:
-                            state.add_action(f"{action_text} ({step_trace.duration_s:.1f}s)")
-                        else:
-                            out_lines = tr.get("output", "").strip().splitlines() if tr else []
-                            err_msg = out_lines[0] if out_lines else "Failed"
-                            state.add_error(f"{action_text} (exit {exit_code}: {err_msg[:60]})")
-                else:
-                    if model_text.strip():
-                        state.add_agent(model_text.strip())
-
+                    if tui.check_cancel_requested():
+                        dropped = memory.drop_incomplete_tool_turn()
+                        state.add_system(
+                            f"⚠️ Turn cancelled by user (Esc) at step {step_idx}. Session is still active."
+                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
+                        )
+                        state.update_status(memory.stats(), self.get_cache_stats())
+                        if tui.stdscr:
+                            tui.draw(tui.stdscr)
+                        break
+            finally:
+                state.turn_active = False
                 state.update_status(memory.stats(), self.get_cache_stats())
                 if tui.stdscr:
                     tui.draw(tui.stdscr)
-
-                if is_finished:
-                    break
 
         try:
             tui.run(
