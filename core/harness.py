@@ -927,7 +927,6 @@ class Harness:
                         tracer=tracer,
                         start_step=step_idx,
                         max_steps=max_steps_per_turn,
-                        on_finish=lambda reply: print(f"\n🤖 Agent:\n{reply.strip()}\n"),
                     )
                     if not is_finished and reason == "max_steps_exceeded":
                         print(
