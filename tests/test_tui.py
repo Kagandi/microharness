@@ -1254,6 +1254,72 @@ class TestTUI(unittest.TestCase):
         resume_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Previous Sessions" in str(c)]
         self.assertGreaterEqual(len(resume_border_calls), 1)
 
+    def test_harness_run_tui_resume_continues_step_numbering(self):
+        """Invariant: run_tui(resume=...) must continue step numbering past the resumed session."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from core.harness import Harness
+        from core.model import MockModel
+        from core.types import ToolCall
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            runs_dir = tmp_path / "runs"
+
+            def build_harness() -> Harness:
+                return Harness(
+                    model=MockModel(script=[("working", []), ("done", [])]),
+                    workspace_dir=tmp_path / "workspace",
+                    global_dir=tmp_path / "global",
+                    runs_dir=runs_dir,
+                    sandbox=False,
+                    verbose=False,
+                )
+
+            # Produce a prior session with exactly 2 recorded steps.
+            seed = build_harness()
+            _, _, _, tracer, loop, prior_run = seed._setup_run(
+                task_id="prior",
+                system_prompt="SYS",
+                initial_instruction="prior work",
+                initial_files={},
+            )
+            script = [("step one", [ToolCall(id="c1", name="write_file", arguments={"path": "a.txt", "content": "x"})]), ("step two", [])]
+            seed.model = MockModel(script=script)
+            loop.model = seed.model
+            for idx in range(2):
+                _, trace = loop.step(step_index=idx)
+                tracer.record_step(trace)
+            tracer.finalize(finish_reason="completed")
+            self.assertEqual(len(tracer.steps), 2)
+
+            # Resume it in TUI mode; the first step of the new turn must be step 3.
+            harness = build_harness()
+            observed_step_indices: list[int] = []
+            real_step = None
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                on_user_submit("continue please")
+
+            from core.loop import AgentLoop
+
+            real_step = AgentLoop.step
+
+            def recording_step(self, step_index=None, **kwargs):
+                observed_step_indices.append(step_index)
+                return real_step(self, step_index=step_index, **kwargs)
+
+            with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True), patch.object(
+                AgentLoop, "step", recording_step
+            ):
+                harness.run_tui(resume=prior_run.name)
+
+            self.assertTrue(observed_step_indices, "expected at least one step to run after resume")
+            self.assertEqual(observed_step_indices[0], 3)
+            self.assertEqual(observed_step_indices, sorted(set(observed_step_indices)))
+
 
 if __name__ == "__main__":
     unittest.main()

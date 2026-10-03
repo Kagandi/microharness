@@ -509,11 +509,28 @@ class Tracer:
         path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _select_reconstruction_step(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Returns the most recent step that actually recorded conversation state.
+
+    When a step cannot be serialized, ``_append_jsonl`` writes a placeholder
+    carrying ``serialization_error`` and an empty ``prompt_messages``. Because
+    reconstruction is driven by a single step's prompt snapshot, picking such a
+    placeholder would silently discard the entire conversation on resume. We
+    therefore walk backwards to the last step that recorded a real prompt.
+    """
+    for step in reversed(steps):
+        if step.get("serialization_error"):
+            continue
+        if step.get("prompt_messages"):
+            return step
+    return steps[-1]
+
+
 def reconstruct_messages_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Reconstructs full conversation message history from a list of step trace dictionaries."""
     if not steps:
         return []
-    last_step = steps[-1]
+    last_step = _select_reconstruction_step(steps)
     msgs: list[dict[str, Any]] = [dict(m) for m in (last_step.get("prompt_messages") or [])]
     resp = last_step.get("model_response") or {}
     content = resp.get("content") or ""
@@ -634,13 +651,13 @@ def find_recent_sessions(
 
     matching_sessions: list[dict[str, Any]] = []
     other_sessions: list[dict[str, Any]] = []
-    scan_ceiling = max(limit * 5, 50) if target_ws else limit
 
-    for mtime, entry in candidates:
+    def _describe(entry: Path, mtime: float) -> dict[str, Any] | None:
+        """Reads a session directory into a summary record, or None if it is not a session."""
         trace_json = entry / "trace.json"
         traj_jsonl = entry / "trajectory.jsonl"
         if not (trace_json.is_file() or traj_jsonl.is_file()):
-            continue
+            return None
 
         total_steps = 0
         preview = ""
@@ -693,7 +710,7 @@ def find_recent_sessions(
 
         is_match = bool(target_ws is not None and sess_ws is not None and target_ws == sess_ws)
 
-        record = {
+        return {
             "run_id": entry.name,
             "run_dir": str(entry),
             "task_id": task_id,
@@ -705,14 +722,28 @@ def find_recent_sessions(
             "matches_workspace": is_match,
         }
 
-        if is_match:
-            matching_sessions.append(record)
-            if len(matching_sessions) >= limit:
-                break
-        else:
-            other_sessions.append(record)
+    # Pass 1 scans only the newest candidates, which keeps the common case (this
+    # repo has recent sessions) cheap. Pass 2 runs only when that cheap scan found
+    # no match, so an older session for the same repo stays reachable instead of
+    # being silently hidden by the scan ceiling.
+    pass1_ceiling = max(limit * 5, 50) if target_ws else limit
 
-        if len(matching_sessions) + len(other_sessions) >= scan_ceiling:
+    for ceiling, matches_only in ((pass1_ceiling, False), (len(candidates), True)):
+        for index, (mtime, entry) in enumerate(candidates):
+            if index >= ceiling:
+                break
+            if matches_only and index < pass1_ceiling:
+                continue
+            record = _describe(entry, mtime)
+            if record is None:
+                continue
+            if record["matches_workspace"]:
+                if len(matching_sessions) >= limit:
+                    break
+                matching_sessions.append(record)
+            elif not matches_only:
+                other_sessions.append(record)
+        if matching_sessions or not target_ws:
             break
 
     # Sort: matching workspace first, then newest mtime

@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from core.harness import Task
-from core.tracer import Tracer, _pair_calls_with_results
+from core.tracer import (
+    Tracer,
+    _pair_calls_with_results,
+    find_recent_sessions,
+    load_session_messages,
+    reconstruct_messages_from_steps,
+)
 
 
 class TestTracer(unittest.TestCase):
@@ -639,6 +648,213 @@ class TestTracer(unittest.TestCase):
             self.assertEqual(len(traj_lines), 3)
             self.assertEqual([line["step_index"] for line in traj_lines], [1, 2, 3])
             self.assertTrue(traj_lines[2].get("serialization_error"))
+
+            # Steps 1 and 2 are serializable via default=str, so they must be written
+            # in full rather than degraded to the serialization_error placeholder.
+            self.assertIsNone(traj_lines[0].get("serialization_error"))
+            self.assertIsNone(traj_lines[1].get("serialization_error"))
+            self.assertEqual(traj_lines[0]["model_response"]["obj"], "CustomObjRepr")
+            self.assertEqual(traj_lines[0]["tool_results"][0]["output"], "/tmp/some_file")
+            self.assertIn("a", traj_lines[0]["tool_results"][0]["tags"])
+            self.assertEqual(traj_lines[1]["prompt_messages"], [{"role": "user", "content": "next"}])
+
+    def test_tracer_export_json_survives_non_primitive_values(self):
+        """Invariant: a Decimal in usage must not crash finalization (default=str on export)."""
+        from decimal import Decimal
+
+        from core.types import StepTrace, Task
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            tracer = Tracer(task=Task(id="t", instruction="i"), output_dir=out_dir, verbose=False)
+            tracer.record_step(
+                StepTrace(
+                    step_index=0,
+                    duration_s=0.1,
+                    compaction_applied=False,
+                    usage={"input": Decimal("10.5"), "output": Decimal("2.25")},
+                    prompt_messages=[{"role": "user", "content": "hi"}],
+                    model_response={"content": "ok", "tool_calls": []},
+                    tool_results=[],
+                )
+            )
+            tracer.finish_reason = "completed"
+            json_path, _ = tracer.finalize(finish_reason="completed")
+
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["steps"][0]["usage"], {"input": "10.5", "output": "2.25"})
+
+    def test_resume_survives_trailing_serialization_placeholder(self):
+        """Invariant: a placeholder final step must not discard the recoverable conversation."""
+        from core.types import StepTrace
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            tracer = Tracer(task=Task(id="t", instruction="i"), output_dir=out_dir, verbose=False)
+
+            history = [{"role": "system", "content": "SYS"}]
+            for j in range(2):
+                history += [
+                    {"role": "user", "content": f"turn{j}"},
+                    {"role": "assistant", "content": f"reply{j}"},
+                ]
+            tracer.record_step(
+                StepTrace(
+                    step_index=0,
+                    duration_s=0.1,
+                    prompt_messages=list(history),
+                    model_response={"content": "reply0", "tool_calls": []},
+                    tool_results=[],
+                )
+            )
+
+            # Final step carries a circular reference: default=str cannot help, so the
+            # placeholder record is written instead.
+            circular: dict[str, Any] = {"input": 1}
+            circular["self"] = circular
+            tracer.record_step(
+                StepTrace(
+                    step_index=1,
+                    duration_s=0.1,
+                    prompt_messages=list(history),
+                    usage=circular,  # type: ignore[arg-type]
+                    model_response={"content": "reply1", "tool_calls": []},
+                    tool_results=[],
+                )
+            )
+
+            lines = [
+                json.loads(line)
+                for line in tracer.jsonl_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(lines[-1]["serialization_error"])
+
+            # Reconstruction must fall back to the last step that recorded a prompt,
+            # then append that step's own assistant reply.
+            msgs = reconstruct_messages_from_steps(lines)
+            self.assertEqual(
+                [m["role"] for m in msgs],
+                ["system", "user", "assistant", "user", "assistant", "assistant"],
+            )
+            self.assertEqual(msgs[-1]["content"], "reply0")
+
+            loaded, meta = load_session_messages(out_dir)
+            self.assertEqual(len(loaded), 6)
+            self.assertEqual(meta["total_steps"], 2)
+
+    def test_reconstruction_never_uses_placeholder_step(self):
+        """Invariant: a step flagged serialization_error is skipped even if it carries prompt data."""
+        good = {
+            "step_index": 0,
+            "prompt_messages": [{"role": "system", "content": "SYS"}],
+            "model_response": {"content": "real", "tool_calls": []},
+            "tool_results": [],
+        }
+        # A placeholder that (defensively) still carries prompt data must still be rejected,
+        # otherwise a partially-written final record would become the reconstruction source.
+        placeholder = {
+            "step_index": 1,
+            "serialization_error": True,
+            "prompt_messages": [{"role": "user", "content": "ghost"}],
+            "model_response": {"content": "ghost", "tool_calls": []},
+            "tool_results": [],
+        }
+
+        self.assertEqual(reconstruct_messages_from_steps([good])[0]["content"], "SYS")
+        msgs = reconstruct_messages_from_steps([good, placeholder])
+        self.assertEqual([m["role"] for m in msgs], ["system", "assistant"])
+        self.assertEqual(msgs[-1]["content"], "real")
+
+        # With only placeholders available the last step is still the best we have:
+        # its prompt snapshot plus its own assistant reply.
+        self.assertEqual(
+            [m["content"] for m in reconstruct_messages_from_steps([placeholder])],
+            ["ghost", "ghost"],
+        )
+
+    def test_find_recent_sessions_reaches_old_workspace_match(self):
+        """Invariant: a same-workspace session must stay reachable past the fast-path ceiling."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runs = Path(tmp_dir) / "runs"
+            runs.mkdir()
+
+            def write(name: str, workspace: str, age_days: float) -> None:
+                d = runs / name
+                d.mkdir()
+                (d / "trace.json").write_text(
+                    json.dumps(
+                        {
+                            "task": {"id": name, "instruction": "work"},
+                            "total_steps": 5,
+                            "workspace": workspace,
+                            "finish_reason": "completed",
+                            "messages": [],
+                            "steps": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                stamp = time.time() - age_days * 86400
+                os.utime(d, (stamp, stamp))
+
+            write("mine_old", "/repo", 100.0)
+            for i in range(80):
+                write(f"other_{i:03d}", "/elsewhere", 1.0 + i * 0.001)
+
+            res = find_recent_sessions(runs, workspace="/repo", limit=10)
+            self.assertEqual(res[0]["run_id"], "mine_old")
+            self.assertTrue(res[0]["matches_workspace"])
+
+            # With no workspace filter the ceiling must not change plain recency ordering
+            # (ages increase with i, so other_000 is the newest).
+            res_any = find_recent_sessions(runs, limit=10)
+            self.assertEqual([r["run_id"] for r in res_any][0], "other_000")
+            self.assertEqual(len(res_any), 10)
+
+    def test_find_recent_sessions_short_circuits_on_recent_match(self):
+        """Invariant: when the newest session matches this workspace, the scan must not read the rest."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runs = Path(tmp_dir) / "runs"
+            runs.mkdir()
+
+            def write(name: str, workspace: str, age_days: float) -> None:
+                d = runs / name
+                d.mkdir()
+                (d / "trace.json").write_text(
+                    json.dumps(
+                        {
+                            "task": {"id": name, "instruction": "work"},
+                            "total_steps": 1,
+                            "workspace": workspace,
+                            "finish_reason": "completed",
+                            "messages": [],
+                            "steps": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                stamp = time.time() - age_days * 86400
+                os.utime(d, (stamp, stamp))
+
+            write("mine_newest", "/repo", 0.0)
+            for i in range(400):
+                write(f"other_{i:03d}", "/elsewhere", 1.0 + i * 0.001)
+
+            reads: list[str] = []
+            real_read = Path.read_text
+
+            def counting_read(self, *args, **kwargs):
+                reads.append(self.name)
+                return real_read(self, *args, **kwargs)
+
+            with patch.object(Path, "read_text", counting_read):
+                res = find_recent_sessions(runs, workspace="/repo", limit=10)
+
+            self.assertEqual(res[0]["run_id"], "mine_newest")
+            self.assertEqual(len(res), 10)
+            # Only the pass-1 ceiling is consulted, far fewer than the 401 on disk.
+            self.assertEqual(len(reads), 50)
 
 
 if __name__ == "__main__":

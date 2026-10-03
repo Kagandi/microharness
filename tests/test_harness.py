@@ -2257,6 +2257,15 @@ class ProjectWeather:
             self.assertFalse(ok_bad)
             self.assertIn("Invalid model selection", msg_bad)
 
+            # 3b. Negative: boundary indices adjacent to the valid range. Only two models
+            # are configured, so index 3 (== len + 1) and 0 must both be rejected by the
+            # bounds check rather than falling through to a lookup that happens to fail.
+            for boundary in ("3", "0"):
+                ok_b, msg_b, model_b = harness.switch_model(boundary)
+                self.assertFalse(ok_b, f"index {boundary} must be rejected")
+                self.assertIn("Invalid model selection", msg_b)
+                self.assertIs(model_b, harness.model)
+
             # 4. Negative: empty spec
             ok_bad2, msg_bad2, _ = harness.switch_model("")
             self.assertFalse(ok_bad2)

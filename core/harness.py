@@ -595,7 +595,7 @@ class Harness:
                 target_dir = Path(recent[0]["run_dir"])
 
         if not target_dir or not target_dir.is_dir():
-            return [], {"error": f"Session not found: {session_id_or_path}"}
+            return [], {"error": "Session not found: no resumable session available"}
 
         raw_msgs, meta = load_session_messages(target_dir)
         messages = [Message.from_dict(m) for m in raw_msgs]
