@@ -2,254 +2,66 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
-from core import config
+from core import config, ratelimit
+from core.protocols import (
+    CacheAwareModel,
+    CancellableModel,
+    DeadlineAwareModel,
+    EndpointAwareModel,
+    Model,
+    NamedModel,
+    ProviderAwareModel,
+    RateLimitAwareModel,
+    ReasoningAwareModel,
+    ResettableModel,
+    UsageReportingModel,
+)
+from core.ratelimit import ModelCancelledError, RateLimitError, RateLimitHints, RetryPolicy
 from core.types import Message, ToolCall
 
+__all__ = [
+    "CacheAwareModel",
+    "CancellableModel",
+    "DeadlineAwareModel",
+    "EndpointAwareModel",
+    "HttpChatModel",
+    "MockModel",
+    "Model",
+    "ModelCancelledError",
+    "NamedModel",
+    "ProviderAwareModel",
+    "RateLimitAwareModel",
+    "RateLimitError",
+    "ReasoningAwareModel",
+    "ResettableModel",
+    "UsageReportingModel",
+    "MAX_RETRY_SLEEP_S",
+    "RetryPolicy",
+    "build_model_from_spec",
+    "extract_retry_delay",
+    "find_provider_by_endpoint",
+    "get_available_models_from_config",
+    "is_unrecoverable_quota_error",
+    "load_builtin_providers",
+    "load_provider_registry",
+    "normalize_cache_ttl",
+    "normalize_reasoning_effort",
+    "resolve_provider",
+    "seed_user_providers",
+    "strip_json_comments",
+]
 
-class Model(Protocol):
-    """Protocol for pluggable LLM callers.
-
-    Any class or adapter with a `generate` method can be plugged directly
-    into the Harness without modifying any harness code.
-    """
-
-    def generate(
-        self, messages: list[Message], tools: list[dict[str, Any]]
-    ) -> tuple[str, list[ToolCall]]: ...
-
-
-class RateLimitError(RuntimeError):
-    """Raised when an LLM provider returns HTTP 429 Too Many Requests or quota exhaustion."""
-
-    def __init__(self, message: str, retry_after: float | None = None):
-        super().__init__(message)
-        self.retry_after = retry_after
-
-
-MAX_RETRY_SLEEP_S: float = 120.0
-
-
-class ModelCancelledError(RuntimeError):
-    """Raised when an interactive cancel probe reports that the user aborted the request.
-
-    Only raised while the model is *waiting* (retry backoff). An in-flight HTTP
-    read cannot be interrupted this way; see SPEC.md section 5.
-    """
-
-
-def _is_unrecoverable_quota_error(status_code: int, err_body: str) -> bool:
-    """Returns True if the error indicates a prolonged or unrecoverable daily quota or credit limit."""
-    if status_code == 402:
-        return True
-    body_clean = re.sub(r"[\s_\-]+", "", err_body.lower())
-    unrecoverable_tokens = (
-        "perday",
-        "dailylimit",
-        "dailyrequestlimit",
-        "requestsperday",
-        "limitreachedfortoday",
-        "quotaexceededfortoday",
-        "exceededyourdaily",
-        "freetierlimitexceededfortoday",
-        "insufficientcredits",
-        "creditlimitreached",
-        "paymentrequired",
-        "insufficientquota",
-        "creditbalanceistoolow",
-        "outofcredits",
-        "insufficientbalance",
-        "exceededyourcurrentquota",
-        "currentquota",
-    )
-    return any(token in body_clean for token in unrecoverable_tokens)
-
-
-def extract_retry_delay(
-    err_body: str,
-    retry_header: str | None = None,
-    reset_header: str | None = None,
-) -> float | None:
-    """Extracts rate limit retry delay in seconds from HTTP headers or response body."""
-    # 1. Standard HTTP header (Retry-After in seconds)
-    if retry_header:
-        try:
-            val = float(retry_header)
-            if val >= 0:
-                return val
-        except ValueError:
-            pass
-
-    # 2. X-RateLimit-Reset header (epoch seconds or epoch milliseconds)
-    if reset_header:
-        try:
-            val = float(reset_header)
-            now = time.time()
-            reset_s = val / 1000.0 if val > 1e11 else val
-            diff = reset_s - now
-            if diff >= 0:
-                return diff
-        except ValueError:
-            pass
-
-    if not err_body:
-        return None
-
-    # 3. JSON structured error response (e.g. Google RPC RetryInfo, OpenRouter metadata headers)
-    try:
-        data = json.loads(err_body)
-        if isinstance(data, list) and data:
-            data = data[0]
-        if isinstance(data, dict):
-            err_dict = data.get("error", data) if isinstance(data, dict) else {}
-            # Check metadata headers if embedded in JSON response (e.g. OpenRouter root or error dict)
-            meta = (data.get("metadata") if isinstance(data, dict) else None) or (
-                err_dict.get("metadata") if isinstance(err_dict, dict) else None
-            )
-            if isinstance(meta, dict):
-                meta_hdrs = meta.get("headers", {})
-                if isinstance(meta_hdrs, dict):
-                    reset_val = meta_hdrs.get("X-RateLimit-Reset") or meta_hdrs.get("x-ratelimit-reset")
-                    if reset_val:
-                        try:
-                            val = float(reset_val)
-                            reset_s = val / 1000.0 if val > 1e11 else val
-                            diff = reset_s - time.time()
-                            if diff >= 0:
-                                return diff
-                        except ValueError:
-                            pass
-            if isinstance(err_dict, dict):
-                for detail in err_dict.get("details", []):
-                    if isinstance(detail, dict) and "RetryInfo" in str(detail.get("@type", "")):
-                        raw_delay = str(detail.get("retryDelay", "")).strip().rstrip("s")
-                        try:
-                            return float(raw_delay)
-                        except ValueError:
-                            pass
-                if "retry_after" in err_dict:
-                    try:
-                        return float(err_dict["retry_after"])
-                    except ValueError:
-                        pass
-    except Exception:
-        pass
-
-    # 4. Regex fallback in error message text
-    # Matches patterns like "Please retry in 55.116226147s.", "retry after 30s", or "Resets in 5 seconds."
-    match = re.search(
-        r"(?:retry|try|wait|reset)s?\s+(?:again\s+)?(?:in|after)\s+([0-9.]+)\s*s(?:ec(?:ond)?s?)?",
-        err_body,
-        re.IGNORECASE,
-    )
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            pass
-
-    return None
-
-
-def _format_delay(delay: float) -> str:
-    """Format a retry delay in seconds into a concise, human-friendly representation."""
-    if delay < 3600.0:
-        return f"{delay:.1f}s"
-    hours = delay / 3600.0
-    if hours >= 1_000_000.0:
-        return f"~{hours / 1_000_000.0:.1f}M hours"
-    if hours >= 1_000.0:
-        return f"~{hours / 1_000.0:.1f}k hours"
-    if hours >= 24.0:
-        return f"{hours / 24.0:.1f}d ({hours:.1f} hours)"
-    return f"{hours:.1f} hours"
-
-
-
-@runtime_checkable
-class ResettableModel(Model, Protocol):
-    """Protocol for models that can be reset between benchmark tasks or test runs."""
-
-    def reset(self) -> None: ...
-
-
-@runtime_checkable
-class CacheAwareModel(Model, Protocol):
-    """Protocol for models that support dynamic prompt cache TTL and telemetry."""
-
-    def set_cache_ttl(self, ttl: str | None) -> str | None: ...
-
-    def get_cache_stats(self) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class ReasoningAwareModel(Model, Protocol):
-    """Protocol for models that support dynamic reasoning effort level control."""
-
-    def set_reasoning_effort(self, effort: str | None) -> str | None: ...
-
-    def get_reasoning_effort(self) -> str | None: ...
-
-
-@runtime_checkable
-class DeadlineAwareModel(Model, Protocol):
-    """Protocol for models that support task execution deadlines to bound in-flight HTTP requests."""
-
-    def set_deadline(self, deadline: float | None) -> None: ...
-
-
-@runtime_checkable
-class CancellableModel(Model, Protocol):
-    """Protocol for models that can abandon a pending wait when the user cancels.
-
-    The probe is invoked from the model's own retry/backoff path, so it must be
-    cheap and must not block. ``None`` disables probing entirely, which is the
-    default outside interactive sessions.
-    """
-
-    def set_cancel_probe(self, probe: Callable[[], bool] | None) -> None: ...
-
-
-@runtime_checkable
-class RateLimitAwareModel(Model, Protocol):
-    """Protocol for models that track cumulative rate-limit throttling duration."""
-
-    total_rate_limit_wait_s: float
-
-
-@runtime_checkable
-class UsageReportingModel(Model, Protocol):
-    """Protocol for models that report normalized token counts and hit rates for generation steps."""
-
-    def get_last_step_usage(self) -> dict[str, Any]: ...
-
-
-@runtime_checkable
-class NamedModel(Model, Protocol):
-    """Protocol for models that expose their model name identifier."""
-
-    model: str
-
-
-@runtime_checkable
-class EndpointAwareModel(Model, Protocol):
-    """Protocol for models that expose their HTTP endpoint URL."""
-
-    endpoint: str
-
-
-@runtime_checkable
-class ProviderAwareModel(Model, Protocol):
-    """Protocol for models that expose their underlying provider name."""
-
-    provider: str
+MAX_RETRY_SLEEP_S: float = RetryPolicy.max_retry_sleep_s
+extract_retry_delay = ratelimit.extract_retry_delay
+is_unrecoverable_quota_error = ratelimit.is_unrecoverable_quota_error
+format_delay = ratelimit.format_delay
 
 
 # Cache TTL and reasoning effort normalization live in core/config.py so the
@@ -735,6 +547,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         cache_strategy: str | None = None,
         deadline: float | None = None,
         provider: str | None = None,
+        retry: RetryPolicy | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -756,6 +569,7 @@ class HttpChatModel(_CacheTelemetryMixin):
         self.extra_headers = {**default_headers, **(headers or {})}
         self.timeout = timeout
         self.deadline = deadline
+        self.retry = retry or RetryPolicy()
         self.total_rate_limit_wait_s: float = 0.0
         self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self.reasoning_format = (reasoning_format or default_reasoning_format).lower()
@@ -886,121 +700,142 @@ class HttpChatModel(_CacheTelemetryMixin):
         return payload
 
     def _send_request(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-        req = urllib.request.Request(
+        """Posts the payload, retrying transient failures under :attr:`retry`.
+
+        Each failure class gets its own handler; a handler either schedules the
+        next attempt (and returns) or raises a terminal error.
+        """
+        request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers=headers,
             method="POST",
         )
-        max_retries = 6
-        base_delay = 2.0
-        for attempt in range(max_retries):
+        for attempt in range(self.retry.max_attempts):
             # Honour a pending cancel before spending another request on it.
-            if self._cancelled():
-                raise ModelCancelledError("Cancelled by user before retry attempt.")
-
-            # Check deadline before attempting request
-            req_timeout = self.timeout
-            if self.deadline is not None:
-                remaining = self.deadline - time.time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"Task timeout reached before model request attempt {attempt + 1}"
-                    )
-                req_timeout = min(self.timeout, max(remaining, 0.1))
-
+            self._raise_if_cancelled("before retry attempt")
             try:
-                with urllib.request.urlopen(req, timeout=req_timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(request, timeout=self._request_timeout(attempt)) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
-                err_body = exc.read().decode("utf-8", errors="replace")
-                if exc.code in (429, 402):
-                    retry_header = exc.headers.get("Retry-After") if exc.headers else None
-                    reset_header = (
-                        (exc.headers.get("X-RateLimit-Reset") or exc.headers.get("x-ratelimit-reset"))
-                        if exc.headers
-                        else None
-                    )
-                    delay = extract_retry_delay(err_body, retry_header=retry_header, reset_header=reset_header)
-
-                    # 1. Daily Quota / Credit Exhaustion without a short recoverable reset hint
-                    if _is_unrecoverable_quota_error(exc.code, err_body):
-                        if delay is None or delay > MAX_RETRY_SLEEP_S:
-                            raise RateLimitError(
-                                f"Model API daily quota or credit limit exhausted (HTTP {exc.code}) from {self.endpoint}:\n{err_body}",
-                                retry_after=delay,
-                            ) from exc
-
-                    # 2. Prolonged Limit: Delay exceeds maximum wait threshold (120s)
-                    if delay is not None and delay > MAX_RETRY_SLEEP_S:
-                        raise RateLimitError(
-                            f"Model API rate limit retry delay ({_format_delay(delay)}) exceeds maximum allowed sleep "
-                            f"({MAX_RETRY_SLEEP_S:.0f}s). Daily quota or prolonged limit reached from {self.endpoint}:\n{err_body}",
-                            retry_after=delay,
-                        ) from exc
-
-                    # 3. Transient Rate Limit: Use extracted delay, or fall back to exponential backoff
-                    if delay is not None and delay >= 0:
-                        if not retry_header and not reset_header:
-                            delay = delay + 1.0
-                    else:
-                        delay = min(base_delay * (2**attempt), 60.0)
-
-                    self.total_rate_limit_wait_s += delay
-                    if self.deadline is not None:
-                        self.deadline += delay
-
-                    if attempt < max_retries - 1:
-                        print(
-                            f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
-                        )
-                        self._wait_or_cancel(delay)
-                        continue
-                    raise RateLimitError(
-                        f"Model API rate limit (HTTP {exc.code}) exceeded after {max_retries} retries from {self.endpoint}:\n{err_body}",
-                        retry_after=delay,
-                    ) from exc
-
-                if exc.code in (500, 502, 503, 504) and attempt < max_retries - 1:
-                    sleep_s = min(base_delay * (2**attempt), 60.0)
-                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
-                        raise TimeoutError(
-                            f"Task timeout reached while waiting to retry HTTP {exc.code}"
-                        ) from exc
-                    self._wait_or_cancel(sleep_s)
-                    continue
-                raise RuntimeError(
-                    f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
-                ) from exc
-            except TimeoutError as exc:
-                if self.deadline is not None and time.time() >= self.deadline:
-                    raise TimeoutError("Task timeout reached during model request") from exc
-                if attempt < max_retries - 1:
-                    sleep_s = min(base_delay * (2**attempt), 60.0)
-                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
-                        raise TimeoutError(
-                            "Task timeout reached while waiting to retry timed-out request"
-                        ) from exc
-                    self._wait_or_cancel(sleep_s)
-                    continue
-                raise
+                self._handle_http_error(exc, attempt)
+            except TimeoutError:
+                self._handle_timeout(attempt)
             except urllib.error.URLError as exc:
-                if isinstance(exc.reason, TimeoutError) or str(exc.reason).lower().startswith("timed out"):
-                    if self.deadline is not None and time.time() >= self.deadline:
-                        raise TimeoutError("Task timeout reached during model request") from exc
-                if attempt < max_retries - 1:
-                    sleep_s = min(base_delay * (2**attempt), 60.0)
-                    if self.deadline is not None and (time.time() + sleep_s) >= self.deadline:
-                        raise TimeoutError(
-                            f"Task timeout reached while waiting to retry connection error: {exc.reason}"
-                        ) from exc
-                    self._wait_or_cancel(sleep_s)
-                    continue
-                raise ConnectionError(
-                    f"Could not connect to model endpoint at {self.endpoint}.\n"
-                    f"Is the server running and reachable? (Detail: {exc.reason})"
-                ) from exc
-        return {}
+                self._handle_url_error(exc, attempt)
+        raise RuntimeError(f"Model request to {self.endpoint} exhausted all attempts.")
+
+    def _request_timeout(self, attempt: int) -> float:
+        """Bounds the socket timeout by whatever is left of the task deadline."""
+        if self.deadline is None:
+            return self.timeout
+        remaining = self.deadline - time.time()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Task timeout reached before model request attempt {attempt + 1}"
+            )
+        return min(self.timeout, max(remaining, 0.1))
+
+    def _handle_http_error(self, exc: urllib.error.HTTPError, attempt: int) -> None:
+        """Routes an HTTP error: quota/rate limit first, then transient server errors."""
+        body = exc.read().decode("utf-8", errors="replace")
+        if exc.code in ratelimit.RATE_LIMIT_STATUS_CODES:
+            self._retry_rate_limited(exc, body, attempt)
+            return
+        if exc.code in ratelimit.TRANSIENT_STATUS_CODES and self.retry.can_retry(attempt):
+            self._sleep_before_retry(self.retry.backoff(attempt), f" HTTP {exc.code}")
+            return
+        raise RuntimeError(
+            f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{body}"
+        ) from exc
+
+    def _retry_rate_limited(self, exc: urllib.error.HTTPError, body: str, attempt: int) -> None:
+        """Waits out a 429/402, failing fast when the limit is not worth retrying."""
+        headers = exc.headers
+        hints = RateLimitHints(
+            body=body,
+            retry_after=headers.get("Retry-After") if headers else None,
+            reset=(
+                (headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset"))
+                if headers
+                else None
+            ),
+        )
+        delay = ratelimit.extract_retry_delay(hints.body, hints.retry_after, hints.reset)
+        self._raise_if_rate_limit_is_terminal(exc.code, body, delay)
+
+        delay = ratelimit.resolve_rate_limit_delay(hints, attempt, self.retry)
+        # Time spent honouring a server-requested pause is not charged to the task budget.
+        self.total_rate_limit_wait_s += delay
+        if self.deadline is not None:
+            self.deadline += delay
+
+        if not self.retry.can_retry(attempt):
+            raise RateLimitError(
+                f"Model API rate limit (HTTP {exc.code}) exceeded after "
+                f"{self.retry.max_attempts} retries from {self.endpoint}:\n{body}",
+                retry_after=delay,
+            ) from exc
+        print(
+            f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry "
+            f"({attempt + 1}/{self.retry.max_attempts})..."
+        )
+        self._wait_or_cancel(delay)
+
+    def _raise_if_rate_limit_is_terminal(self, code: int, body: str, delay: float | None) -> None:
+        """Converts an unrecoverable or absurdly long rate limit into a hard failure.
+
+        A quota error that still carries a short, trusted reset hint is retried,
+        so a mid-day limit that clears soon does not end the run.
+        """
+        within_budget = delay is not None and delay <= self.retry.max_retry_sleep_s
+        if ratelimit.is_unrecoverable_quota_error(code, body) and not within_budget:
+            raise RateLimitError(
+                f"Model API daily quota or credit limit exhausted (HTTP {code}) "
+                f"from {self.endpoint}:\n{body}",
+                retry_after=delay,
+            )
+        if delay is not None and delay > self.retry.max_retry_sleep_s:
+            raise RateLimitError(
+                f"Model API rate limit retry delay ({ratelimit.format_delay(delay)}) exceeds "
+                f"maximum allowed sleep ({self.retry.max_retry_sleep_s:.0f}s). Daily quota or "
+                f"prolonged limit reached from {self.endpoint}:\n{body}",
+                retry_after=delay,
+            )
+
+    def _handle_timeout(self, attempt: int) -> None:
+        """Retries a timed-out request unless the task deadline has already passed."""
+        if self.deadline is not None and time.time() >= self.deadline:
+            raise TimeoutError("Task timeout reached during model request")
+        if not self.retry.can_retry(attempt):
+            raise TimeoutError("Model request timed out")
+        self._sleep_before_retry(self.retry.backoff(attempt), " timed-out request")
+
+    def _handle_url_error(self, exc: urllib.error.URLError, attempt: int) -> None:
+        """Retries connection failures, surfacing a friendlier error once attempts run out."""
+        reason = exc.reason
+        timed_out = isinstance(reason, TimeoutError) or str(reason).lower().startswith("timed out")
+        if timed_out and self.deadline is not None and time.time() >= self.deadline:
+            raise TimeoutError("Task timeout reached during model request") from exc
+        if self.retry.can_retry(attempt):
+            self._sleep_before_retry(
+                self.retry.backoff(attempt), f" connection error: {reason}"
+            )
+            return
+        raise ConnectionError(
+            f"Could not connect to model endpoint at {self.endpoint}.\n"
+            f"Is the server running and reachable? (Detail: {reason})"
+        ) from exc
+
+    def _sleep_before_retry(self, seconds: float, label: str) -> None:
+        """Waits before the next attempt, refusing to wait past the task deadline."""
+        if self.deadline is not None and (time.time() + seconds) >= self.deadline:
+            raise TimeoutError(f"Task timeout reached while waiting to retry{label}")
+        self._wait_or_cancel(seconds)
+
+    def _raise_if_cancelled(self, context: str) -> None:
+        if self._cancelled():
+            raise ModelCancelledError(f"Cancelled by user {context}.")
 
     def _parse_tool_calls(self, raw_tool_calls: list[dict[str, Any]] | None) -> list[ToolCall]:
         if not raw_tool_calls:

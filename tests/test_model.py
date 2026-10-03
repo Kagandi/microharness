@@ -9,8 +9,6 @@ from core.model import (
     MockModel,
     RateLimitError,
     ReasoningAwareModel,
-    _format_delay,
-    _is_unrecoverable_quota_error,
     build_model_from_spec,
     extract_retry_delay,
     find_provider_by_endpoint,
@@ -23,6 +21,7 @@ from core.model import (
     seed_user_providers,
     strip_json_comments,
 )
+from core.ratelimit import format_delay, is_unrecoverable_quota_error
 from core.types import Message, ToolCall
 
 
@@ -899,14 +898,14 @@ class TestModel(unittest.TestCase):
         self.assertIsNone(extract_retry_delay("Generic rate limit without retry time"))
         self.assertIsNone(extract_retry_delay("{}", retry_header="not-a-number"))
 
-    def test_is_unrecoverable_quota_error(self):
+    def testis_unrecoverable_quota_error(self):
         """Invariant: detects unrecoverable daily quota or payment errors."""
-        self.assertTrue(_is_unrecoverable_quota_error(402, "Payment required"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "Free tier limit exceeded for today"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "Daily request limit reached"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "User has insufficient credits"))
+        self.assertTrue(is_unrecoverable_quota_error(402, "Payment required"))
+        self.assertTrue(is_unrecoverable_quota_error(429, "Free tier limit exceeded for today"))
+        self.assertTrue(is_unrecoverable_quota_error(429, "Daily request limit reached"))
+        self.assertTrue(is_unrecoverable_quota_error(429, "User has insufficient credits"))
         # Negative case: transient rate limit without daily keywords
-        self.assertFalse(_is_unrecoverable_quota_error(429, "Too many requests per minute. Retry in 10s"))
+        self.assertFalse(is_unrecoverable_quota_error(429, "Too many requests per minute. Retry in 10s"))
 
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
@@ -1272,16 +1271,16 @@ class TestModel(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             model._send_request({"prompt": "hi"}, {})
 
-    def test_format_delay(self):
-        """Invariant: _format_delay formats small and unbounded/bogus delays into human-readable strings."""
-        self.assertEqual(_format_delay(5.0), "5.0s")
-        self.assertEqual(_format_delay(120.0), "120.0s")
-        self.assertEqual(_format_delay(3599.0), "3599.0s")
-        self.assertEqual(_format_delay(3600.0), "1.0 hours")
-        self.assertEqual(_format_delay(7200.0), "2.0 hours")
-        self.assertEqual(_format_delay(86400.0), "1.0d (24.0 hours)")
-        self.assertEqual(_format_delay(3600000.0), "~1.0k hours")
-        self.assertEqual(_format_delay(9820956445.2), "~2.7M hours")
+    def testformat_delay(self):
+        """Invariant: format_delay formats small and unbounded/bogus delays into human-readable strings."""
+        self.assertEqual(format_delay(5.0), "5.0s")
+        self.assertEqual(format_delay(120.0), "120.0s")
+        self.assertEqual(format_delay(3599.0), "3599.0s")
+        self.assertEqual(format_delay(3600.0), "1.0 hours")
+        self.assertEqual(format_delay(7200.0), "2.0 hours")
+        self.assertEqual(format_delay(86400.0), "1.0d (24.0 hours)")
+        self.assertEqual(format_delay(3600000.0), "~1.0k hours")
+        self.assertEqual(format_delay(9820956445.2), "~2.7M hours")
 
     @patch("urllib.request.urlopen")
     def test_send_request_clamps_socket_timeout_to_remaining_deadline(self, mock_urlopen):
