@@ -155,13 +155,18 @@ class TestTUI(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            mock_model = MockModel(script=[("Hello from agent", [])])
+            ws_dir = tmp_path / "workspace"
+            skill_dir = ws_dir / ".microharness" / "skills" / "deploy-tool"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("# Deploy Instructions\nRun deployment.\n", encoding="utf-8")
+
+            mock_model = MockModel(script=[("Deploy in progress", []), ("Hello from agent", [])])
             harness = Harness(
                 model=mock_model,
-                workspace_dir=tmp_path / "workspace",
+                workspace_dir=ws_dir,
                 global_dir=tmp_path / "global",
                 runs_dir=tmp_path / "runs",
-                sandbox=True,
+                sandbox=False,
             )
 
             captured_state = []
@@ -170,6 +175,8 @@ class TestTUI(unittest.TestCase):
                 captured_state.append(tui_instance.state)
                 on_user_submit("/status")
                 on_user_submit("/help")
+                on_user_submit("/skill")
+                on_user_submit("/skill deploy-tool please deploy")
                 on_user_submit("Hi agent")
 
             with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True):
@@ -182,13 +189,17 @@ class TestTUI(unittest.TestCase):
             # Verify captured state lines
             self.assertEqual(len(captured_state), 1)
             lines = captured_state[0].lines
-            # Confirm presence of system /status output, /help output, user input, and agent response
+            # Confirm presence of system /status output, /help output, /skill list, /skill activation, user input, and agent response
             has_status = any("Context Tokens:" in line.text for line in lines)
             has_help = any("Available commands:" in line.text for line in lines)
+            has_skill_list = any("deploy-tool" in line.text for line in lines)
+            has_skill_activation = any("Activated skill: deploy-tool" in line.text for line in lines)
             has_user = any("> Hi agent" in line.text for line in lines)
             has_agent = any("Hello from agent" in line.text for line in lines)
             self.assertTrue(has_status)
             self.assertTrue(has_help)
+            self.assertTrue(has_skill_list)
+            self.assertTrue(has_skill_activation)
             self.assertTrue(has_user)
             self.assertTrue(has_agent)
 
@@ -281,8 +292,8 @@ class TestTUI(unittest.TestCase):
         # Input "/" -> all built-in commands
         state.input_buffer = "/"
         matches = state.get_matching_commands()
-        self.assertEqual(len(matches), 5)
-        self.assertEqual([m[0] for m in matches], ["/compact", "/status", "/new", "/help", "/exit"])
+        self.assertEqual(len(matches), 6)
+        self.assertEqual([m[0] for m in matches], ["/compact", "/status", "/new", "/skill", "/help", "/exit"])
 
         # Input "/c" -> matches /compact
         state.input_buffer = "/c"
@@ -361,7 +372,7 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(state.input_buffer, "/compact")
 
         # 2. Single-match Tab autocompletion (int 9)
-        state.input_buffer = "/s"
+        state.input_buffer = "/st"
         state.selected_command_idx = 0
         ret = tui.handle_key(9, dummy_submit)
         self.assertTrue(ret)
@@ -381,18 +392,18 @@ class TestTUI(unittest.TestCase):
         tui.handle_key(353, dummy_submit)  # Shift-Tab integer
         self.assertEqual(state.selected_command_idx, 0)
         tui.handle_key("\x1b[Z", dummy_submit)  # Shift-Tab ANSI escape sequence
-        self.assertEqual(state.selected_command_idx, 4)
+        self.assertEqual(state.selected_command_idx, 5)
         tui.handle_key(curses.KEY_UP, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 3)
+        self.assertEqual(state.selected_command_idx, 4)
 
         # 5. Down arrow cycling forward
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 4)
+        self.assertEqual(state.selected_command_idx, 5)
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
         self.assertEqual(state.selected_command_idx, 0)
 
         # 6. Right Arrow autocompletion into input buffer
-        state.selected_command_idx = 3  # /help
+        state.selected_command_idx = 4  # /help
         tui.handle_key(curses.KEY_RIGHT, dummy_submit)
         self.assertEqual(state.input_buffer, "/help")
 
@@ -416,6 +427,52 @@ class TestTUI(unittest.TestCase):
         state.input_buffer = "/exit"
         ret = tui.handle_key("\n", dummy_submit)
         self.assertFalse(ret)
+
+    def test_skill_subcommand_autocomplete_and_draw(self):
+        """Invariant: /skill matches available skills under /skill <name> with navigation and drawing."""
+        state = TUIState()
+        skills = {
+            "deploy-tool": ("Deploy app to production", "skills/deploy/SKILL.md", "project", "deploy instructions"),
+            "my-linter": ("Lint code with ruff", "skills/lint/SKILL.md", "global", "lint instructions"),
+        }
+        state.set_skills(skills)
+
+        # 1. Matching /sk matches /skill command
+        state.input_buffer = "/sk"
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0], "/skill")
+
+        # 2. Matching /skill  with space matches all skills
+        state.input_buffer = "/skill "
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 2)
+        self.assertEqual([cmd for cmd, _ in m], ["/skill deploy-tool", "/skill my-linter"])
+        self.assertEqual(m[0][1], "[project] Deploy app to production")
+        self.assertEqual(m[1][1], "[global] Lint code with ruff")
+
+        # 3. Matching with partial skill name
+        state.input_buffer = "/skill my"
+        m = state.get_matching_commands()
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0][0], "/skill my-linter")
+
+        # 4. Tab autocompletion of single matching skill
+        completed = state.complete_selected_command()
+        self.assertEqual(completed, "/skill my-linter")
+        self.assertEqual(state.input_buffer, "/skill my-linter")
+
+        # 5. Curses drawing renders 'Available Skills' header
+        state.input_buffer = "/skill "
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        skill_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Available Skills" in str(c)]
+        self.assertGreaterEqual(len(skill_border_calls), 1)
+        skill_item_calls = [c for c in mock_stdscr.addstr.call_args_list if "/skill deploy-tool" in str(c)]
+        self.assertGreaterEqual(len(skill_item_calls), 1)
 
 
 if __name__ == "__main__":

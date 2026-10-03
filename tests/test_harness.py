@@ -1739,6 +1739,110 @@ def get_tools(env=None):
             registry = harness._init_tools(env)
             self.assertIn("greet_user", registry._tools)
 
+    def test_skill_command_discovery_and_activation(self):
+        """Invariant: /skill discovers available skills, lists them, and activates them into conversation context."""
+        from core.harness import _discover_skills, _resolve_skill_command
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            ws_dir = tmp_path / "workspace"
+            ws_dir.mkdir()
+            g_dir = tmp_path / "global"
+            g_dir.mkdir()
+
+            # 1. Setup project skill
+            p_skill = ws_dir / ".microharness" / "skills" / "deploy-tool"
+            p_skill.mkdir(parents=True)
+            (p_skill / "SKILL.md").write_text(
+                "---\nname: deploy-tool\ndescription: Deploy app to production\n---\n# Deploy Tool\nStep 1: test\nStep 2: deploy\n",
+                encoding="utf-8",
+            )
+
+            # 2. Setup global skill (and shadowed skill)
+            g_skill1 = g_dir / "skills" / "my-linter"
+            g_skill1.mkdir(parents=True)
+            (g_skill1 / "SKILL.md").write_text(
+                "# Linter\nRun ruff and strict type checking.\n",
+                encoding="utf-8",
+            )
+
+            g_skill2 = g_dir / "skills" / "deploy-tool"
+            g_skill2.mkdir(parents=True)
+            (g_skill2 / "SKILL.md").write_text("# Global Deploy\nGlobal instructions.\n", encoding="utf-8")
+
+            # 3. Discovery with shadowing
+            discovered = _discover_skills(ws_dir, g_dir)
+            self.assertEqual(len(discovered), 2)
+            self.assertIn("deploy-tool", discovered)
+            self.assertIn("my-linter", discovered)
+
+            # Invariant: Project skill shadows global skill
+            summary, path_str, scope, content = discovered["deploy-tool"]
+            self.assertEqual(scope, "project")
+            self.assertEqual(summary, "Deploy app to production")
+            self.assertIn("Step 2: deploy", content)
+
+            # Invariant: Global skill is properly recognized
+            l_summary, l_path, l_scope, l_content = discovered["my-linter"]
+            self.assertEqual(l_scope, "global")
+            self.assertEqual(l_summary, "Linter")
+            self.assertIn("Run ruff", l_content)
+
+            # 4. _resolve_skill_command: listing mode
+            act, msg, is_err, prompt = _resolve_skill_command("/skill", discovered)
+            self.assertEqual(act, "skip")
+            self.assertFalse(is_err)
+            self.assertIsNone(prompt)
+            self.assertIn("deploy-tool", msg)
+            self.assertIn("my-linter", msg)
+            self.assertIn("[project]", msg)
+            self.assertIn("[global]", msg)
+
+            # 5. _resolve_skill_command: activation by name without instruction
+            act, msg, is_err, prompt = _resolve_skill_command("/skill deploy-tool", discovered)
+            self.assertEqual(act, "turn")
+            self.assertFalse(is_err)
+            self.assertIn("Activated skill: deploy-tool [project]", msg)
+            self.assertIn("[Active Skill: deploy-tool]", prompt)
+            self.assertIn("Step 2: deploy", prompt)
+            self.assertIn("Please follow the instructions from the 'deploy-tool' skill above.", prompt)
+
+            # 6. _resolve_skill_command: activation with task instruction
+            act, msg, is_err, prompt = _resolve_skill_command("/skill deploy-tool deploy to staging", discovered)
+            self.assertEqual(act, "turn")
+            self.assertIn("Task:\ndeploy to staging", prompt)
+
+            # 7. _resolve_skill_command: activation by number
+            sorted_keys = sorted(discovered.keys())
+            first_skill = sorted_keys[0]
+            act, msg, is_err, prompt = _resolve_skill_command("/skill 1 run task", discovered)
+            self.assertEqual(act, "turn")
+            self.assertIn(f"[Active Skill: {first_skill}]", prompt)
+
+            # 8. _resolve_skill_command: error cases
+            act, msg, is_err, prompt = _resolve_skill_command("/skill nonexistent", discovered)
+            self.assertEqual(act, "skip")
+            self.assertTrue(is_err)
+            self.assertIn("Skill 'nonexistent' not found", msg)
+
+            act, msg, is_err, prompt = _resolve_skill_command("/skill 99", discovered)
+            self.assertEqual(act, "skip")
+            self.assertTrue(is_err)
+            self.assertIn("Invalid skill number 99", msg)
+
+            # 9. _dispatch_interactive_input flow
+            harness = Harness(model=MockModel([("Done", [])]), verbose=False)
+            memory = Memory(system_prompt="sys", user_prompt="")
+
+            act = harness._dispatch_interactive_input("/skill", memory, custom_commands={}, skills=discovered)
+            self.assertEqual(act, "skip")
+            self.assertEqual(len(memory.messages), 1)
+
+            act = harness._dispatch_interactive_input("/skill deploy-tool", memory, custom_commands={}, skills=discovered)
+            self.assertEqual(act, "turn")
+            self.assertEqual(len(memory.messages), 2)
+            self.assertIn("[Active Skill: deploy-tool]", memory.messages[-1].content)
+
 
 if __name__ == "__main__":
     unittest.main()

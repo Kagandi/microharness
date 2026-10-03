@@ -151,8 +151,14 @@ def _extract_skill_summary(content: str, default: str) -> str:
     return first_line.lstrip("#").strip() or default
 
 
-def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
-    """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
+def _discover_skills(
+    workspace: Path, global_dir: Path | None = None
+) -> dict[str, tuple[str, str, str, str]]:
+    """Discovers available skills from global and project skills directories.
+
+    Returns dict mapping: skill_name -> (summary, path_str, scope, content)
+    where scope is 'global' or 'project'. Project skills cleanly shadow global ones.
+    """
     ws = Path(workspace).resolve() if workspace else None
 
     def _skill_loader(entry: Path, scope: str):
@@ -168,7 +174,7 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
             path_str = str(resolved_doc.relative_to(ws))
         else:
             path_str = str(skill_doc)
-        return entry.stem, (summary, path_str, scope)
+        return entry.stem, (summary, path_str, scope, content)
 
     discovered = discover_resources(
         resource_name="skills",
@@ -176,13 +182,18 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
         workspace_dir=workspace,
         global_dir=global_dir,
     )
+    return {res.id: res.item for res in discovered.values()}
+
+
+def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> str:
+    """Discovers available skills via progressive disclosure (Global and Project, with shadowing)."""
+    discovered = _discover_skills(workspace, global_dir)
     if not discovered:
         return ""
 
-    has_global = any(res.scope == "global" for res in discovered.values())
+    has_global = any(scope == "global" for _, _, scope, _ in discovered.values())
     lines: list[str] = []
-    for name, res in sorted(discovered.items()):
-        summary, path_str, scope = res.item
+    for name, (summary, path_str, scope, _) in sorted(discovered.items()):
         badge = f"[{scope}] " if has_global else ""
         lines.append(f"- {badge}{name}: {summary} (read `{path_str}` for full instructions)")
 
@@ -191,6 +202,79 @@ def _discover_skills_index(workspace: Path, global_dir: Path | None = None) -> s
         + "\n".join(lines)
         + "\nTip: Use the `read_file` tool to inspect a skill's full instructions only when needed.\n"
         + "------------------------------------------------"
+    )
+
+
+def _resolve_skill_command(
+    user_input: str,
+    skills: dict[str, tuple[str, str, str, str]],
+) -> tuple[str, str, bool, str | None]:
+    """Parses and resolves a /skill user command.
+
+    Returns:
+        (action, message, is_error, effective_prompt)
+        where action is 'skip' (for info/listing/error) or 'turn' (to run model turn),
+        is_error indicates if a user error occurred (e.g. unknown skill),
+        and effective_prompt is the prompt to inject into memory if action == 'turn'.
+    """
+    parts = user_input.strip().split(maxsplit=2)
+    if len(parts) == 1:
+        # Listing mode: /skill or /skills
+        if not skills:
+            return (
+                "skip",
+                "ℹ️ No skills found in workspace or global directory. Place skills in .microharness/skills/<name>/SKILL.md or ~/.microharness/skills/<name>/SKILL.md.",
+                False,
+                None,
+            )
+        lines = ["Available Skills:"]
+        for i, (name, (summary, _, scope, _)) in enumerate(sorted(skills.items()), start=1):
+            lines.append(f"  {i}. {name:<14} [{scope}] - {summary}")
+        lines.append("\nTo activate a skill into the conversation, type /skill <name|number> [optional instruction]")
+        lines.append(f"Example: /skill {sorted(skills.keys())[0]}")
+        return ("skip", "\n".join(lines), False, None)
+
+    target = parts[1].strip()
+    instruction = parts[2].strip() if len(parts) > 2 else ""
+
+    skill_name = None
+    sorted_skills = sorted(skills.keys())
+    if target.isdigit():
+        idx = int(target) - 1
+        if 0 <= idx < len(sorted_skills):
+            skill_name = sorted_skills[idx]
+        else:
+            return (
+                "skip",
+                f"Invalid skill number {target}. Type /skill to view available skills.",
+                True,
+                None,
+            )
+    else:
+        for k in sorted_skills:
+            if k.lower() == target.lower():
+                skill_name = k
+                break
+
+    if not skill_name:
+        return (
+            "skip",
+            f"Skill '{target}' not found. Type /skill to view available skills.",
+            True,
+            None,
+        )
+
+    summary, path_str, scope, content = skills[skill_name]
+    if instruction:
+        effective_prompt = f"[Active Skill: {skill_name}]\n{content}\n\nTask:\n{instruction}"
+    else:
+        effective_prompt = f"[Active Skill: {skill_name}]\n{content}\n\nPlease follow the instructions from the '{skill_name}' skill above."
+
+    return (
+        "turn",
+        f"Activated skill: {skill_name} [{scope}]",
+        False,
+        effective_prompt,
     )
 
 
@@ -715,18 +799,27 @@ class Harness:
                 self.model.set_deadline(None)
             env.teardown()
 
-    def _print_interactive_help(self, custom_commands: dict[str, tuple[str, str, str]]) -> None:
+    def _print_interactive_help(
+        self,
+        custom_commands: dict[str, tuple[str, str, str]],
+        skills: dict[str, tuple[str, str, str, str]] | None = None,
+    ) -> None:
         print("\nAvailable commands:")
         print("  /reasoning [low|med|high|off] - View or switch reasoning / thinking effort")
         print("  /cache [5m|1h|off]            - View or switch prompt caching duration on the fly")
         print("  /status                       - Show context window size, message breakdown, and budget")
         print("  /compact                      - Manually collapse older observations to free context")
         print("  /new                          - Clear conversation history while keeping workspace files")
+        print("  /skill [name]                 - Show available skills or activate one into conversation")
         print("  /exit                         - Save session trace and exit")
         if custom_commands:
             print("\nCustom slash commands (from commands/):")
             for c_name, (c_desc, _, c_scope) in sorted(custom_commands.items()):
                 print(f"  /{c_name:<10} - [{c_scope}] {c_desc}")
+        if skills:
+            print("\nAvailable skills (from skills/):")
+            for s_name, (s_desc, _, s_scope, _) in sorted(skills.items()):
+                print(f"  {s_name:<11} - [{s_scope}] {s_desc}")
         print()
 
     def _print_context_status(self, memory: Memory) -> None:
@@ -815,6 +908,7 @@ class Harness:
         user_input: str,
         memory: Memory,
         custom_commands: dict[str, tuple[str, str, str]],
+        skills: dict[str, tuple[str, str, str, str]] | None = None,
     ) -> str:
         """Processes an interactive user input line.
 
@@ -829,7 +923,7 @@ class Harness:
             return "exit"
 
         if cmd in ("/help", "help"):
-            self._print_interactive_help(custom_commands)
+            self._print_interactive_help(custom_commands, skills)
             return "skip"
 
         if cmd in ("/status", "/context", "status", "context"):
@@ -864,6 +958,22 @@ class Harness:
             print("\n✨ Started a fresh conversation context (workspace files preserved).\n")
             return "skip"
 
+        if (
+            cmd in ("/skill", "/skills", "skill", "skills")
+            or cmd.startswith(("/skill ", "/skills ", "skill ", "skills "))
+        ):
+            action, msg, is_error, eff_prompt = _resolve_skill_command(user_input, skills or {})
+            if is_error:
+                print(f"\n❌ {msg}\n")
+                return "skip"
+            if action == "skip":
+                print(f"\n{msg}\n")
+                return "skip"
+            print(f"\n⚡ {msg} ...\n")
+            if eff_prompt:
+                memory.add_user(eff_prompt)
+            return "turn"
+
         if user_input.startswith("/"):
             cmd_part, _, args_part = user_input[1:].partition(" ")
             cmd_key = cmd_part.lower().strip()
@@ -893,6 +1003,7 @@ class Harness:
         )
 
         custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+        skills = _discover_skills(env.workspace_dir, self.global_dir)
         tracer.compact = True
 
         print("\n🚀 Interactive Session Started")
@@ -904,7 +1015,7 @@ class Harness:
         reasoning_label = self.get_reasoning_effort()
         print(f"🧠 Reasoning Effort: {reasoning_label.upper() if reasoning_label else 'OFF'}")
         print(
-            "💡 Commands: /reasoning [low|med|high|off] | /cache [5m|1h|off] | /compact | /status | /new | /help | /exit\n"
+            "💡 Commands: /reasoning [low|med|high|off] | /cache [5m|1h|off] | /compact | /status | /new | /skill | /help | /exit\n"
         )
 
         step_idx = 1
@@ -913,7 +1024,7 @@ class Harness:
 
         if initial_instruction and initial_instruction.strip():
             action = self._dispatch_interactive_input(
-                initial_instruction.strip(), memory, custom_commands
+                initial_instruction.strip(), memory, custom_commands, skills
             )
             if action == "turn":
                 has_pending_turn = True
@@ -955,7 +1066,7 @@ class Harness:
                 if not user_input:
                     continue
 
-                action = self._dispatch_interactive_input(user_input, memory, custom_commands)
+                action = self._dispatch_interactive_input(user_input, memory, custom_commands, skills)
                 if action == "exit":
                     break
                 elif action == "turn":
@@ -994,6 +1105,7 @@ class Harness:
         tracer.compact = True
 
         custom_commands = _discover_commands(env.workspace_dir, self.global_dir)
+        skills = _discover_skills(env.workspace_dir, self.global_dir)
 
         state = TUIState(title="microharness")
         state.provider_name = getattr(self.model, "provider", "") or ""
@@ -1004,6 +1116,7 @@ class Harness:
         state.cwd = compact_path(str(env.workspace_dir))
         state.git_branch = get_git_branch(env.workspace_dir)
         state.set_custom_commands(custom_commands)
+        state.set_skills(skills)
         state.update_status(memory.stats(), self.get_cache_stats())
 
         step_idx = 1
@@ -1015,9 +1128,11 @@ class Harness:
 
             cmd = user_text.lower().strip()
             if cmd in ("/help", "help"):
-                state.add_system("Available commands: /help, /status, /compact, /new, /exit")
+                state.add_system("Available commands: /help, /status, /compact, /new, /skill, /exit")
                 if custom_commands:
                     state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
+                if skills:
+                    state.add_system("Available skills: " + ", ".join(s for s in sorted(skills.keys())))
                 return
 
             if cmd in ("/status", "status"):
@@ -1047,7 +1162,20 @@ class Harness:
                 state.update_status(memory.stats(), self.get_cache_stats())
                 return
 
-            if user_text.startswith("/"):
+            if (
+                cmd in ("/skill", "/skills", "skill", "skills")
+                or cmd.startswith(("/skill ", "/skills ", "skill ", "skills "))
+            ):
+                action, msg, is_error, eff_prompt = _resolve_skill_command(user_text, skills)
+                if is_error:
+                    state.add_error(msg)
+                    return
+                if action == "skip":
+                    state.add_system(msg)
+                    return
+                state.add_system(f"⚡ {msg}")
+                effective_prompt = eff_prompt or user_text
+            elif user_text.startswith("/"):
                 cmd_part, _, args_part = user_text[1:].partition(" ")
                 cmd_key = cmd_part.lower().strip()
                 if cmd_key in custom_commands:

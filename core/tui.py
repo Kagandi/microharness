@@ -12,6 +12,7 @@ DEFAULT_COMMANDS: list[tuple[str, str]] = [
     ("/compact", "Free context tokens by compacting older turn observations"),
     ("/status", "Show current token usage, cache rate, and context breakdown"),
     ("/new", "Start fresh session while preserving workspace changes"),
+    ("/skill", "Show available skills or activate with /skill <name>"),
     ("/help", "List all available built-in and workspace custom commands"),
     ("/exit", "Exit the interactive agent session"),
 ]
@@ -281,6 +282,7 @@ class TUIState:
         self.cwd: str = ""
         self.git_branch: str = ""
         self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
+        self.skills: dict[str, Any] = {}
         self.selected_command_idx: int = 0
 
     def set_custom_commands(self, custom_commands: dict[str, Any]) -> None:
@@ -293,13 +295,39 @@ class TUIState:
                 desc = f"Custom command [{scope}]"
             self.command_catalog.append((f"/{cmd_name}", desc))
 
+    def set_skills(self, skills: dict[str, Any]) -> None:
+        """Loads discovered skills into the auto-completion catalog."""
+        self.skills = dict(skills)
+
     def get_matching_commands(self) -> list[tuple[str, str]]:
         """Filters command catalog matching current slash-command prefix in input buffer."""
-        buf = self.input_buffer.strip().lower()
+        buf = self.input_buffer.lstrip().lower()
         if not buf.startswith("/"):
             return []
+
+        # If user is typing /skill <subcommand>, match against available skills
+        if buf.startswith(("/skill ", "/skills ")):
+            prefix = buf.split(" ", 1)[0]
+            sub = buf.split(" ", 1)[1].lstrip()
+            res: list[tuple[str, str]] = []
+            for s_name, s_info in sorted(self.skills.items()):
+                if s_name.lower().startswith(sub):
+                    summary = (
+                        s_info[0]
+                        if isinstance(s_info, (tuple, list)) and len(s_info) > 0
+                        else s_name
+                    )
+                    scope = (
+                        s_info[2]
+                        if isinstance(s_info, (tuple, list)) and len(s_info) > 2
+                        else "project"
+                    )
+                    res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
+            return res
+
         if " " in buf:
             return []
+
         return [
             (cmd, desc)
             for cmd, desc in self.command_catalog
@@ -582,7 +610,8 @@ class CursesTUI:
             start_y = max(1, sep_row - box_h)
             start_x = 0
 
-            title_part = " Available Commands "
+            is_skill_menu = self.state.input_buffer.lstrip().lower().startswith(("/skill ", "/skills "))
+            title_part = " Available Skills " if is_skill_menu else " Available Commands "
             dash_count = max(0, box_w - 2 - len(title_part) - 2)
             border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
             mid_sep = "├" + "─" * (box_w - 2) + "┤"
@@ -591,11 +620,12 @@ class CursesTUI:
 
             try:
                 stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
+                cmd_col_w = 22 if is_skill_menu else 12
                 for row_i, (cmd, desc) in enumerate(visible_matches):
                     y = start_y + 1 + row_i
                     is_selected = (row_i == rel_idx)
                     prefix = "  > " if is_selected else "    "
-                    line_content = f"{prefix}{cmd:<12} {desc}"
+                    line_content = f"{prefix}{cmd:<{cmd_col_w}} {desc}"
                     line_content = line_content[: box_w - 2].ljust(box_w - 2)
                     attr = (
                         (curses.color_pair(1) | curses.A_BOLD | curses.A_REVERSE)
