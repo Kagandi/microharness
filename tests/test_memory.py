@@ -128,6 +128,39 @@ class TestMemory(unittest.TestCase):
         # Verify middle output was collapsed
         self.assertIn("[Tool output collapsed", mem.messages[3].content)
 
+    def test_drop_incomplete_tool_turn_removes_dangling_tool_calls(self):
+        """Invariant: an interrupted tool turn is trimmed so the next request stays valid."""
+        mem = Memory(system_prompt="SYS", user_prompt="TASK")
+        mem.add_assistant("working", [ToolCall(id="c1", name="bash", arguments={"command": "ls"})])
+        self.assertEqual([m.role for m in mem.get_messages()], ["system", "user", "assistant"])
+
+        removed = mem.drop_incomplete_tool_turn()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            [m.role for m in mem.get_messages()],
+            ["system", "user"],
+            "the unmatched assistant tool_call must not survive an interruption",
+        )
+
+    def test_drop_incomplete_tool_turn_keeps_complete_turns(self):
+        """Invariant: a fully answered tool turn is never discarded."""
+        mem = Memory(system_prompt="SYS", user_prompt="TASK")
+        mem.add_assistant("working", [ToolCall(id="c1", name="bash", arguments={"command": "ls"})])
+        mem.add_tool_result(ToolResult(call_id="c1", output="files"))
+
+        self.assertEqual(mem.drop_incomplete_tool_turn(), 0)
+        self.assertEqual(
+            [m.role for m in mem.get_messages()], ["system", "user", "assistant", "tool"]
+        )
+
+    def test_drop_incomplete_tool_turn_noop_without_tool_calls(self):
+        """Invariant: a plain assistant reply (no tool calls) is left intact."""
+        mem = Memory(system_prompt="SYS", user_prompt="TASK")
+        mem.add_assistant("all done", [])
+        self.assertEqual(mem.drop_incomplete_tool_turn(), 0)
+        self.assertEqual(len(mem.get_messages()), 3)
+
     def test_reset_and_force_compact(self):
         mem = Memory(
             system_prompt="SYS_PROMPT",

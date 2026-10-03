@@ -1162,6 +1162,7 @@ class Harness:
             cmd = user_text.lower().strip()
             if cmd in ("/help", "help"):
                 state.add_system("Available commands: /help, /status, /compact, /new, /skill, /exit")
+                state.add_system("Press Esc on an empty prompt to exit; Esc clears text or dismisses menus.")
                 if custom_commands:
                     state.add_system("Custom commands: " + ", ".join(f"/{c}" for c in sorted(custom_commands.keys())))
                 if skills:
@@ -1242,6 +1243,16 @@ class Harness:
             while (step_idx - turn_start) < max_steps_per_turn:
                 try:
                     is_finished, step_trace = loop.step(step_index=step_idx)
+                except KeyboardInterrupt:
+                    dropped = memory.drop_incomplete_tool_turn()
+                    state.add_system(
+                        f"⚠️ Turn interrupted by user (Ctrl+C) at step {step_idx}. Session is still active."
+                        + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
+                    )
+                    state.update_status(memory.stats(), self.get_cache_stats())
+                    if tui.stdscr:
+                        tui.draw(tui.stdscr)
+                    break
                 except Exception as exc:
                     state.add_error(f"Step {step_idx} error: {exc}")
                     break
@@ -1280,11 +1291,11 @@ class Harness:
                 if is_finished:
                     break
 
-        if initial_instruction and initial_instruction.strip():
-            on_user_submit(initial_instruction.strip())
-
         try:
-            tui.run(on_user_submit=on_user_submit)
+            tui.run(
+                on_user_submit=on_user_submit,
+                initial_instruction=initial_instruction,
+            )
         finally:
             env.teardown()
             c_stats = self.get_cache_stats()

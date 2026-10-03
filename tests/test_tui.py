@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import unicodedata
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from core.tui import (
     CursesTUI,
@@ -9,7 +12,282 @@ from core.tui import (
     TUIState,
     decode_terminal_sequence,
     parse_inline_segments,
+    render_markdown_table,
 )
+
+
+def display_width(text: str) -> int:
+    """Terminal cells occupied by text; wide chars count 2, combining marks 0."""
+    return sum(
+        0
+        if unicodedata.combining(ch)
+        else (2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        for ch in text
+    )
+
+
+class TestMarkdownTable(unittest.TestCase):
+    def test_never_exceeds_max_width_across_widths_and_column_counts(self):
+        """Invariant: no rendered line is wider than max_width, for any width/column count.
+
+        Property-style rather than a fixed sample: the per-column width floor means an
+        n-column table can never render narrower than 6n+1 cells, so the renderer must
+        shed columns rather than let the box art overflow the pane.
+        """
+        longest_cell = "x" * 40
+        for num_cols in range(1, 6):
+            headers = [f"H{i}" for i in range(num_cols)]
+            rows = [[longest_cell] * num_cols]
+            for max_width in range(1, 90):
+                lines = render_markdown_table(headers, rows, max_width=max_width)
+                if not lines:
+                    continue
+                widest = max(display_width(line.text) for line in lines)
+                self.assertLessEqual(
+                    widest,
+                    max_width,
+                    f"{num_cols} cols at max_width={max_width} rendered {widest} cells",
+                )
+
+    def test_wide_characters_align_to_equal_display_width(self):
+        """Invariant: every line of a CJK table has identical display width."""
+        lines = render_markdown_table(
+            ["名前", "Qty"], [["田中太郎", "1"]], max_width=40
+        )
+        widths = {display_width(line.text) for line in lines}
+        self.assertEqual(len(widths), 1, f"ragged box, display widths were {widths}")
+
+    def test_wide_characters_preserved_when_not_truncated(self):
+        """Invariant: cells that fit keep their characters intact (no mojibake/clipping)."""
+        lines = render_markdown_table(["名前"], [["東京都"]], max_width=40)
+        body = [line.text for line in lines if "東京都" in line.text]
+        self.assertEqual(len(body), 1)
+        self.assertIn("東京都", body[0])
+
+    def test_ragged_rows_are_padded_to_header_count(self):
+        """Invariant: rows with too few cells render blanks for the missing ones."""
+        lines = render_markdown_table(["A", "B", "C"], [["1", "2"], ["3"]], max_width=40)
+        self.assertEqual(
+            [line.text for line in lines],
+            [
+                "┌─────┬─────┬─────┐",
+                "│ A   │ B   │ C   │",
+                "├─────┼─────┼─────┤",
+                "│ 1   │ 2   │     │",
+                "│ 3   │     │     │",
+                "└─────┴─────┴─────┘",
+            ],
+        )
+
+    def test_extra_cells_are_truncated_to_header_count(self):
+        """Invariant: rows with too many cells drop the surplus columns."""
+        lines = render_markdown_table(["A", "B"], [["1", "2", "3", "4"]], max_width=40)
+        self.assertEqual(
+            [line.text for line in lines],
+            [
+                "┌─────┬─────┐",
+                "│ A   │ B   │",
+                "├─────┼─────┤",
+                "│ 1   │ 2   │",
+                "└─────┴─────┘",
+            ],
+        )
+
+    def test_wide_characters_truncate_on_character_boundary(self):
+        """Invariant: truncating a wide-char cell never splits a character or overflows."""
+        # Column is forced narrow so the long CJK cell must be truncated.
+        lines = render_markdown_table(["H"], [["東京都渋谷区神南"]], max_width=12)
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertLessEqual(display_width(line.text), 12)
+        body = [line.text for line in lines if "…" in line.text]
+        self.assertTrue(body, "expected an elision marker on the truncated cell")
+        # The truncated cell must keep whole characters and an intact marker.
+        cell = body[0].strip("│").strip()
+        self.assertTrue(cell.endswith("…"), f"cell should end with an elision marker: {cell!r}")
+        for ch in cell[:-1]:
+            self.assertIn(ch, "東京都渋谷区神南", "truncation split a character")
+
+    def test_ascii_truncation_adds_elision_marker(self):
+        """Invariant: over-long ASCII cells are truncated with a visible marker."""
+        lines = render_markdown_table(["H"], [["abcdefghijklmnop"]], max_width=12)
+        body = [line.text for line in lines if "…" in line.text]
+        self.assertEqual(len(body), 1)
+        self.assertLessEqual(display_width(body[0]), 12)
+
+    def test_no_columns_returns_no_lines(self):
+        """Invariant: an empty header list renders nothing rather than a broken box."""
+        self.assertEqual(render_markdown_table([], [["a"]], max_width=40), [])
+
+
+class TestTUIInterrupt(unittest.TestCase):
+    def test_ctrl_c_during_turn_is_handled_without_crashing(self):
+        """Invariant: Ctrl+C mid-turn aborts the turn and keeps the session alive.
+
+        Regression guard: the TUI reimplements the step loop instead of reusing
+        _execute_steps, so it must handle KeyboardInterrupt itself. It is not an
+        Exception subclass and would otherwise escape through curses.wrapper,
+        leaving the terminal in an unknown state.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from core.harness import Harness
+        from core.model import MockModel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = Harness(
+                model=MockModel(script=[("thinking", [])]),
+                workspace_dir=tmp_path / "ws",
+                global_dir=tmp_path / "global",
+                runs_dir=tmp_path / "runs",
+                sandbox=False,
+                verbose=False,
+            )
+
+            steps = {"n": 0}
+
+            def boom_step(self, step_index):
+                steps["n"] += 1
+                raise KeyboardInterrupt
+
+            captured = {}
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                captured["state"] = tui_instance.state
+                on_user_submit("do the thing")
+
+            with patch("core.loop.AgentLoop.step", boom_step):
+                with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True):
+                    try:
+                        harness.run_tui()
+                    except KeyboardInterrupt:
+                        # An escaping Ctrl+C aborts the whole pytest session, so convert
+                        # it into an ordinary failure to keep the rest of the run intact.
+                        self.fail(
+                            "KeyboardInterrupt escaped Harness.run_tui; the TUI turn loop "
+                            "must catch it instead of unwinding through curses.wrapper"
+                        )
+
+            self.assertEqual(steps["n"], 1, "turn should abort on the first Ctrl+C")
+            lines = [line.text for line in captured["state"].lines]
+            self.assertTrue(
+                any("interrupted by user" in text for text in lines),
+                f"expected an interruption notice, got {lines}",
+            )
+
+    def test_ctrl_c_during_tool_execution_repairs_dangling_tool_calls(self):
+        """Invariant: interrupting during tool dispatch leaves no unmatched tool_call.
+
+        Reproduces the real hazard: loop.step records the assistant message (with
+        tool_calls) before dispatching, so a Ctrl+C inside dispatch would otherwise
+        leave a tool_call with no tool message, which chat APIs reject with a 400 --
+        i.e. the user presses Ctrl+C to recover and the session stays broken.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from core.harness import Harness
+        from core.model import MockModel
+        from core.types import ToolCall
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            harness = Harness(
+                model=MockModel(
+                    script=[
+                        (
+                            "running a command",
+                            [ToolCall(id="c1", name="bash", arguments={"command": "ls"})],
+                        )
+                    ]
+                ),
+                workspace_dir=tmp_path / "ws",
+                global_dir=tmp_path / "global",
+                runs_dir=tmp_path / "runs",
+                sandbox=False,
+                verbose=False,
+            )
+
+            captured = {}
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                captured["state"] = tui_instance.state
+                on_user_submit("run ls")
+
+            def boom_dispatch(self, tool_call, step_index):
+                raise KeyboardInterrupt
+
+            with patch("core.tools.ToolRegistry.dispatch", boom_dispatch):
+                with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True):
+                    try:
+                        harness.run_tui()
+                    except KeyboardInterrupt:
+                        self.fail("KeyboardInterrupt escaped Harness.run_tui")
+
+            lines = [line.text for line in captured["state"].lines]
+            self.assertTrue(
+                any("interrupted by user" in text for text in lines),
+                f"expected an interruption notice, got {lines}",
+            )
+            self.assertTrue(
+                any("Dropped 1 incomplete message" in text for text in lines),
+                f"the dangling tool_call should have been trimmed, got {lines}",
+            )
+
+    def test_initial_instruction_is_submitted_after_first_draw(self):
+        """Invariant: run() draws a frame before submitting initial_instruction.
+
+        Regression guard: the initial instruction used to be submitted before
+        tui.run(), while stdscr was still None, so the entire first turn ran with
+        no UI at all -- indistinguishable from a hang.
+        """
+        import curses as _curses
+
+        state = TUIState(title="t")
+        tui = CursesTUI(state)
+        events = []
+
+        class FakeScr:
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return (24, 80)
+
+            def keypad(self, _v):
+                pass
+
+            def nodelay(self, _v):
+                pass
+
+            def get_wch(self):
+                raise EOFError
+
+        def draw_spy(scr):
+            events.append("draw")
+
+        def submit(text):
+            events.append(f"submit:{text}")
+
+        with patch.object(tui, "draw", draw_spy):
+            with (
+                patch.object(_curses, "wrapper", lambda fn: fn(FakeScr())),
+                patch.object(_curses, "cbreak", lambda: None),
+                patch.object(_curses, "curs_set", lambda _v: None),
+                patch.object(tui, "_init_colors", lambda: None),
+                patch("sys.stdout"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                tui.run(on_user_submit=submit, initial_instruction="hello there")
+
+        self.assertIn("submit:hello there", events)
+        self.assertLess(
+            events.index("draw"),
+            events.index("submit:hello there"),
+            "initial instruction must be submitted only after a frame is drawn",
+        )
 
 
 class TestTUI(unittest.TestCase):
@@ -177,8 +455,10 @@ class TestTUI(unittest.TestCase):
 
             captured_state = []
 
-            def mock_tui_run(tui_instance, on_user_submit):
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
                 captured_state.append(tui_instance.state)
+                if initial_instruction:
+                    on_user_submit(initial_instruction)
                 on_user_submit("/status")
                 on_user_submit("/help")
                 on_user_submit("/skill")
@@ -433,6 +713,33 @@ class TestTUI(unittest.TestCase):
         state.input_buffer = "/exit"
         ret = tui.handle_key("\n", dummy_submit)
         self.assertFalse(ret)
+
+    def test_escape_exits_only_on_empty_prompt(self):
+        """Invariant: Esc exits on an empty prompt, but never eats typed text or a menu."""
+        state = TUIState(title="t")
+        tui = CursesTUI(state)
+        self.assertFalse(
+            tui.handle_key(27, lambda _t: None),
+            "Esc on an empty prompt should terminate the session",
+        )
+
+        state = TUIState(title="t")
+        state.input_buffer = "half typed"
+        tui = CursesTUI(state)
+        self.assertTrue(
+            tui.handle_key(27, lambda _t: None), "Esc with text must not terminate"
+        )
+        self.assertEqual(state.input_buffer, "", "Esc with text should clear it instead")
+
+    def test_escape_dismisses_menu_without_exiting(self):
+        """Invariant: Esc closes an open command menu and keeps the session alive."""
+        state = TUIState(title="t")
+        state.set_custom_commands({"alpha": "does alpha"})
+        state.input_buffer = "/al"
+        tui = CursesTUI(state)
+        self.assertEqual(len(state.get_matching_commands()), 1)
+        self.assertTrue(tui.handle_key(27, lambda _t: None))
+        self.assertEqual(state.get_matching_commands(), [])
 
     def test_skill_subcommand_autocomplete_and_draw(self):
         """Invariant: /skill matches available skills under /skill <name> with navigation and drawing."""

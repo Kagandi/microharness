@@ -183,5 +183,31 @@ class Memory:
         self.modified_files.clear()
         self._init(self.system_prompt, new_instruction)
 
+    def drop_incomplete_tool_turn(self) -> int:
+        """Removes a trailing assistant turn whose tool results were never recorded.
+
+        An interruption between recording the assistant message and appending its
+        tool results leaves a tool_call with no matching tool message, which
+        chat-completions APIs reject. Returns the number of messages removed.
+        """
+        last_assistant = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i].role == "assistant" and self.messages[i].tool_calls:
+                last_assistant = i
+                break
+        if last_assistant is None:
+            return 0
+
+        answered = {
+            m.tool_call_id for m in self.messages[last_assistant + 1 :] if m.role == "tool"
+        }
+        expected = {tc.id for tc in (self.messages[last_assistant].tool_calls or [])}
+        if expected <= answered:
+            return 0
+
+        removed = len(self.messages) - last_assistant
+        del self.messages[last_assistant:]
+        return removed
+
     def get_messages(self) -> list[Message]:
         return list(self.messages)
