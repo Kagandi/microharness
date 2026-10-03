@@ -263,7 +263,7 @@ while not done:
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
 * **Interactive Meta-Commands & Resilience**:
-  * Graceful interruption: Hitting `Ctrl+C` cancels the active step/turn and returns cleanly to the prompt without aborting the session. Hitting `Esc` during a turn cancels at the next step boundary (see §5 for the known limitation).
+  * Graceful interruption: `Ctrl+C` aborts the active step immediately (including a blocked request) and returns cleanly to the prompt without aborting the session. `Esc` is a cooperative cancel observed at step boundaries and between model retry attempts; it announces `⚠️ Cancelling…` as soon as it is seen. See §5.1 for why the two differ and §5.2 for the planned work to unify them.
   * `/model [name|number]`: Inspects available models or switches the active model dynamically on the fly. A supplied name is resolved against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (accepting both `openai` and `openai/gpt-4o`). An unrecognized name is rejected with the list of valid models rather than silently constructing a client for a model that does not exist. A numeric argument selects from the same list.
   * `--model`: The startup flag applies the same recognition rules, but only *warns* on stderr instead of refusing, so the flag remains a usable escape hatch for endpoints whose provider is not in the registry. `--model`, `MODEL_NAME`, and `config.json` precedence is unchanged.
   * `/resume [id|number]`: Discovers recent sessions from `~/.microharness/runs/` with workspace affinity and restores conversational message history in-place. Discovery sorts candidates by mtime first, then reads at most the newest `max(limit * 5, 50)` session directories; if that bounded pass finds no session for the current workspace, a second pass scans the remainder so an older session for the same repository stays reachable. Without a workspace filter only plain recency ordering applies.
@@ -359,7 +359,7 @@ $$N_{\text{pings}} = \frac{0.75 \times B}{0.10 \times B} = \mathbf{7.5 \text{ pi
 ---
 
 ## 4. Verification & Testing Standards
-All features are tested against rigorous, non-tautological standards in `tests/` (259 passing tests in ~7s):
+All features are tested against rigorous, non-tautological standards in `tests/` (264 passing tests in ~7s):
 * `test_benchmarks.py`: Verifies all Mini-SWE benchmark tasks fail baseline before fixes, confirms `PristineTestEvaluator` rejects cheating attempts, validates reference solutions for all 5 tasks, and checks the benchmark runner, task filtering, and graceful handling of malformed resume rows.
 * `test_harbor.py`: Verifies `task.toml` parsing, missing metadata rejection, missing file errors, evaluator `ContainerEnvironment` enforcement, and task filtering.
 * `test_environment.py`: Directory traversal attacks (relative, absolute, and sibling directory prefix spoofing), missing files, directory write rejection, bash exit codes, allowed external read directories vs. strictly sandboxed writes, Docker container lifecycle, command execution, and timeout enforcement.
@@ -380,6 +380,28 @@ Correctness claims above are enforced by mutation testing rather than assertion 
 ## 5. Known Limitations & Planned Work
 Deliberately unimplemented or bounded behaviour, recorded so it is not mistaken for a defect:
 
-* **Mid-step cancellation**: `Esc` during a turn is observed at step boundaries, not during a single in-flight step. Cancelling a slow HTTP request mid-flight requires executing the turn on a worker thread with cooperative cancellation (or a cancellable transport), which conflicts with the synchronous `Model.generate` protocol in §3.5. `Ctrl+C` remains the only way to interrupt a blocked step, and it aborts the run.
+### 5.1 Cancellation Model (current state)
+`Esc` and `Ctrl+C` are not equivalent, and the UI states which is which while a turn is running (`[running · Esc cancels after current step · Ctrl+C cancels now]`).
+
+* **`Ctrl+C` (SIGINT)** interrupts a blocked socket read immediately, because CPython raises `KeyboardInterrupt` in the main thread. The turn loop catches it, drops the incomplete tool turn, and keeps the session usable. This is the only way to abort a request that is already in flight.
+* **`Esc`** is a cooperative cancel. It is observed (a) at step boundaries and (b) from inside the model via `CancellableModel.set_cancel_probe`, which is consulted between retry attempts and during rate-limit backoff. Firing the probe surfaces `⚠️ Cancelling… aborting the pending model request` immediately and raises `ModelCancelledError`, which the turn loop handles exactly like the boundary cancel. With no probe installed (batch and benchmark runs) the backoff path is a plain `time.sleep`, so non-interactive runs keep their original cost and timing.
+* **Why `Esc` cannot abort an in-flight request**: `urllib.request.urlopen(timeout=...)` applies its timeout to time-to-first-byte, which for reasoning models is routinely 10-60s. Shortening it to poll for cancellation would break every slow model and re-POST an already-accepted request on each slice, so timeout-polling is not a viable mechanism here. Closing the socket from a watchdog thread does not reliably unblock a thread parked in `urlopen` on CPython.
+
+### 5.2 Planned: true mid-request cancellation
+**Goal**: make `Esc` abort a request that is already in flight, so the key means the same thing regardless of how slow the provider is.
+
+**Why it is wanted**:
+1. **The key currently lies.** `Esc` is the natural cancel key, and today it silently does nothing for the exact interval where a user is most likely to press it — a hung or slow provider. The status bar mitigates this by documenting the timing, but a user who has already learned that `Esc` cancels elsewhere will still read the frozen UI as a dropped keypress.
+2. **Rate limits make the worst case routine, not theoretical.** The backoff ladder sleeps `min(2 * 2**attempt, 60)` per retry across 6 attempts, so a rate-limited turn can spend roughly two minutes waiting. This is now interruptible, but any provider-side stall inside a single request is not, and that is the more common shape of "nothing is happening".
+3. **Timeouts are the wrong tool.** The only bound available today is the run-level `--timeout`, which is far too coarse to be an interaction primitive.
+
+**What it requires** (why this is a project rather than a patch):
+* **A cancellable transport.** `Model.generate` (§3.5) is synchronous and returns a value. Aborting mid-flight means either moving to `async def`/`await` with a cancellable client, or keeping threads and giving the socket a real interruption path. `urllib` offers neither, and adding a dependency is ruled out by the zero-dependency constraint in §1.
+* **A cancellation protocol.** `Model` and `Tool` both need a way to be asked to stop. `Tool` is the harder half: `bash` can block for as long as the command does, and there is currently no cooperative cancellation point inside tool execution.
+* **Rollback semantics — the real cost.** A cancel can land after a tool has already written files, mutated a git repository, or run a command with external side effects. There is no transaction boundary today: `Memory` is mutated in place, `ToolRegistry` executes side effects eagerly, and `Tracer` appends as it goes. "Cancelled" currently means "stopped asking", not "left nothing behind". Defining what a cancelled step guarantees — discard the step's memory mutations? revert workspace writes? — is a design decision with user-visible consequences, and it is the reason this cannot be delivered as an isolated change to the request path.
+
+**Sequencing**: (1) define and test the cancellation contract on `Model` and `Tool`; (2) introduce the transport abstraction behind the existing `CancellableModel` protocol so batch runs are unaffected; (3) settle rollback semantics for partially-executed steps; (4) make `Esc` the single cancel key and retire the split `Esc`/`Ctrl+C` distinction in §5.1.
+
+### 5.3 Other limitations
 * **Bounded session discovery**: `find_recent_sessions` parses each candidate `trace.json` in full, so the second (correctness) pass over a large `runs_dir` is proportional to the number of session directories. Bounding it trades away the workspace-affinity guarantee; the two-pass structure keeps the common case cheap. A future session index (e.g. a small sidecar `meta.json`) would remove the trade-off entirely.
 * **Unserializable step payloads**: Steps containing circular references or non-primitive dict keys are replaced by a placeholder, preserving the step index but not that step's message content. See §3.8.

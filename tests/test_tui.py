@@ -319,20 +319,22 @@ class TestTUIInterrupt(unittest.TestCase):
         self.assertFalse(tui.check_cancel_requested())
 
     def test_status_bar_displays_running_indicator_when_turn_active(self):
-        """Invariant: status bar telemetry includes [running · Esc to cancel] while turn_active is True."""
+        """Invariant: status bar states Esc's real timing and points at Ctrl+C for immediate abort."""
         state = TUIState()
         state.turn_active = True
         mock_stdscr = MagicMock()
-        mock_stdscr.getmaxyx.return_value = (24, 80)
+        mock_stdscr.getmaxyx.return_value = (24, 120)
         tui = CursesTUI(state)
         tui.draw(mock_stdscr)
 
         calls = mock_stdscr.addstr.call_args_list
         rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
-        self.assertTrue(
-            any("running · Esc to cancel" in text for text in rendered_texts),
-            f"expected running status in telemetry, got {rendered_texts}",
-        )
+        joined = " ".join(rendered_texts)
+        self.assertIn("running", joined)
+        # Esc is deferred to the next step boundary, so the hint must not claim otherwise.
+        self.assertIn("Esc cancels after current step", joined)
+        self.assertIn("Ctrl+C cancels now", joined)
+        self.assertNotIn("Esc to cancel]", joined)
 
     def test_escape_key_during_turn_active_keeps_session_alive(self):
         """Invariant: Esc during turn_active does not terminate the session."""
@@ -1319,6 +1321,87 @@ class TestTUI(unittest.TestCase):
             self.assertTrue(observed_step_indices, "expected at least one step to run after resume")
             self.assertEqual(observed_step_indices[0], 3)
             self.assertEqual(observed_step_indices, sorted(set(observed_step_indices)))
+
+    def test_harness_run_tui_announces_cancelling_and_survives(self):
+        """Invariant: a cancel seen during a request announces 'Cancelling...' once and keeps the session."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from core.harness import Harness
+        from core.model import CancellableModel, ModelCancelledError
+
+        class CancellingModel:
+            """Stands in for HttpChatModel: probes, reports a cancel, then raises."""
+
+            model = "cancelling"
+            provider = "test"
+
+            def __init__(self) -> None:
+                self.probe = None
+                self.probe_calls = 0
+
+            def set_cancel_probe(self, probe):
+                self.probe = probe
+
+            def generate(self, messages, tools):
+                self.probe_calls += 1
+                if self.probe is not None and self.probe():
+                    raise ModelCancelledError("cancelled mid-request")
+                return "done", []
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            model = CancellingModel()
+            harness = Harness(
+                model=model,
+                workspace_dir=tmp / "ws",
+                global_dir=tmp / "g",
+                runs_dir=tmp / "r",
+                sandbox=False,
+                verbose=False,
+            )
+            self.assertIsInstance(model, CancellableModel)
+
+            captured = []
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                captured.append(tui_instance.state)
+                # Esc is "pressed" from the third poll onward: the probe must see it.
+                on_user_submit("do the thing")
+                on_user_submit("/status")
+
+            polls = {"n": 0}
+
+            def fake_cancel(self):
+                # Per iteration the harness polls once at the loop boundary (odd
+                # polls) and once from inside the request via the probe (even
+                # polls). Report a cancel only on probe polls so the
+                # mid-request path is what gets exercised.
+                polls["n"] += 1
+                return polls["n"] % 2 == 0
+
+            with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True), patch(
+                "core.tui.CursesTUI.check_cancel_requested", fake_cancel
+            ):
+                harness.run_tui()
+
+            self.assertTrue(captured)
+            lines = [ln.text for ln in captured[0].lines]
+
+            announcing = [t for t in lines if "Cancelling" in t]
+            self.assertEqual(len(announcing), 1, f"expected exactly one announcement, got {announcing}")
+            self.assertIn("Ctrl+C cancels immediately", announcing[0])
+
+            # The turn was cancelled, not aborted: the session still responds afterwards.
+            self.assertTrue(
+                any("cancelled by user" in t for t in lines),
+                f"expected a cancellation notice, got {lines[-6:]}",
+            )
+            self.assertTrue(any("Context Tokens:" in t for t in lines), "session should still be usable")
+            self.assertFalse(captured[0].turn_active)
+            # The probe must be detached once the turn ends.
+            self.assertIsNone(model.probe)
 
 
 if __name__ == "__main__":

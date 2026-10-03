@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -33,6 +34,14 @@ class RateLimitError(RuntimeError):
 
 
 MAX_RETRY_SLEEP_S: float = 120.0
+
+
+class ModelCancelledError(RuntimeError):
+    """Raised when an interactive cancel probe reports that the user aborted the request.
+
+    Only raised while the model is *waiting* (retry backoff). An in-flight HTTP
+    read cannot be interrupted this way; see SPEC.md section 5.
+    """
 
 
 def _is_unrecoverable_quota_error(status_code: int, err_body: str) -> bool:
@@ -193,6 +202,18 @@ class DeadlineAwareModel(Model, Protocol):
     """Protocol for models that support task execution deadlines to bound in-flight HTTP requests."""
 
     def set_deadline(self, deadline: float | None) -> None: ...
+
+
+@runtime_checkable
+class CancellableModel(Model, Protocol):
+    """Protocol for models that can abandon a pending wait when the user cancels.
+
+    The probe is invoked from the model's own retry/backoff path, so it must be
+    cheap and must not block. ``None`` disables probing entirely, which is the
+    default outside interactive sessions.
+    """
+
+    def set_cancel_probe(self, probe: Callable[[], bool] | None) -> None: ...
 
 
 @runtime_checkable
@@ -816,10 +837,54 @@ class HttpChatModel(_CacheTelemetryMixin):
         self.reasoning_format = (reasoning_format or default_reasoning_format).lower()
         self.cache_strategy = (cache_strategy or default_cache_strategy).lower()
         self._init_cache_telemetry(cache_ttl)
+        self._cancel_probe: Callable[[], bool] | None = None
 
     def set_deadline(self, deadline: float | None) -> None:
         """Sets the task deadline timestamp to strictly bound in-flight HTTP requests."""
         self.deadline = deadline
+
+    def set_cancel_probe(self, probe: Callable[[], bool] | None) -> None:
+        """Installs a non-blocking predicate consulted while waiting between retry attempts."""
+        self._cancel_probe = probe
+
+    def _cancelled(self) -> bool:
+        probe = self._cancel_probe
+        if probe is None:
+            return False
+        try:
+            return bool(probe())
+        except Exception:
+            # A misbehaving probe must never break the request path.
+            return False
+
+    def _wait_or_cancel(self, seconds: float) -> None:
+        """Sleeps, aborting early if a cancel probe fires.
+
+        With no probe installed (batch and benchmark runs) this is a plain
+        ``time.sleep`` so the retry path keeps its original cost and timing.
+        Only interactive sessions slice the wait, which is what makes a cancel
+        during a backoff responsive.
+
+        This governs time spent *waiting* between attempts. It cannot interrupt a
+        socket already blocked in ``urlopen``; that limit is documented in
+        SPEC.md section 5.
+        """
+        if self._cancel_probe is None:
+            if seconds > 0:
+                time.sleep(seconds)
+            return
+        if seconds <= 0:
+            if self._cancelled():
+                raise ModelCancelledError("Cancelled by user while waiting to retry.")
+            return
+        deadline_at = time.monotonic() + seconds
+        while True:
+            if self._cancelled():
+                raise ModelCancelledError("Cancelled by user while waiting to retry.")
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.1, remaining))
 
     def set_reasoning_effort(self, effort: str | None) -> str | None:
         """Dynamically switches reasoning effort level ('low', 'medium', 'high', numeric budget, or 'off'/None)."""
@@ -906,6 +971,10 @@ class HttpChatModel(_CacheTelemetryMixin):
         max_retries = 6
         base_delay = 2.0
         for attempt in range(max_retries):
+            # Honour a pending cancel before spending another request on it.
+            if self._cancelled():
+                raise ModelCancelledError("Cancelled by user before retry attempt.")
+
             # Check deadline before attempting request
             req_timeout = self.timeout
             if self.deadline is not None:
@@ -961,7 +1030,7 @@ class HttpChatModel(_CacheTelemetryMixin):
                         print(
                             f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry ({attempt + 1}/{max_retries})..."
                         )
-                        time.sleep(delay)
+                        self._wait_or_cancel(delay)
                         continue
                     raise RateLimitError(
                         f"Model API rate limit (HTTP {exc.code}) exceeded after {max_retries} retries from {self.endpoint}:\n{err_body}",
@@ -974,7 +1043,7 @@ class HttpChatModel(_CacheTelemetryMixin):
                         raise TimeoutError(
                             f"Task timeout reached while waiting to retry HTTP {exc.code}"
                         ) from exc
-                    time.sleep(sleep_s)
+                    self._wait_or_cancel(sleep_s)
                     continue
                 raise RuntimeError(
                     f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{err_body}"
@@ -988,7 +1057,7 @@ class HttpChatModel(_CacheTelemetryMixin):
                         raise TimeoutError(
                             "Task timeout reached while waiting to retry timed-out request"
                         ) from exc
-                    time.sleep(sleep_s)
+                    self._wait_or_cancel(sleep_s)
                     continue
                 raise
             except urllib.error.URLError as exc:
@@ -1001,7 +1070,7 @@ class HttpChatModel(_CacheTelemetryMixin):
                         raise TimeoutError(
                             f"Task timeout reached while waiting to retry connection error: {exc.reason}"
                         ) from exc
-                    time.sleep(sleep_s)
+                    self._wait_or_cancel(sleep_s)
                     continue
                 raise ConnectionError(
                     f"Could not connect to model endpoint at {self.endpoint}.\n"

@@ -943,6 +943,122 @@ class TestModel(unittest.TestCase):
         # Slept exactly 55.0 + 1.0 = 56.0s
         mock_sleep.assert_called_once_with(56.0)
 
+    def test_wait_or_cancel_aborts_backoff_when_probe_fires(self):
+        """Invariant: an installed cancel probe cuts a retry backoff short and raises."""
+        import time
+
+        from core.model import ModelCancelledError
+
+        m = HttpChatModel(base_url="https://example.invalid/v1", model="m")
+
+        # No probe: behaves as a plain sleep with no early exit.
+        m.set_cancel_probe(None)
+        t0 = time.monotonic()
+        m._wait_or_cancel(0.2)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.15)
+
+        # Probe fires immediately: returns far sooner than the full delay.
+        m.set_cancel_probe(lambda: True)
+        t0 = time.monotonic()
+        with self.assertRaises(ModelCancelledError):
+            m._wait_or_cancel(30.0)
+        self.assertLess(time.monotonic() - t0, 5.0)
+
+        # Probe stays false: the full delay is honoured.
+        m.set_cancel_probe(lambda: False)
+        t0 = time.monotonic()
+        m._wait_or_cancel(0.2)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.15)
+
+        # Clearing the probe restores plain-sleep behaviour.
+        m.set_cancel_probe(None)
+        m._wait_or_cancel(0)
+
+    def test_cancel_probe_exception_does_not_break_requests(self):
+        """Invariant: a raising probe is treated as 'not cancelled' rather than surfacing."""
+        from core.model import ModelCancelledError
+
+        m = HttpChatModel(base_url="https://example.invalid/v1", model="m")
+
+        def bad_probe() -> bool:
+            raise RuntimeError("probe exploded")
+
+        m.set_cancel_probe(bad_probe)
+        self.assertFalse(m._cancelled())
+        m._wait_or_cancel(0)  # must not raise
+
+        # And a cancel raised as an exception still surfaces as a cancellation.
+        m.set_cancel_probe(lambda: True)
+        with self.assertRaises(ModelCancelledError):
+            m._wait_or_cancel(30.0)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_send_request_honours_cancel_before_retry(self, mock_urlopen, mock_sleep):
+        """Invariant: a pending cancel short-circuits the retry ladder instead of waiting it out."""
+        import urllib.error
+
+        from core.model import ModelCancelledError
+
+        err = urllib.error.HTTPError(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=b"upstream down")),
+        )
+        mock_urlopen.side_effect = err
+
+        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m")
+        # Fail the first attempt, then report a cancel for every later check.
+        calls = {"n": 0}
+
+        def probe() -> bool:
+            calls["n"] += 1
+            return calls["n"] > 1
+
+        m.set_cancel_probe(probe)
+
+        with self.assertRaises(ModelCancelledError):
+            m._send_request(payload={"model": "m"}, headers={})
+
+        # Exactly one request was issued: no further attempts after the cancel.
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    @patch("urllib.request.urlopen")
+    def test_send_request_pre_attempt_guard_when_backoff_is_a_noop(self, mock_urlopen):
+        """Invariant: a cancel arriving between backoff and the next attempt still blocks that attempt."""
+        import urllib.error
+
+        from core.model import ModelCancelledError
+
+        err = urllib.error.HTTPError(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=b"upstream down")),
+        )
+        mock_urlopen.side_effect = err
+
+        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m")
+        # Neutralise the backoff so only the pre-attempt guard can observe the cancel.
+        m._wait_or_cancel = lambda seconds: None
+
+        calls = {"n": 0}
+
+        def probe() -> bool:
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        m.set_cancel_probe(probe)
+
+        with self.assertRaises(ModelCancelledError):
+            m._send_request(payload={"model": "m"}, headers={})
+
+        # The retry was refused rather than re-issued.
+        self.assertEqual(mock_urlopen.call_count, 1)
+
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
     def test_send_request_exceeds_max_retry_sleep_fails_immediately(self, mock_urlopen, mock_sleep):

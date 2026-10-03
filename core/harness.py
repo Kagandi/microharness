@@ -19,8 +19,10 @@ from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import (
     CacheAwareModel,
+    CancellableModel,
     DeadlineAwareModel,
     Model,
+    ModelCancelledError,
     NamedModel,
     ProviderAwareModel,
     RateLimitAwareModel,
@@ -1667,30 +1669,53 @@ class Harness:
 
             turn_start = step_idx
             state.turn_active = True
+            def _cancel_probe() -> bool:
+                """Non-blocking Esc check invoked from the model's retry/backoff path.
+
+                Surfaces progress the moment it fires, so a user who pressed Esc
+                during a long rate-limit backoff sees the request is aborting
+                rather than assuming the key did nothing. Every caller treats a
+                True result as terminal, so this runs at most once per turn.
+                """
+                if not tui.check_cancel_requested():
+                    return False
+                state.add_system(
+                    "⚠️ Cancelling… aborting the pending model request "
+                    "(Ctrl+C cancels immediately, even mid-request)."
+                )
+                state.update_status(memory.stats(), self.get_cache_stats())
+                if tui.stdscr:
+                    tui.draw(tui.stdscr)
+                return True
+
+            if isinstance(self.model, CancellableModel):
+                self.model.set_cancel_probe(_cancel_probe)
+
             try:
                 while (step_idx - turn_start) < max_steps_per_turn:
-                    if tui.check_cancel_requested():
+                    # Shared by the boundary cancel and the mid-request probe so both
+                    # report identically and leave the session in the same state.
+                    def _abort_turn(reason: str) -> None:
                         dropped = memory.drop_incomplete_tool_turn()
                         state.add_system(
-                            f"⚠️ Turn cancelled by user (Esc) at step {step_idx}. Session is still active."
+                            f"⚠️ Turn {reason} at step {step_idx}. Session is still active."
                             + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
                         )
                         state.update_status(memory.stats(), self.get_cache_stats())
                         if tui.stdscr:
                             tui.draw(tui.stdscr)
+
+                    if tui.check_cancel_requested():
+                        _abort_turn("cancelled by user (Esc)")
                         break
 
                     try:
                         is_finished, step_trace = loop.step(step_index=step_idx)
+                    except ModelCancelledError:
+                        _abort_turn("cancelled by user (Esc)")
+                        break
                     except KeyboardInterrupt:
-                        dropped = memory.drop_incomplete_tool_turn()
-                        state.add_system(
-                            f"⚠️ Turn interrupted by user (Ctrl+C) at step {step_idx}. Session is still active."
-                            + (f" Dropped {dropped} incomplete message(s)." if dropped else "")
-                        )
-                        state.update_status(memory.stats(), self.get_cache_stats())
-                        if tui.stdscr:
-                            tui.draw(tui.stdscr)
+                        _abort_turn("interrupted by user (Ctrl+C)")
                         break
                     except Exception as exc:
                         state.add_error(f"Step {step_idx} error: {exc}")
@@ -1742,6 +1767,8 @@ class Harness:
                         break
             finally:
                 state.turn_active = False
+                if isinstance(self.model, CancellableModel):
+                    self.model.set_cancel_probe(None)
                 state.update_status(memory.stats(), self.get_cache_stats())
                 if tui.stdscr:
                     tui.draw(tui.stdscr)

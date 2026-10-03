@@ -949,7 +949,7 @@ class CursesTUI:
             parts.append(f"[scrolled +{self.state.scroll_offset}]")
 
         if self.state.turn_active:
-            parts.append("[running · Esc to cancel]")
+            parts.append("[running · Esc cancels after current step · Ctrl+C cancels now]")
 
         status_text = " " + " · ".join(parts) + " "
 

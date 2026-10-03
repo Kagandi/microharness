@@ -204,6 +204,15 @@ You can inspect or control the harness runtime directly:
 * **`/help`**: Lists available commands.
 * **`/exit`**: Finalizes and exports the session trace.
 
+### Cancelling a Running Turn
+
+The two cancel keys are **not** equivalent, and the status bar says so while a turn runs:
+
+* **`Ctrl+C`** aborts the active step immediately, including a request that is already in flight. The incomplete tool turn is dropped and the session stays usable.
+* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a rate-limit backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
+
+`Esc` cannot abort a request that is currently waiting on the provider, because the HTTP timeout covers time-to-first-byte and shortening it would break slow models. Use `Ctrl+C` for that. See SPEC.md §5.2 for the planned work to unify the two.
+
 ---
 
 ## ⚡ Quickstart with `uv`
