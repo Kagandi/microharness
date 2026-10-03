@@ -1213,6 +1213,47 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(completed_sess, "/resume run-2026-10-02-beta")
         self.assertEqual(state.input_buffer, "/resume run-2026-10-02-beta")
 
+        # 7. /model without space also reveals models list
+        state.input_buffer = "/model"
+        m_bare = state.get_matching_commands()
+        self.assertEqual(len(m_bare), 3)  # /model root + 2 models
+        self.assertEqual(m_bare[0][0], "/model")
+        self.assertEqual(m_bare[1][0], "/model fast")
+        self.assertEqual(m_bare[2][0], "/model smart")
+
+        # 8. /resume without space also reveals recent sessions
+        state.input_buffer = "/resume"
+        s_bare = state.get_matching_commands()
+        self.assertEqual(len(s_bare), 3)  # /resume root + 2 sessions
+        self.assertEqual(s_bare[0][0], "/resume")
+        self.assertEqual(s_bare[1][0], "/resume run-2026-10-03-alpha")
+
+        # 9. Tab on /m completes with trailing space directly into /model [space]
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+        state.input_buffer = "/m"
+        state.selected_command_idx = 0
+        tui.handle_key("\t", lambda text: submitted.append(text))
+        self.assertEqual(state.input_buffer, "/model ")
+
+        # 10. Enter on /model [space] selects and submits the highlighted model
+        state.selected_command_idx = 0  # fast
+        tui.handle_key("\n", lambda text: submitted.append(text))
+        self.assertEqual(submitted, ["/model fast"])
+
+        # 11. CursesTUI draw renders correct titles
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (30, 100)
+        state.input_buffer = "/model "
+        tui.draw(mock_stdscr)
+        model_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Available Models" in str(c)]
+        self.assertGreaterEqual(len(model_border_calls), 1)
+
+        state.input_buffer = "/resume "
+        tui.draw(mock_stdscr)
+        resume_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Previous Sessions" in str(c)]
+        self.assertGreaterEqual(len(resume_border_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

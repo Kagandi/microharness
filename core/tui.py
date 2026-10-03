@@ -545,13 +545,16 @@ class TUIState:
         if not buf.startswith("/"):
             return []
 
-        # If user is typing /skill <subcommand>, match against available skills
-        if buf.startswith(("/skill ", "/skills ")):
+        # If user is typing /skill or /skill <subcommand>, match against available skills
+        if buf in ("/skill", "/skills") or buf.startswith(("/skill ", "/skills ")):
             prefix = buf.split(" ", 1)[0]
-            sub = buf.split(" ", 1)[1].lstrip()
+            has_space = " " in buf
+            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
             res: list[tuple[str, str]] = []
+            if not has_space:
+                res.append((prefix, "Load or inspect a custom skill prompt"))
             for s_name, s_info in sorted(self.skills.items()):
-                if s_name.lower().startswith(sub):
+                if not sub or s_name.lower().startswith(sub):
                     summary = (
                         s_info[0]
                         if isinstance(s_info, (tuple, list)) and len(s_info) > 0
@@ -565,27 +568,33 @@ class TUIState:
                     res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
             return res
 
-        # If user is typing /model <subcommand>, match against available models
-        if buf.startswith(("/model ", "/models ")):
+        # If user is typing /model or /model <subcommand>, match against available models
+        if buf in ("/model", "/models") or buf.startswith(("/model ", "/models ")):
             prefix = buf.split(" ", 1)[0]
-            sub = buf.split(" ", 1)[1].lstrip()
+            has_space = " " in buf
+            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
             res_m: list[tuple[str, str]] = []
+            if not has_space:
+                res_m.append((prefix, "Switch active model or show models from config"))
             for m in self.available_models:
                 m_name = m.get("name", "")
-                if m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
+                if not sub or m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
                     prov = m.get("provider") or "model"
                     desc = m.get("description") or f"Model {m_name}"
                     res_m.append((f"{prefix} {m_name}", f"[{prov}] {desc}"))
             return res_m
 
-        # If user is typing /resume <subcommand>, match against available previous sessions
-        if buf.startswith(("/resume ", "/resumes ")):
+        # If user is typing /resume or /resume <subcommand>, match against available previous sessions
+        if buf in ("/resume", "/resumes") or buf.startswith(("/resume ", "/resumes ")):
             prefix = buf.split(" ", 1)[0]
-            sub = buf.split(" ", 1)[1].lstrip()
+            has_space = " " in buf
+            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
             res_s: list[tuple[str, str]] = []
+            if not has_space:
+                res_s.append((prefix, "Show previous sessions or resume with /resume <id>"))
             for s in self.available_sessions:
                 run_id = s.get("run_id", "")
-                if run_id.lower().startswith(sub):
+                if not sub or run_id.lower().startswith(sub):
                     steps = s.get("total_steps", 0)
                     prev = s.get("preview", "")[:35]
                     res_s.append((f"{prefix} {run_id}", f"({steps} steps) {prev}"))
@@ -957,9 +966,18 @@ class CursesTUI:
         cmd_matches = self.state.get_matching_commands()
         matches = file_matches if file_matches else cmd_matches
         is_file_menu = bool(file_matches)
+        raw_cmd = self.state.input_buffer.lstrip().lower()
         is_skill_menu = (
             not is_file_menu
-            and self.state.input_buffer.lstrip().lower().startswith(("/skill ", "/skills "))
+            and (raw_cmd in ("/skill", "/skills") or raw_cmd.startswith(("/skill ", "/skills ")))
+        )
+        is_model_menu = (
+            not is_file_menu
+            and (raw_cmd in ("/model", "/models") or raw_cmd.startswith(("/model ", "/models ")))
+        )
+        is_resume_menu = (
+            not is_file_menu
+            and (raw_cmd in ("/resume", "/resumes") or raw_cmd.startswith(("/resume ", "/resumes ")))
         )
 
         if matches:
@@ -982,6 +1000,10 @@ class CursesTUI:
                 title_part = " Workspace Files "
             elif is_skill_menu:
                 title_part = " Available Skills "
+            elif is_model_menu:
+                title_part = " Available Models "
+            elif is_resume_menu:
+                title_part = " Previous Sessions "
             else:
                 title_part = " Available Commands "
 
@@ -997,6 +1019,10 @@ class CursesTUI:
                     cmd_col_w = max(24, min(42, box_w - 12))
                 elif is_skill_menu:
                     cmd_col_w = 22
+                elif is_model_menu:
+                    cmd_col_w = max(20, min(36, box_w - 20))
+                elif is_resume_menu:
+                    cmd_col_w = max(26, min(38, box_w - 20))
                 else:
                     cmd_col_w = 12
 
@@ -1125,7 +1151,7 @@ class CursesTUI:
             if file_matches:
                 self.state.complete_selected_file_tag()
                 return True
-            if cmd_matches and not self.state.input_buffer.endswith(" "):
+            if cmd_matches:
                 self.state.complete_selected_command()
             user_text = self.state.clear_input()
             if not user_text:
@@ -1145,7 +1171,10 @@ class CursesTUI:
                 return True
             if cmd_matches:
                 if len(cmd_matches) == 1:
-                    self.state.complete_selected_command()
+                    completed = self.state.complete_selected_command()
+                    if completed in ("/model", "/resume", "/skill", "/cache"):
+                        self.state.input_buffer = f"{completed} "
+                        self.state.cursor_pos = len(self.state.input_buffer)
                 else:
                     self.state.select_next_command()
                 return True
@@ -1173,7 +1202,10 @@ class CursesTUI:
                 self.state.complete_selected_file_tag()
                 return True
             if cmd_matches:
-                self.state.complete_selected_command()
+                completed = self.state.complete_selected_command()
+                if completed in ("/model", "/resume", "/skill", "/cache"):
+                    self.state.input_buffer = f"{completed} "
+                    self.state.cursor_pos = len(self.state.input_buffer)
                 return True
             return True
 
