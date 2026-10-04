@@ -1,23 +1,27 @@
-"""Run lifecycle: the step driver and session discovery / resumption.
+"""Run lifecycle: the step driver, session discovery, and resumption.
 
-The step driver owns the retry-and-give-up policy for a single turn; session
-helpers own "which previous run do I mean and how do I load it". Both are pure
+The step driver owns the retry-and-give-up policy for a single turn. The session
+half owns "which previous run do I mean, what does it contain, and how do I load
+it" — including rebuilding a conversation from a persisted trace. Both are pure
 bookkeeping around :class:`~core.loop.AgentLoop`, so batch runs, the CLI
 session, and the TUI all share one policy.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from core.loop import AgentLoop
 from core.protocols import DeadlineAwareModel, Model, RateLimitAwareModel
 from core.ratelimit import RateLimitError
-from core.tracer import Tracer, find_recent_sessions, load_session_messages
 from core.types import Message
+
+if TYPE_CHECKING:
+    from core.tracer import Tracer
 
 # finish_reason values, matching RunResult.finish_reason
 COMPLETED = "completed"
@@ -136,15 +140,6 @@ def _retry_step(
     return True
 
 
-def find_sessions(
-    runs_dir: Path,
-    workspace: Path | None,
-    limit: int = 10,
-) -> list[dict]:
-    """Finds recent runs, preferring ones from the same workspace."""
-    return find_recent_sessions(runs_dir=runs_dir, workspace=workspace, limit=limit)
-
-
 def resolve_session_dir(
     runs_dir: Path,
     selector: str | Path | None,
@@ -189,10 +184,308 @@ def load_session(
 
     Returns ``([], {"error": ...})`` when the selector cannot be resolved.
     """
-    sessions = find_sessions(runs_dir, workspace, limit=SEARCH_LIMIT)
+    sessions = find_recent_sessions(runs_dir, workspace, limit=SEARCH_LIMIT)
     target, error = resolve_session_dir(runs_dir, selector, sessions)
     if target is None or not target.is_dir():
         return [], {"error": error or NOT_FOUND}
 
     raw_messages, meta = load_session_messages(target)
     return [Message.from_dict(m) for m in raw_messages], meta
+
+
+# --------------------------------------------------------------------------
+# Reading persisted sessions
+# --------------------------------------------------------------------------
+
+PREVIEW_MAX_CHARS = 60
+_ELLIPSIS = "..."
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    """Reads a JSON object, returning ``None`` for missing, unreadable, or malformed files."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_jsonl_steps(path: Path) -> list[dict[str, Any]]:
+    """Reads an append-only trajectory into step records, skipping unreadable lines."""
+    steps: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return steps
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(record, dict):
+            steps.append(record)
+    return steps
+
+
+def _first_user_text(messages: Any) -> str:
+    """Returns the first user message content, or ``""`` when there is none."""
+    for message in messages or []:
+        if isinstance(message, dict) and message.get("role") == "user" and message.get("content"):
+            return str(message["content"]).strip()
+    return ""
+
+
+def _preview_from_step(step: dict[str, Any] | None) -> str:
+    """Returns the user prompt that opened a step, which is the session's first user turn."""
+    return _first_user_text((step or {}).get("prompt_messages"))
+
+
+def _clip_preview(text: str) -> str:
+    """Bounds a preview to one display line."""
+    if len(text) <= PREVIEW_MAX_CHARS:
+        return text
+    return text[: PREVIEW_MAX_CHARS - len(_ELLIPSIS)] + _ELLIPSIS
+
+
+def _describe_session(entry: Path, mtime: float, target_ws: str | None) -> dict[str, Any] | None:
+    """Summarizes one run directory, or returns ``None`` when it is not a session.
+
+    Prefers ``trace.json`` (complete) and falls back to ``trajectory.jsonl`` for a
+    run that crashed before it could write its trace.
+    """
+    trace_file = entry / "trace.json"
+    jsonl_file = entry / "trajectory.jsonl"
+    if not (trace_file.is_file() or jsonl_file.is_file()):
+        return None
+
+    total_steps = 0
+    preview = ""
+    workspace: str | None = None
+    finish_reason = ""
+    task_id = entry.name
+
+    if trace_file.is_file():
+        data = _read_json(trace_file) or {}
+        total_steps = int(data.get("total_steps") or 0)
+        workspace = data.get("workspace")
+        finish_reason = data.get("finish_reason", "")
+        task = data.get("task") or {}
+        task_id = task.get("id") or entry.name
+        preview = (task.get("instruction") or "").strip()
+        if not preview and data.get("messages"):
+            preview = _first_user_text(data["messages"])
+        elif not preview and data.get("steps"):
+            preview = _preview_from_step(data["steps"][-1])
+
+    if not preview and jsonl_file.is_file():
+        steps = _read_jsonl_steps(jsonl_file)
+        total_steps = max(total_steps, len(steps))
+        if steps:
+            preview = _preview_from_step(steps[-1])
+
+    return {
+        "run_id": entry.name,
+        "run_dir": str(entry),
+        "task_id": task_id,
+        "total_steps": total_steps,
+        "preview": _clip_preview(preview) or "(no user prompt)",
+        "workspace": workspace,
+        "mtime": mtime,
+        "finish_reason": finish_reason,
+        "matches_workspace": bool(target_ws and workspace and target_ws == workspace),
+    }
+
+
+def _pass1_ceiling(limit: int, target_ws: str | None) -> int:
+    """How many recent runs the cheap first pass may inspect.
+
+    Without a workspace to match there is nothing to search for, so the limit is
+    the ceiling and the expensive second pass never runs.
+    """
+    return max(limit * 5, 50) if target_ws else limit
+
+
+def _scan_for_matches(
+    candidates: list[tuple[float, Path]],
+    target_ws: str | None,
+    limit: int,
+    *,
+    scan_all: bool,
+    cheap_ceiling: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """One pass over candidates, splitting them into workspace matches and the rest."""
+    matching: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
+
+    for index, (mtime, entry) in enumerate(candidates):
+        if scan_all:
+            if index < cheap_ceiling:
+                continue  # the cheap pass already inspected this one
+        elif index >= cheap_ceiling:
+            break  # the cheap pass stops at its ceiling
+        record = _describe_session(entry, mtime, target_ws)
+        if record is None:
+            continue
+        if record["matches_workspace"]:
+            if len(matching) >= limit:
+                break
+            matching.append(record)
+        elif not scan_all:
+            others.append(record)
+
+    return matching, others
+
+
+def find_recent_sessions(
+    runs_dir: Path | str,
+    workspace: Path | str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Discovers previous sessions from ``runs_dir``, newest first, workspace matches first.
+
+    Scans a cheap window of recent runs first and only walks the full history when
+    that window contains no match, so an older session for the same repository
+    stays reachable instead of being hidden by the scan ceiling.
+    """
+    base = Path(runs_dir)
+    if not base.is_dir():
+        return []
+
+    target_ws = str(Path(workspace).resolve()) if workspace else None
+
+    candidates: list[tuple[float, Path]] = []
+    for entry in base.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        candidates.append((mtime, entry))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    ceiling = _pass1_ceiling(limit, target_ws)
+    matching: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
+    for scan_all in (False, True):
+        matching, found_others = _scan_for_matches(
+            candidates, target_ws, limit, scan_all=scan_all, cheap_ceiling=ceiling
+        )
+        if not scan_all:
+            others = found_others
+        if matching or not target_ws:
+            break
+
+    combined = matching + others
+    combined.sort(key=lambda s: (1 if s["matches_workspace"] else 0, s["mtime"]), reverse=True)
+    return combined[:limit]
+
+
+def _select_reconstruction_step(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Returns the most recent step that actually recorded conversation state.
+
+    When a step cannot be serialized, :meth:`core.tracer.Tracer.record_step`
+    writes a placeholder carrying ``serialization_error`` and an empty
+    ``prompt_messages``. Because reconstruction is driven by a single step's
+    prompt snapshot, picking such a placeholder would silently discard the entire
+    conversation on resume. We therefore walk backwards to the last step that
+    recorded a real prompt.
+    """
+    for step in reversed(steps):
+        if step.get("serialization_error"):
+            continue
+        if step.get("prompt_messages"):
+            return step
+    return steps[-1]
+
+
+def _rebuild_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Restores OpenAI-shaped tool calls, keeping provider ``extra_content`` intact."""
+    rebuilt = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") or {}
+        args = function.get("arguments") or call.get("arguments") or {}
+        if not isinstance(args, str):
+            args = json.dumps(args, default=str) if isinstance(args, dict) else str(args)
+        entry: dict[str, Any] = {
+            "id": call.get("id", ""),
+            "type": "function",
+            "function": {"name": function.get("name") or call.get("name", ""), "arguments": args},
+        }
+        if call.get("extra_content"):
+            entry["extra_content"] = call["extra_content"]
+        rebuilt.append(entry)
+    return rebuilt
+
+
+def _rebuild_assistant_message(response: dict[str, Any]) -> dict[str, Any]:
+    """Rebuilds the assistant turn a step recorded, if it recorded anything."""
+    content = response.get("content") or ""
+    tool_calls = response.get("tool_calls") or []
+    if not content and not tool_calls:
+        return {}
+
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls and (rebuilt := _rebuild_tool_calls(tool_calls)):
+        message["tool_calls"] = rebuilt
+    return message
+
+
+def reconstruct_messages_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reconstructs the full conversation from a list of persisted step records."""
+    if not steps:
+        return []
+    last_step = _select_reconstruction_step(steps)
+
+    messages: list[dict[str, Any]] = [dict(m) for m in (last_step.get("prompt_messages") or [])]
+    if assistant := _rebuild_assistant_message(last_step.get("model_response") or {}):
+        messages.append(assistant)
+    for result in last_step.get("tool_results") or []:
+        if isinstance(result, dict) and "call_id" in result:
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": result.get("output", ""),
+                    "tool_call_id": result.get("call_id"),
+                    "raw_log_path": result.get("raw_log_path"),
+                }
+            )
+    return messages
+
+
+def load_session_messages(run_dir: Path | str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Loads reconstructed messages and metadata from a session directory.
+
+    Prefers ``trace.json`` and falls back to ``trajectory.jsonl``, which is all a
+    run that crashed mid-turn left behind.
+    """
+    dir_path = Path(run_dir)
+    metadata: dict[str, Any] = {
+        "run_id": dir_path.name,
+        "run_dir": str(dir_path),
+        "total_steps": 0,
+        "workspace": None,
+        "finish_reason": "unknown",
+    }
+
+    data = _read_json(dir_path / "trace.json")
+    if data is not None:
+        metadata["total_steps"] = int(data.get("total_steps") or 0)
+        metadata["workspace"] = data.get("workspace")
+        metadata["finish_reason"] = data.get("finish_reason", "unknown")
+        metadata["task"] = data.get("task", {})
+        if isinstance(data.get("messages"), list) and data["messages"]:
+            return data["messages"], metadata
+        if data.get("steps"):
+            return reconstruct_messages_from_steps(data["steps"]), metadata
+
+    steps = _read_jsonl_steps(dir_path / "trajectory.jsonl")
+    if steps:
+        metadata["total_steps"] = len(steps)
+        return reconstruct_messages_from_steps(steps), metadata
+
+    return [], metadata

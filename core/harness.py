@@ -57,7 +57,7 @@ from core.providers import (
 )
 from core.session import (
     MAX_STEPS_EXCEEDED,
-    find_sessions,
+    find_recent_sessions,
     load_session,
     rate_limit_wait,
     run_steps,
@@ -357,7 +357,7 @@ class Harness:
 
     def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Finds recent runs in runs_dir with workspace affinity."""
-        return find_sessions(self.runs_dir, self.explicit_workspace_dir, limit=limit)
+        return find_recent_sessions(self.runs_dir, self.explicit_workspace_dir, limit=limit)
 
     def load_session(
         self, session_id_or_path: str | Path | None = None

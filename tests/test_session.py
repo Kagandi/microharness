@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -10,8 +11,11 @@ from core.session import (
     ERROR,
     MAX_STEPS_EXCEEDED,
     TIMEOUT,
+    find_recent_sessions,
     load_session,
+    load_session_messages,
     rate_limit_wait,
+    reconstruct_messages_from_steps,
     resolve_session_dir,
     run_steps,
 )
@@ -266,3 +270,290 @@ class TestLoadSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestSessionIndex(unittest.TestCase):
+    """Scanning a runs directory into the /resume listing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.runs = self.tmp / "runs"
+        self.runs.mkdir()
+
+    def _write_session(self, name, workspace="/repo", age_days=0.0, steps=1, instruction="do work"):
+        entry = self.runs / name
+        entry.mkdir()
+        (entry / "trace.json").write_text(
+            json.dumps({
+                "task": {"id": name, "instruction": instruction},
+                "total_steps": steps,
+                "workspace": workspace,
+                "finish_reason": "completed",
+                "messages": [],
+                "steps": [],
+            }),
+            encoding="utf-8",
+        )
+        stamp = time.time() - age_days * 86400
+        os.utime(entry, (stamp, stamp))
+        return entry
+
+    def test_missing_runs_dir_yields_nothing(self):
+        """Invariant: a runs directory that does not exist is not an error."""
+        self.assertEqual(find_recent_sessions(self.tmp / "absent"), [])
+
+    def test_directory_without_a_trace_is_not_a_session(self):
+        """Invariant: stray directories in runs/ are ignored rather than listed."""
+        (self.runs / "not-a-run").mkdir()
+        self._write_session("real")
+        self.assertEqual([s["run_id"] for s in find_recent_sessions(self.runs)], ["real"])
+
+    def test_newest_first_when_no_workspace_is_given(self):
+        """Invariant: without a workspace filter, recency alone decides the order."""
+        self._write_session("older", age_days=2.0)
+        self._write_session("newer", age_days=1.0)
+        self.assertEqual([s["run_id"] for s in find_recent_sessions(self.runs)],
+                         ["newer", "older"])
+
+    def test_matching_workspace_sorts_ahead_of_newer_sessions(self):
+        """Invariant: sessions from this repository outrank newer ones from elsewhere."""
+        self._write_session("mine", workspace="/repo", age_days=5.0)
+        self._write_session("theirs", workspace="/elsewhere", age_days=1.0)
+        sessions = find_recent_sessions(self.runs, workspace="/repo")
+        self.assertEqual([s["run_id"] for s in sessions], ["mine", "theirs"])
+        self.assertEqual([s["matches_workspace"] for s in sessions], [True, False])
+
+    def test_session_fields_are_read_from_the_trace(self):
+        """Invariant: the listing carries what /resume needs to show and restore."""
+        self._write_session("abc", steps=7, instruction="Fix the bug in auth.py")
+        record = find_recent_sessions(self.runs)[0]
+        self.assertEqual(record["task_id"], "abc")
+        self.assertEqual(record["total_steps"], 7)
+        self.assertEqual(record["preview"], "Fix the bug in auth.py")
+        self.assertEqual(record["finish_reason"], "completed")
+        self.assertEqual(record["run_dir"], str(self.runs / "abc"))
+
+    def test_preview_falls_back_to_the_first_user_message(self):
+        """Invariant: a run with no task instruction still previews its first prompt."""
+        entry = self.runs / "noinstr"
+        entry.mkdir()
+        (entry / "trace.json").write_text(
+            json.dumps({
+                "task": {"id": "noinstr", "instruction": "   "},
+                "total_steps": 1,
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "the real ask"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        self.assertEqual(find_recent_sessions(self.runs)[0]["preview"], "the real ask")
+
+    def test_preview_is_clipped_to_one_line(self):
+        """Invariant: an enormous instruction cannot flood the /resume listing."""
+        self._write_session("long", instruction="x" * 400)
+        preview = find_recent_sessions(self.runs)[0]["preview"]
+        self.assertEqual(len(preview), 60)
+        self.assertTrue(preview.endswith("..."))
+
+    def test_missing_preview_is_reported_explicitly(self):
+        """Invariant: a session with no user text shows a placeholder, not a blank row."""
+        entry = self.runs / "silent"
+        entry.mkdir()
+        (entry / "trace.json").write_text(json.dumps({"total_steps": 0}), encoding="utf-8")
+        self.assertEqual(find_recent_sessions(self.runs)[0]["preview"], "(no user prompt)")
+
+    def test_corrupt_trace_does_not_abort_the_scan(self):
+        """Invariant: one unreadable trace does not hide the sessions behind it.
+
+        The corrupt run still appears (it has a trace file), but with empty
+        summary fields rather than fabricated ones.
+        """
+        broken = self.runs / "broken"
+        broken.mkdir()
+        (broken / "trace.json").write_text("{ not json", encoding="utf-8")
+        self._write_session("healthy")
+
+        by_id = {s["run_id"]: s for s in find_recent_sessions(self.runs)}
+        self.assertIn("healthy", by_id)
+        self.assertEqual(by_id["broken"]["total_steps"], 0)
+        self.assertEqual(by_id["broken"]["workspace"], None)
+        self.assertEqual(by_id["broken"]["preview"], "(no user prompt)")
+
+    def test_jsonl_only_run_is_discovered(self):
+        """Invariant: a run that crashed before writing trace.json is still resumable."""
+        entry = self.runs / "crashed"
+        entry.mkdir()
+        lines = [
+            json.dumps({"prompt_messages": [{"role": "user", "content": "first ask"}]}),
+            json.dumps({"prompt_messages": [{"role": "user", "content": "first ask"}]}),
+        ]
+        (entry / "trajectory.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        record = find_recent_sessions(self.runs)[0]
+        self.assertEqual(record["run_id"], "crashed")
+        self.assertEqual(record["total_steps"], 2)
+        self.assertEqual(record["preview"], "first ask")
+
+    def test_older_match_is_still_found_beyond_the_cheap_window(self):
+        """Invariant: the two-pass scan reaches an older session for the same repository."""
+        self._write_session("old_match", workspace="/repo", age_days=90.0)
+        for index in range(80):
+            self._write_session(f"noise_{index:03d}", workspace="/elsewhere", age_days=1.0 + index)
+
+        sessions = find_recent_sessions(self.runs, workspace="/repo", limit=5)
+        self.assertEqual(sessions[0]["run_id"], "old_match")
+        self.assertTrue(sessions[0]["matches_workspace"])
+
+    def test_limit_caps_the_result(self):
+        """Invariant: /resume never returns more sessions than it asked for."""
+        for index in range(6):
+            self._write_session(f"s{index}", age_days=float(index))
+        self.assertEqual(len(find_recent_sessions(self.runs, limit=3)), 3)
+
+
+class TestReconstructMessages(unittest.TestCase):
+    """Rebuilding a conversation from persisted step records."""
+
+    def test_empty_input_yields_no_messages(self):
+        """Invariant: a run with no steps reconstructs to nothing."""
+        self.assertEqual(reconstruct_messages_from_steps([]), [])
+
+    def test_prompt_plus_assistant_reply(self):
+        """Invariant: the last step's prompt and its own response are both restored."""
+        steps = [{
+            "prompt_messages": [{"role": "user", "content": "hi"}],
+            "model_response": {"content": "hello", "tool_calls": []},
+            "tool_results": [],
+        }]
+        self.assertEqual(reconstruct_messages_from_steps(steps), [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+
+    def test_tool_calls_and_results_are_restored_in_order(self):
+        """Invariant: an interrupted tool exchange is replayed with its result attached."""
+        steps = [{
+            "prompt_messages": [{"role": "user", "content": "list files"}],
+            "model_response": {
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+            },
+            "tool_results": [{"call_id": "c1", "output": "a.py", "raw_log_path": None}],
+        }]
+        messages = reconstruct_messages_from_steps(steps)
+        self.assertEqual(messages[1]["tool_calls"], [{
+            "id": "c1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+        }])
+        self.assertEqual(messages[2]["role"], "tool")
+        self.assertEqual(messages[2]["tool_call_id"], "c1")
+
+    def test_serialization_placeholder_is_skipped(self):
+        """Invariant: a step that failed to serialize does not wipe the conversation."""
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "real history"}],
+                "model_response": {"content": "kept", "tool_calls": []},
+                "tool_results": [],
+            },
+            {
+                "prompt_messages": [],
+                "model_response": {"content": "lost"},
+                "serialization_error": True,
+            },
+        ]
+        messages = reconstruct_messages_from_steps(steps)
+        self.assertEqual(messages[0]["content"], "real history")
+        self.assertEqual(messages[1]["content"], "kept")
+
+    def test_latest_step_with_state_wins(self):
+        """Invariant: reconstruction uses the most recent usable step, not the first."""
+        steps = [
+            {"prompt_messages": [{"role": "user", "content": "one"}],
+             "model_response": {"content": "a"}, "tool_results": []},
+            {"prompt_messages": [{"role": "user", "content": "two"}],
+             "model_response": {"content": "b"}, "tool_results": []},
+        ]
+        self.assertEqual(reconstruct_messages_from_steps(steps)[0]["content"], "two")
+
+    def test_unusable_arguments_are_preserved_as_strings(self):
+        """Invariant: non-dict arguments are still replayable after a round trip."""
+        steps = [{
+            "prompt_messages": [{"role": "user", "content": "x"}],
+            "model_response": {"content": "", "tool_calls": [
+                {"id": "1", "name": "bash", "arguments": "not json at all"}
+            ]},
+            "tool_results": [],
+        }]
+        call = reconstruct_messages_from_steps(steps)[1]["tool_calls"][0]
+        self.assertEqual(call["function"]["arguments"], "not json at all")
+
+    def test_provider_extra_content_is_preserved(self):
+        """Invariant: provider-specific call metadata survives a resume."""
+        steps = [{
+            "prompt_messages": [{"role": "user", "content": "x"}],
+            "model_response": {"content": "", "tool_calls": [
+                {"id": "1", "function": {"name": "bash", "arguments": "{}"},
+                 "extra_content": {"provider": "x"}}
+            ]},
+            "tool_results": [],
+        }]
+        call = reconstruct_messages_from_steps(steps)[1]["tool_calls"][0]
+        self.assertEqual(call["extra_content"], {"provider": "x"})
+
+
+class TestLoadSessionMessagesFallbacks(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_trace_messages_are_preferred(self):
+        """Invariant: a complete trace replays its own recorded messages."""
+        run = self.tmp / "run"
+        run.mkdir()
+        (run / "trace.json").write_text(
+            json.dumps({"total_steps": 2, "messages": [{"role": "user", "content": "hi"}]}),
+            encoding="utf-8",
+        )
+        messages, meta = load_session_messages(run)
+        self.assertEqual(messages, [{"role": "user", "content": "hi"}])
+        self.assertEqual(meta["total_steps"], 2)
+
+    def test_falls_back_to_trace_steps_when_messages_are_absent(self):
+        """Invariant: a trace without a messages block is rebuilt from its steps."""
+        run = self.tmp / "steps_only"
+        run.mkdir()
+        (run / "trace.json").write_text(
+            json.dumps({
+                "total_steps": 1,
+                "steps": [{"prompt_messages": [{"role": "user", "content": "q"}],
+                           "model_response": {"content": "a"}, "tool_results": []}],
+            }),
+            encoding="utf-8",
+        )
+        messages, _ = load_session_messages(run)
+        self.assertEqual([m["content"] for m in messages], ["q", "a"])
+
+    def test_falls_back_to_jsonl_when_trace_is_corrupt(self):
+        """Invariant: a truncated trace.json still leaves a resumable session."""
+        run = self.tmp / "corrupt"
+        run.mkdir()
+        (run / "trace.json").write_text("{ truncated", encoding="utf-8")
+        (run / "trajectory.jsonl").write_text(
+            json.dumps({"prompt_messages": [{"role": "user", "content": "q"}],
+                        "model_response": {"content": "a"}, "tool_results": []}),
+            encoding="utf-8",
+        )
+        messages, meta = load_session_messages(run)
+        self.assertEqual([m["content"] for m in messages], ["q", "a"])
+        self.assertEqual(meta["total_steps"], 1)
+
+    def test_unreadable_session_reports_metadata_without_messages(self):
+        """Invariant: a directory with no trace at all yields empty messages, not an error."""
+        run = self.tmp / "empty"
+        run.mkdir()
+        messages, meta = load_session_messages(run)
+        self.assertEqual(messages, [])
+        self.assertEqual(meta["finish_reason"], "unknown")
+        self.assertEqual(meta["run_id"], "empty")

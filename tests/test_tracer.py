@@ -10,12 +10,14 @@ from typing import Any
 from unittest.mock import patch
 
 from core.harness import Task
-from core.tracer import (
-    Tracer,
-    _pair_calls_with_results,
+from core.session import (
     find_recent_sessions,
     load_session_messages,
     reconstruct_messages_from_steps,
+)
+from core.tracer import (
+    Tracer,
+    _pair_calls_with_results,
 )
 
 
