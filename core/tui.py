@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.interactive import command_catalog, format_model_desc, format_session_desc
+
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
     "\x1b[27;2;13~",
@@ -22,18 +24,6 @@ SHIFT_ENTER_SEQUENCES: set[str | int] = {
     545,
     546,
 }
-
-DEFAULT_COMMANDS: list[tuple[str, str]] = [
-    ("/model", "Switch active model or show models from config"),
-    ("/resume", "Show previous sessions or resume with /resume <id>"),
-    ("/compact", "Free context tokens by compacting older turn observations"),
-    ("/status", "Show current token usage, cache rate, and context breakdown"),
-    ("/new", "Start fresh session while preserving workspace changes"),
-    ("/skill", "Show available skills or activate with /skill <name>"),
-    ("/help", "List all available built-in and workspace custom commands"),
-    ("/exit", "Exit the interactive agent session"),
-]
-
 
 def compact_path(path_str: str) -> str:
     """Compacts an absolute path with ~ if within the user's home directory."""
@@ -432,7 +422,7 @@ class TUIState:
         self.reasoning: str = ""
         self.cwd: str = ""
         self.git_branch: str = ""
-        self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
+        self.command_catalog: list[tuple[str, str]] = command_catalog()
         self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
         self.available_models: list[dict[str, Any]] = []
@@ -455,7 +445,7 @@ class TUIState:
 
     def _rebuild_command_catalog(self) -> None:
         """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
-        catalog = list(DEFAULT_COMMANDS)
+        catalog = command_catalog()
         for cmd_name, cmd_info in sorted(self.custom_commands.items()):
             scope = _resource_field(cmd_info, 2, "scope", "")
             desc = f"Custom command [{scope}]" if scope else f"Custom command: /{cmd_name}"
@@ -555,16 +545,8 @@ class TUIState:
                 res.append((prefix, "Load or inspect a custom skill prompt"))
             for s_name, s_info in sorted(self.skills.items()):
                 if not sub or s_name.lower().startswith(sub):
-                    summary = (
-                        s_info[0]
-                        if isinstance(s_info, (tuple, list)) and len(s_info) > 0
-                        else s_name
-                    )
-                    scope = (
-                        s_info[2]
-                        if isinstance(s_info, (tuple, list)) and len(s_info) > 2
-                        else "project"
-                    )
+                    summary = _resource_field(s_info, 0, "summary", s_name)
+                    scope = _resource_field(s_info, 2, "scope", "project")
                     res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
             return res
 
@@ -579,9 +561,7 @@ class TUIState:
             for m in self.available_models:
                 m_name = m.get("name", "")
                 if not sub or m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
-                    prov = m.get("provider") or "model"
-                    desc = m.get("description") or f"Model {m_name}"
-                    res_m.append((f"{prefix} {m_name}", f"[{prov}] {desc}"))
+                    res_m.append((f"{prefix} {m_name}", format_model_desc(m)))
             return res_m
 
         # If user is typing /resume or /resume <subcommand>, match against available previous sessions
@@ -595,9 +575,7 @@ class TUIState:
             for s in self.available_sessions:
                 run_id = s.get("run_id", "")
                 if not sub or run_id.lower().startswith(sub):
-                    steps = s.get("total_steps", 0)
-                    prev = s.get("preview", "")[:35]
-                    res_s.append((f"{prefix} {run_id}", f"({steps} steps) {prev}"))
+                    res_s.append((f"{prefix} {run_id}", format_session_desc(s, preview_limit=35)))
             return res_s
 
         if " " in buf:

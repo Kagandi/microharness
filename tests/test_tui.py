@@ -6,6 +6,7 @@ import unicodedata
 import unittest
 from unittest.mock import MagicMock, patch
 
+from core.interactive import COMMAND_SPECS
 from core.tui import (
     CursesTUI,
     TUILine,
@@ -682,14 +683,17 @@ class TestTUI(unittest.TestCase):
         state.input_buffer = "hello"
         self.assertEqual(state.get_matching_commands(), [])
 
-        # Input "/" -> all built-in commands
+        # Input "/" -> every command the router supports, in catalog order
         state.input_buffer = "/"
         matches = state.get_matching_commands()
-        self.assertEqual(len(matches), 8)
-        self.assertEqual([m[0] for m in matches], ["/model", "/resume", "/compact", "/status", "/new", "/skill", "/help", "/exit"])
+        self.assertEqual(
+            [m[0] for m in matches],
+            [spec.canonical for spec in COMMAND_SPECS],
+        )
+        self.assertEqual(len(matches), len(COMMAND_SPECS))
 
-        # Input "/c" -> matches /compact
-        state.input_buffer = "/c"
+        # Input "/comp" -> matches /compact only ("/cache" also starts with /c)
+        state.input_buffer = "/comp"
         c_matches = state.get_matching_commands()
         self.assertEqual(len(c_matches), 1)
         self.assertEqual(c_matches[0][0], "/compact")
@@ -758,7 +762,7 @@ class TestTUI(unittest.TestCase):
             submitted.append(text)
 
         # 1. Single-match Tab autocompletion (str "\t")
-        state.input_buffer = "/c"
+        state.input_buffer = "/comp"
         state.selected_command_idx = 0
         ret = tui.handle_key("\t", dummy_submit)
         self.assertTrue(ret)
@@ -785,18 +789,18 @@ class TestTUI(unittest.TestCase):
         tui.handle_key(353, dummy_submit)  # Shift-Tab integer
         self.assertEqual(state.selected_command_idx, 0)
         tui.handle_key("\x1b[Z", dummy_submit)  # Shift-Tab ANSI escape sequence
-        self.assertEqual(state.selected_command_idx, 7)
+        self.assertEqual(state.selected_command_idx, len(COMMAND_SPECS) - 1)
         tui.handle_key(curses.KEY_UP, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 6)
+        self.assertEqual(state.selected_command_idx, len(COMMAND_SPECS) - 2)
 
-        # 5. Down arrow cycling forward
+        # 5. Down arrow cycling forward, then wrapping past the last entry
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
-        self.assertEqual(state.selected_command_idx, 7)
+        self.assertEqual(state.selected_command_idx, len(COMMAND_SPECS) - 1)
         tui.handle_key(curses.KEY_DOWN, dummy_submit)
         self.assertEqual(state.selected_command_idx, 0)
 
         # 6. Right Arrow autocompletion into input buffer
-        state.selected_command_idx = 6  # /help
+        state.selected_command_idx = len(COMMAND_SPECS) - 1  # /help
         tui.handle_key(curses.KEY_RIGHT, dummy_submit)
         self.assertEqual(state.input_buffer, "/help")
 
@@ -1406,3 +1410,76 @@ class TestTUI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCommandCatalog(unittest.TestCase):
+    """The autocomplete catalog and the router must not drift apart."""
+
+    def test_catalog_covers_every_routable_command(self):
+        """Invariant: the TUI offers exactly the commands the router can execute."""
+        state = TUIState()
+        state.input_buffer = "/"
+        self.assertEqual(
+            [name for name, _ in state.get_matching_commands()],
+            [spec.canonical for spec in COMMAND_SPECS],
+        )
+
+    def test_catalog_survives_custom_command_and_skill_rebuilds(self):
+        """Invariant: adding resources keeps the built-in entries and appends the new ones."""
+        from core.commands import Command
+        from core.skills import Skill
+
+        state = TUIState()
+        state.set_custom_commands(
+            {"review": Command("review", "Review PR", "t", "project")}
+        )
+        state.set_skills(
+            {"deploy": Skill("deploy", "Deploy app", "d/SKILL.md", "project", "body")}
+        )
+
+        names = [name for name, _ in state.command_catalog]
+        self.assertEqual(names[: len(COMMAND_SPECS)], [s.canonical for s in COMMAND_SPECS])
+        self.assertIn("/review", names)
+        self.assertIn("/deploy", names)
+
+    def test_skill_menu_shows_summary_and_scope_from_the_dataclass(self):
+        """Invariant: the /skill menu reads Skill fields, so summaries are not lost."""
+        from core.skills import Skill
+
+        state = TUIState()
+        state.set_skills(
+            {
+                "deploy-tool": Skill(
+                    "deploy-tool", "Deploy app to production", "d/SKILL.md", "global", "body"
+                )
+            }
+        )
+        state.input_buffer = "/skill "
+        matches = dict(state.get_matching_commands())
+
+        self.assertEqual(
+            matches["/skill deploy-tool"], "[global] Deploy app to production"
+        )
+
+    def test_model_menu_reuses_the_shared_description_formatter(self):
+        """Invariant: the /model menu describes a model exactly like the /model listing."""
+        from core.interactive import format_model_desc
+
+        state = TUIState()
+        state.set_available_models(
+            [{"name": "fast", "model": "gemini", "provider": "google", "description": "Fast"}]
+        )
+        state.input_buffer = "/model fast"
+        command, desc = state.get_matching_commands()[0]
+        self.assertEqual(command, "/model fast")
+        self.assertEqual(desc, format_model_desc(state.available_models[0]))
+
+    def test_session_menu_truncates_long_previews(self):
+        """Invariant: the /resume menu keeps previews inside its narrow column."""
+        state = TUIState()
+        state.set_available_sessions(
+            [{"run_id": "abc", "total_steps": 3, "preview": "x" * 80}]
+        )
+        state.input_buffer = "/resume abc"
+        _, desc = state.get_matching_commands()[0]
+        self.assertEqual(desc, "(3 steps) " + "x" * 35)

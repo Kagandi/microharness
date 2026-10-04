@@ -12,7 +12,7 @@ handler, not two.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -149,7 +149,11 @@ class CommandContext:
 
 @dataclass(frozen=True)
 class CommandSpec:
-    """One routable command: the spellings it answers to and its handler.
+    """One routable command: how it is spelled, what it is for, and its handler.
+
+    A spec is the single source of truth for a command: the router matches
+    ``names``, ``/help`` prints ``usage`` with ``description``, and the TUI
+    autocomplete catalog lists ``canonical`` with ``description``.
 
     ``names`` may be invoked with arguments; ``bare_names`` (the slash-less
     spellings) only match exactly, so ordinary prose like "model the user
@@ -158,9 +162,16 @@ class CommandSpec:
 
     key: str
     names: tuple[str, ...]
+    usage: str
+    description: str
     handler: str
     takes_args: bool = False
     bare_names: tuple[str, ...] = ()
+
+    @property
+    def canonical(self) -> str:
+        """The spelling shown in help text and autocomplete."""
+        return self.names[0]
 
     def matches(self, lowered: str) -> bool:
         """Whether ``lowered`` (already trimmed) invokes this command."""
@@ -174,17 +185,85 @@ class CommandSpec:
         return False
 
 
+HELP_USAGE_WIDTH = 29
+HELP_HIDDEN = frozenset({"help"})  # /help does not list itself
+
 COMMAND_SPECS: tuple[CommandSpec, ...] = (
-    CommandSpec("exit", ("/exit", "/quit"), "_cmd_exit"),
-    CommandSpec("help", ("/help",), "_cmd_help"),
-    CommandSpec("status", ("/status", "/context"), "_cmd_status"),
-    CommandSpec("reasoning", ("/reasoning",), "_cmd_reasoning", takes_args=True),
-    CommandSpec("cache", ("/cache",), "_cmd_cache", takes_args=True),
-    CommandSpec("model", ("/model", "/models"), "_cmd_model", takes_args=True),
-    CommandSpec("resume", ("/resume", "/resumes"), "_cmd_resume", takes_args=True),
-    CommandSpec("compact", ("/compact",), "_cmd_compact"),
-    CommandSpec("new", ("/new", "/reset"), "_cmd_new"),
-    CommandSpec("skill", ("/skill", "/skills"), "_cmd_skill", takes_args=True),
+    CommandSpec(
+        "model",
+        ("/model", "/models"),
+        "/model [name|idx]",
+        "View configured models or switch active model",
+        "_cmd_model",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "resume",
+        ("/resume", "/resumes"),
+        "/resume [id|idx]",
+        "View or resume a previous conversation session",
+        "_cmd_resume",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "reasoning",
+        ("/reasoning",),
+        "/reasoning [low|med|high|off]",
+        "View or switch reasoning / thinking effort",
+        "_cmd_reasoning",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "cache",
+        ("/cache",),
+        "/cache [5m|1h|off]",
+        "View or switch prompt caching duration on the fly",
+        "_cmd_cache",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "status",
+        ("/status", "/context"),
+        "/status",
+        "Show context window size, message breakdown, and budget",
+        "_cmd_status",
+    ),
+    CommandSpec(
+        "compact",
+        ("/compact",),
+        "/compact",
+        "Manually collapse older observations to free context",
+        "_cmd_compact",
+    ),
+    CommandSpec(
+        "new",
+        ("/new", "/reset"),
+        "/new",
+        "Clear conversation history while keeping workspace files",
+        "_cmd_new",
+    ),
+    CommandSpec(
+        "skill",
+        ("/skill", "/skills"),
+        "/skill [name]",
+        "Show available skills or activate one into conversation",
+        "_cmd_skill",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "exit",
+        ("/exit", "/quit"),
+        "/exit",
+        "Save session trace and exit",
+        "_cmd_exit",
+    ),
+    CommandSpec(
+        "help",
+        ("/help",),
+        "/help",
+        "List built-in, custom, and discovered commands",
+        "_cmd_help",
+    ),
 )
 
 # Spellings not derivable from a command's own names (which yield the slash-less form).
@@ -197,11 +276,8 @@ EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
 def expand_specs(specs: tuple[CommandSpec, ...]) -> tuple[CommandSpec, ...]:
     """Adds slash-less aliases, so ``status`` and ``/status`` reach the same handler."""
     return tuple(
-        CommandSpec(
-            key=spec.key,
-            names=spec.names,
-            handler=spec.handler,
-            takes_args=spec.takes_args,
+        replace(
+            spec,
             bare_names=(*(name.lstrip("/") for name in spec.names), *EXTRA_ALIASES.get(spec.key, ())),
         )
         for spec in specs
@@ -214,23 +290,22 @@ def command_argument(user_input: str) -> str:
     return args.strip()
 
 
+def command_catalog() -> list[tuple[str, str]]:
+    """Built-in commands as ``(canonical, description)``, for autocomplete menus."""
+    return [(spec.canonical, spec.description) for spec in COMMAND_SPECS]
+
+
 def render_help_lines(
     commands: dict[str, Command],
     skills: dict[str, Skill],
     footer: str = "",
 ) -> list[str]:
     """Renders ``/help``: built-in commands first, then discovered commands and skills."""
-    lines = [
-        "Available commands:",
-        "  /model [name|idx]             - View configured models or switch active model",
-        "  /resume [id|idx]              - View or resume a previous conversation session",
-        "  /reasoning [low|med|high|off] - View or switch reasoning / thinking effort",
-        "  /cache [5m|1h|off]            - View or switch prompt caching duration on the fly",
-        "  /status                       - Show context window size, message breakdown, and budget",
-        "  /compact                      - Manually collapse older observations to free context",
-        "  /new                          - Clear conversation history while keeping workspace files",
-        "  /skill [name]                 - Show available skills or activate one into conversation",
-        "  /exit                         - Save session trace and exit",
+    lines = ["Available commands:"]
+    lines += [
+        f"  {spec.usage:<{HELP_USAGE_WIDTH}} - {spec.description}"
+        for spec in COMMAND_SPECS
+        if spec.key not in HELP_HIDDEN
     ]
     if commands:
         lines.append("\nCustom slash commands (from commands/):")
@@ -248,6 +323,26 @@ def render_help_lines(
     return lines
 
 
+def format_model_desc(model: dict[str, Any]) -> str:
+    """One-line description of a model entry, shared by listings and autocomplete."""
+    provider = model.get("provider")
+    label = f"[{provider}] " if provider else ""
+    name = model.get("name", "")
+    return f"{label}{model.get('description') or f'Model {name}'}"
+
+
+def format_session_desc(session: dict[str, Any], preview_limit: int | None = None) -> str:
+    """One-line session summary: step count plus preview, optionally truncated.
+
+    The autocomplete menu passes ``preview_limit`` because its column is narrow;
+    the ``/resume`` listing shows the stored preview in full.
+    """
+    preview = str(session.get("preview") or "")
+    if preview_limit is not None and len(preview) > preview_limit:
+        preview = preview[:preview_limit]
+    return f"({session.get('total_steps', 0)} steps) {preview}"
+
+
 def render_model_lines(models: list[dict[str, Any]], active_model: str) -> list[str]:
     """Renders the ``/model`` listing, marking the active entry."""
     if not models:
@@ -258,10 +353,7 @@ def render_model_lines(models: list[dict[str, Any]], active_model: str) -> list[
     for index, model in enumerate(models, start=1):
         is_active = model["name"].lower() == lowered or model.get("model", "").lower() == lowered
         active = " [active]" if is_active else ""
-        provider = f"[{model['provider']}] " if model.get("provider") else ""
-        lines.append(
-            f"  {index}. {model['name']}{active} - {provider}{model.get('description', '')}"
-        )
+        lines.append(f"  {index}. {model['name']}{active} - {format_model_desc(model)}")
     return lines
 
 
@@ -272,7 +364,7 @@ def render_session_lines(sessions: list[dict[str, Any]]) -> list[str]:
     return [
         f"  {index}. {session['run_id']}"
         f"{' [this repo]' if session.get('matches_workspace') else ''} "
-        f"({session['total_steps']} steps) - {session['preview']}"
+        f"- {format_session_desc(session)}"
         for index, session in enumerate(sessions, start=1)
     ]
 
