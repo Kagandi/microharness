@@ -9,6 +9,7 @@ from core.model import HttpChatModel, MockModel
 from core.providers import (
     FALLBACK_ENV_KEYS,
     LAST_RESORT_MODEL,
+    Connection,
     ModelRequest,
     build_model_from_spec,
     find_provider_by_endpoint,
@@ -17,6 +18,7 @@ from core.providers import (
     load_provider_registry,
     parse_model_spec,
     resolve_api_key,
+    resolve_connection,
     resolve_model_spec,
     resolve_provider,
     seed_user_providers,
@@ -344,6 +346,72 @@ class TestBuildModelFromSpec(unittest.TestCase):
             model = build_model_from_spec("custom/whatever", registry=registry)
         self.assertEqual(model.model, "whatever")
         self.assertIn(LAST_RESORT_MODEL, LAST_RESORT_MODEL)
+
+
+class TestResolveConnection(unittest.TestCase):
+    REGISTRY = {
+        "openai": {
+            "endpoint": "https://openai/v1",
+            "default_model": "gpt-4o",
+            "env_keys": ["OPENAI_API_KEY"],
+            "reasoning_format": "standard",
+            "cache_strategy": "implicit",
+        }
+    }
+
+    def test_reports_the_resolved_connection_without_building_a_client(self):
+        """Invariant: a caller can inspect what would be built before building it."""
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk"}, clear=True):
+            connection = resolve_connection(
+                {"model": "gpt-4o-mini", "endpoint": "https://openai/v1"},
+                registry=self.REGISTRY,
+            )
+        self.assertEqual(
+            connection,
+            Connection(
+                model="gpt-4o-mini",
+                endpoint="https://openai/v1",
+                provider="openai",
+                api_key="sk",
+            ),
+        )
+
+    def test_provider_defaults_fill_an_unset_model(self):
+        """Invariant: a bare provider name uses that provider's default model."""
+        connection = resolve_connection({"provider": "openai"}, registry=self.REGISTRY)
+        self.assertEqual(connection.model, "gpt-4o")
+        self.assertEqual(connection.endpoint, "https://openai/v1")
+
+    def test_no_endpoint_anywhere_reports_offline(self):
+        """Invariant: an unconfigured environment is reported, not guessed at."""
+        with patch.dict(os.environ, {}, clear=True):
+            connection = resolve_connection({"model": "m"}, config={}, registry={})
+        self.assertTrue(connection.is_offline)
+        self.assertIsNone(connection.endpoint)
+
+    def test_provider_dialects_are_carried_through(self):
+        """Invariant: reasoning/cache dialects from the profile reach the client."""
+        registry = {
+            "openrouter": {
+                "endpoint": "https://openrouter.ai/api/v1",
+                "reasoning_format": "openrouter",
+                "cache_strategy": "anthropic_block",
+            }
+        }
+        connection = resolve_connection({"provider": "openrouter"}, registry=registry)
+        self.assertEqual(connection.reasoning_format, "openrouter")
+        self.assertEqual(connection.cache_strategy, "anthropic_block")
+
+    def test_build_model_from_spec_matches_resolve_connection(self):
+        """Invariant: the two entry points cannot disagree about what gets connected."""
+        registry = dict(self.REGISTRY)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk"}, clear=True):
+            connection = resolve_connection("openai/gpt-4o", registry=registry)
+            model = build_model_from_spec("openai/gpt-4o", registry=registry)
+        self.assertEqual(model.model, connection.model)
+        self.assertEqual(model.endpoint, f"{connection.endpoint}/chat/completions")
+        self.assertEqual(model.provider, connection.provider)
+        self.assertEqual(model.api_key, connection.api_key)
 
 
 class TestResolveModelSpec(unittest.TestCase):

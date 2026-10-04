@@ -301,6 +301,69 @@ def resolve_api_key(
     return config.get("api_key")
 
 
+@dataclass(frozen=True)
+class Connection:
+    """Everything needed to construct a client, after the registry has been applied."""
+
+    model: str
+    endpoint: str | None = None
+    provider: str | None = None
+    api_key: str | None = None
+    headers: dict[str, Any] = field(default_factory=dict)
+    reasoning_format: str = "standard"
+    cache_strategy: str = "implicit"
+
+    @property
+    def is_offline(self) -> bool:
+        """True when no endpoint could be resolved, so no HTTP client is possible."""
+        return not self.endpoint
+
+
+def resolve_connection(
+    spec: str | dict[str, Any],
+    config: dict[str, Any] | None = None,
+    registry: dict[str, dict[str, Any]] | None = None,
+) -> Connection:
+    """Resolves a model specification into concrete connection settings.
+
+    ``endpoint`` may be ``None``, which means the caller has no way to reach a
+    provider and should fall back to an offline model. Callers that want to show
+    what was selected (the CLI, for instance) can inspect the result before
+    handing it to :func:`build_model_from_spec`.
+    """
+    cfg = dict(config or {})
+    resolved_registry = load_builtin_providers() if registry is None else registry
+    request = parse_model_spec(spec, cfg, resolved_registry)
+
+    provider_name, profile = resolve_provider(
+        resolved_registry, request.provider or cfg.get("provider")
+    )
+
+    endpoint = request.endpoint or cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+    if not profile and endpoint:
+        detected_name, detected_profile = find_provider_by_endpoint(resolved_registry, endpoint)
+        if detected_profile:
+            provider_name, profile = detected_name, detected_profile
+
+    headers = {**(profile.get("headers") or {}), **(cfg.get("headers") or {})}
+    headers.update(request.headers)
+
+    return Connection(
+        model=(
+            request.model
+            or cfg.get("model")
+            or os.getenv("MODEL_NAME")
+            or profile.get("default_model", LAST_RESORT_MODEL)
+        ),
+        endpoint=endpoint or profile.get("endpoint"),
+        provider=provider_name or profile.get("name"),
+        api_key=resolve_api_key(request, profile, cfg),
+        headers=headers,
+        reasoning_format=profile.get("reasoning_format", "standard"),
+        cache_strategy=profile.get("cache_strategy", "implicit"),
+    )
+
+
 def build_model_from_spec(
     spec: str | dict[str, Any],
     config: dict[str, Any] | None = None,
@@ -318,43 +381,20 @@ def build_model_from_spec(
     if not isinstance(spec, (str, dict)):
         raise ValueError(f"Expected model spec as str or dict, got {type(spec).__name__}")
 
-    cfg = dict(config or {})
-    resolved_registry = load_builtin_providers() if registry is None else registry
-    request = parse_model_spec(spec, cfg, resolved_registry)
-
-    provider_name, profile = resolve_provider(
-        resolved_registry, request.provider or cfg.get("provider")
-    )
-
-    endpoint = request.endpoint or cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
-    if not profile and endpoint:
-        detected_name, detected_profile = find_provider_by_endpoint(resolved_registry, endpoint)
-        if detected_profile:
-            provider_name, profile = detected_name, detected_profile
-    endpoint = endpoint or profile.get("endpoint")
-
-    model = (
-        request.model
-        or cfg.get("model")
-        or os.getenv("MODEL_NAME")
-        or profile.get("default_model", LAST_RESORT_MODEL)
-    )
-    headers = {**(profile.get("headers") or {}), **(cfg.get("headers") or {})}
-    headers.update(request.headers)
-
-    if not endpoint:
+    connection = resolve_connection(spec, config, registry)
+    if connection.is_offline:
         return MockModel([("Mock response (offline mode)", [])])
 
     return HttpChatModel(
-        base_url=endpoint,
-        model=model,
-        api_key=resolve_api_key(request, profile, cfg),
-        headers=headers,
+        base_url=connection.endpoint,
+        model=connection.model,
+        api_key=connection.api_key,
+        headers=connection.headers,
         cache_ttl=cache_ttl,
         reasoning_effort=reasoning_effort,
-        reasoning_format=profile.get("reasoning_format", "standard"),
-        cache_strategy=profile.get("cache_strategy", "implicit"),
-        provider=provider_name or profile.get("name"),
+        reasoning_format=connection.reasoning_format,
+        cache_strategy=connection.cache_strategy,
+        provider=connection.provider,
     )
 
 

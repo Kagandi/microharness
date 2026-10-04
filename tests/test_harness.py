@@ -2465,3 +2465,91 @@ class ProjectWeather:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCliContext(unittest.TestCase):
+    """main.py's resolved-context plumbing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.runs_dir = Path(self.tmp) / "runs"
+        self.runs_dir.mkdir()
+
+    def _context(self, model=None, **overrides):
+        from main import CliContext
+
+        defaults = {
+            "model": model or MockModel([("done", [])]),
+            "global_dir": Path(self.tmp),
+            "runs_dir": self.runs_dir,
+            "target_dir": Path(self.tmp),
+        }
+        return CliContext(**{**defaults, **overrides})
+
+    def test_harness_carries_the_resolved_settings(self):
+        """Invariant: settings resolved once by the CLI reach the harness unchanged."""
+        context = self._context(
+            cache_ttl="1h", reasoning_effort="high", use_docker=True, docker_image="python:3.12",
+            trust_project_tools=True,
+        )
+
+        harness = context.harness(sandbox=True)
+
+        self.assertEqual(harness.cache_ttl, "1h")
+        self.assertEqual(harness.reasoning_effort, "high")
+        self.assertTrue(harness.docker)
+        self.assertEqual(harness.docker_image, "python:3.12")
+        self.assertTrue(harness.trust_project_tools)
+        self.assertEqual(harness.runs_dir, self.runs_dir.resolve())
+
+    def test_evaluator_is_attached_when_supplied(self):
+        """Invariant: benchmark grading flows through the same factory."""
+        evaluator = FileContentEvaluator(file_path="a.txt", must_contain=["x"])
+        self.assertIs(self._context().harness(evaluator).evaluator, evaluator)
+
+    def test_reattaching_a_harness_resets_a_reusable_model(self):
+        """Invariant: a scripted model replays from step 1 for each new task."""
+        model = MockModel([("first", []), ("second", [])])
+        context = self._context(model=model)
+
+        context.harness()
+        model.step_idx = 1  # as if the previous task had run a step
+        context.harness()
+
+        self.assertEqual(model.step_idx, 0)
+
+    def test_benchmark_factory_builds_sandboxed_harnesses(self):
+        """Invariant: the benchmark factory isolates every task in a sandbox."""
+        from main import create_benchmark_harness_factory
+
+        factory = create_benchmark_harness_factory(
+            model=MockModel([("done", [])]),
+            global_dir=Path(self.tmp),
+            runs_dir=self.runs_dir,
+        )
+
+        harness = factory(FileContentEvaluator(file_path="a.txt", must_contain=["x"]))
+        self.assertTrue(harness.sandbox)
+        self.assertEqual(harness.runs_dir, self.runs_dir.resolve())
+
+    def test_benchmark_dispatch_table_covers_every_flag_choice(self):
+        """Invariant: every --benchmark/--demo choice the parser accepts has a runner."""
+        from main import BENCHMARK_RUNNERS, _build_arg_parser
+
+        parser = _build_arg_parser()
+        choices = set(parser.parse_args(["--benchmark", "mini-swe"]).benchmark.split()) | {
+            "mini-swe", "calculator", "all", "deepswe-mini",
+            "calculator", "greeting",  # --demo choices
+        }
+        for choice in choices:
+            self.assertIn(choice, BENCHMARK_RUNNERS, choice)
+        self.assertNotIn("bogus-suite", BENCHMARK_RUNNERS)
+
+    def test_dispatch_without_a_benchmark_request_runs_nothing(self):
+        """Invariant: a normal session falls through to interactive mode."""
+        import argparse
+
+        from main import _dispatch_benchmark
+
+        context = self._context(args=argparse.Namespace(benchmark=None, demo=None))
+        self.assertFalse(_dispatch_benchmark(context))
