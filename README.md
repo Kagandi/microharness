@@ -399,7 +399,7 @@ microharness/
 │   ├── commands.py     # Custom slash commands & slash-input resolution
 │   ├── discovery.py    # Hierarchical resource discovery & @file-tagging
 │   ├── interactive.py  # Interactive command router shared by the CLI session & the TUI
-│   ├── session.py      # Step driver (retries & deadlines) & session resumption
+│   ├── session.py      # Step driver, session index, resumption & trace reconstruction
 │   ├── loop.py         # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py       # Telemetry collector, modern CLI renderer & trace exporter

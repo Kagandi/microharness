@@ -55,7 +55,7 @@ microharness/
 │   ├── commands.py             # Custom slash commands & slash-input resolution
 │   ├── discovery.py            # Hierarchical resource discovery & @file-tagging
 │   ├── interactive.py          # Command router shared by the CLI session & the TUI
-│   ├── session.py              # Step driver (retries & deadlines) & session resumption
+│   ├── session.py              # Step driver, session index, resumption & trace reconstruction
 │   ├── loop.py                 # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py            # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py               # Telemetry collector & trace exporter
@@ -77,7 +77,7 @@ microharness/
     ├── test_skills.py          # Skill discovery, summaries & activation
     ├── test_commands.py        # Slash-command discovery, expansion & resolution
     ├── test_prompts.py         # Prompt assembly & AGENTS.md cascading
-    ├── test_session.py         # Step driver retries, deadlines & session resumption
+    ├── test_session.py         # Step driver, session index & trace reconstruction
     ├── test_interactive.py     # Command router & rendering
     ├── test_tui_session.py     # TUI turn rendering & cancellation
     └── test_harness.py         # End-to-end lifecycle, multi-turn chat, skills & guardrails
@@ -304,10 +304,18 @@ while not done:
   to the user's budget.
 * **`resolve_session_dir` / `load_session`** resolve a session selector (run id, 1-based index,
   path substring, or recency) to a run directory, so `/resume` and `--resume` agree.
+* **`find_recent_sessions`** builds the `/resume` listing. It inspects a cheap window of recent
+  runs first and only walks the full history when that window has no match for the current
+  workspace, so an older session for the same repository is never hidden behind the ceiling.
+  Sessions are summarized from `trace.json`, falling back to `trajectory.jsonl` for a run that
+  crashed before writing its trace.
+* **`reconstruct_messages_from_steps` / `load_session_messages`** rebuild a conversation from
+  persisted steps, skipping serialization-error placeholders so a mid-run crash cannot silently
+  discard the history. The tracer re-exports these names for backwards compatibility.
 
 ---
 
-### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/interactive.py`, `core/harness.py`)
+### 3.8 Telemetry, Git Patch Export & Interactive Chat (`core/tracer.py`, `core/session.py`, `core/interactive.py`, `core/harness.py`)
 * **Real-time Terminal Streaming**: Clean emoji indicators for Thoughts (`🧠`), Actions (`⚡`), Observations (`👁️`), Compactions (`🧹`), and User Input (`👤`).
 * **Artifact Persistence & Crash Recovery**: Every run writes:
   * `trajectory.jsonl`: Append-only, per-step streaming persistence. Each step is written and flushed to disk as it completes, so a process or container crash mid-turn loses at most the in-flight step. Records are serialized with `default=str`, so non-JSON-native values (Decimals, `Path`, sets, custom objects) degrade to their string form instead of dropping the step. A step that cannot be serialized at all (circular references, non-primitive dict keys) is replaced by a placeholder carrying `serialization_error: true` and empty `prompt_messages`; the placeholder preserves `step_index` so the stream never contains index holes, and message reconstruction skips it in favour of the last step that recorded a real prompt. Recovery is therefore complete up to the most recent serializable step, not guaranteed unconditionally.
@@ -319,6 +327,11 @@ while not done:
   and the handlers; each frontend supplies a `SessionUI` sink (`ConsoleUI` prints, `TuiUI` writes to
   `TUIState`). Handlers perform the work and report through the sink, then return one of `exit`,
   `turn`, or `skip`. A command is added once, not once per frontend.
+  * A `CommandSpec` is the single source of truth for a command: its `names` drive routing, its
+    `usage` and `description` drive `/help`, and `core/tui.py` derives its autocomplete catalog
+    from the same specs. The menu therefore cannot offer fewer commands than the router executes.
+  * `core/tui.py` owns curses rendering and key handling only; `core/tui_session.py` is the sole
+    bridge that runs an agent turn while the screen stays responsive.
 * **Interactive Meta-Commands & Resilience**:
   * Graceful interruption: `Ctrl+C` aborts the active step immediately (including a blocked request) and returns cleanly to the prompt without aborting the session. `Esc` is a cooperative cancel observed at step boundaries and between model retry attempts; it announces `⚠️ Cancelling…` as soon as it is seen. See §5.1 for why the two differ and §5.2 for the planned work to unify them.
   * `/model [name|number]`: Inspects available models or switches the active model dynamically on the fly. A supplied name is resolved against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (accepting both `openai` and `openai/gpt-4o`). An unrecognized name is rejected with the list of valid models rather than silently constructing a client for a model that does not exist. A numeric argument selects from the same list.
