@@ -349,12 +349,10 @@ class Tracer:
             return
 
         lines = output.splitlines()
-        max_preview_lines = 15
-        for line in lines[:max_preview_lines]:
+        for line in lines[:MAX_PREVIEW_LINES]:
             print(f"  {line}")
-        if len(lines) > max_preview_lines:
-            remaining = len(lines) - max_preview_lines
-            print(_dim(f"  ... ({remaining} more lines)"))
+        if len(lines) > MAX_PREVIEW_LINES:
+            print(_dim(f"  ... ({len(lines) - MAX_PREVIEW_LINES} more lines)"))
 
     def _compute_telemetry(self) -> dict[str, Any]:
         """Derives run totals from step usage, reusing the shared token normalizer."""

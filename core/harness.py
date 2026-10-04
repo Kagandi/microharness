@@ -111,9 +111,6 @@ DEFAULT_GLOBAL_DIR = get_default_global_dir()
 
 EMPTY_SPEC_ERROR = "Model specification cannot be empty."
 
-SKILL_COMMAND_ALIASES = ("/skill", "/skills", "skill", "skills")
-SKILL_COMMAND_PREFIXES = ("/skill ", "/skills ")
-
 # Skill and command discovery moved to core/skills.py and core/commands.py. These
 # aliases keep the historical import paths working for the CLI and tests.
 _discover_skills = discover_skills

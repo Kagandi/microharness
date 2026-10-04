@@ -84,7 +84,7 @@ def compact_path(path_str: str) -> str:
         if p_str.startswith(resolved_home + "/"):
             return "~" + p_str[len(resolved_home) :]
         return p_str
-    except Exception:
+    except (OSError, ValueError):
         return path_str
 
 
@@ -170,7 +170,7 @@ def get_git_branch(workspace: Path | str) -> str:
             if content.startswith("ref: refs/heads/"):
                 return content[len("ref: refs/heads/") :]
             return content[:7]
-    except Exception:
+    except OSError:
         pass
     return ""
 
@@ -765,51 +765,96 @@ class TUIState:
         return val
 
 
+# Terminals that report shifted number-row keys with a modifier need the
+# character the unshifted key would not produce.
+SHIFTED_NUMBER_KEYS: dict[int, str] = {
+    49: "!", 50: "@", 51: "#", 52: "$", 53: "%",
+    54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
+}
+
+# The two encodings a terminal may use for a modified key, each with the capture
+# group holding the codepoint and the group holding the modifier.
+#   CSI-u:          \x1b[<code>;<modifiers>u
+#   modifyOtherKeys: \x1b[27;<modifiers>;<code>~
+KEY_SEQUENCE_PATTERNS: tuple[tuple[re.Pattern[str], int, int], ...] = (
+    (re.compile(r"^\x1b\[(\d+)(?:;(\d+))?u$"), 0, 1),
+    (re.compile(r"^\x1b\[27;(\d+);(\d+)~$"), 1, 0),
+)
+
+SHIFTED_MODIFIERS = (2, 3)
+
+
+def _parse_key_sequence(seq: str) -> tuple[int, int] | None:
+    """Extracts ``(codepoint, modifier)`` from a recognized key sequence."""
+    for pattern, code_group, modifier_group in KEY_SEQUENCE_PATTERNS:
+        if match := pattern.match(seq):
+            groups = match.groups()
+            return int(groups[code_group]), int(groups[modifier_group] or 1)
+    return None
+
+
+def _character_for(code: int, modifier: int) -> str | None:
+    """Maps a decoded key to a character, or ``None`` when it produces none."""
+    if code == 13:
+        return None  # Enter / Shift-Enter are handled as navigation, not text
+    if code == 64:
+        return "@"  # terminals disagree on whether Shift+2 arrives as 50 or 64
+    if modifier in SHIFTED_MODIFIERS and code in SHIFTED_NUMBER_KEYS:
+        return SHIFTED_NUMBER_KEYS[code]
+    if 32 <= code <= 126:
+        return chr(code)
+    return None
+
+
+def _set_nodelay(window: Any, enabled: bool) -> None:
+    """Switches a curses window between blocking reads and polling reads."""
+    try:
+        window.nodelay(enabled)
+    except curses.error:
+        pass
+
+
+def _drain_escape_sequence(window: Any) -> str:
+    """Reads the remainder of an escape sequence without blocking.
+
+    Returns the sequence text including its leading ESC. A bare Escape leaves
+    nothing behind, which is how a lone keypress is told apart from CSI-u and
+    modifyOtherKeys sequences that decode to ordinary characters.
+    """
+    seq = "\x1b"
+    while True:
+        try:
+            nxt = window.get_wch()
+        except (curses.error, EOFError, StopIteration):
+            break
+        seq += chr(nxt) if isinstance(nxt, int) and 0 <= nxt <= 0x10FFFF else str(nxt)
+    return seq
+
+
+def _reset_key_reporting() -> None:
+    """Restores normal key reporting so typing "Shift+2" reaches us as "@".
+
+    Terminals left in modifyOtherKeys mode deliver shifted keys as escape
+    sequences, which would turn ordinary typing into navigation.
+    """
+    try:
+        sys.stdout.write("\x1b[>4;0m")
+        sys.stdout.flush()
+    except OSError:
+        pass
+
+
 def decode_terminal_sequence(seq: str) -> str | None:
     """Decodes modifyOtherKeys or CSI-u key sequences into characters if applicable.
 
-    For example, Shift+2 can be encoded as `\x1b[27;2;50~` or `\x1b[50;2u`, which maps to '@'.
+    For example, Shift+2 can be encoded as ``\x1b[27;2;50~`` or ``\x1b[50;2u``, which
+    maps to ``@``.
     """
     if not isinstance(seq, str) or not seq.startswith("\x1b"):
         return None
-
-    # 1. CSI-u: \x1b[<codepoint>;<modifiers>u
-    m_csi_u = re.match(r"^\x1b\[(\d+)(?:;(\d+))?u$", seq)
-    if m_csi_u:
-        code = int(m_csi_u.group(1))
-        mod = int(m_csi_u.group(2) or "1")
-        if code == 13:
-            return None  # Enter / Shift-Enter handled separately
-        if code == 64:
-            return "@"
-        shift_num_map = {
-            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
-            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
-        }
-        if (mod == 2 or mod == 3) and code in shift_num_map:
-            return shift_num_map[code]
-        if 32 <= code <= 126:
-            return chr(code)
-
-    # 2. modifyOtherKeys: \x1b[27;<modifier>;<keycode>~
-    m_mok = re.match(r"^\x1b\[27;(\d+);(\d+)~$", seq)
-    if m_mok:
-        mod = int(m_mok.group(1))
-        code = int(m_mok.group(2))
-        if code == 13:
-            return None  # Enter / Shift-Enter handled separately
-        if code == 64:
-            return "@"
-        shift_num_map = {
-            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
-            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
-        }
-        if (mod == 2 or mod == 3) and code in shift_num_map:
-            return shift_num_map[code]
-        if 32 <= code <= 126:
-            return chr(code)
-
-    return None
+    if (parsed := _parse_key_sequence(seq)) is None:
+        return None
+    return _character_for(*parsed)
 
 
 class CursesTUI:
@@ -1081,11 +1126,7 @@ class CursesTUI:
         if not self.stdscr:
             return False
         try:
-            try:
-                self.stdscr.nodelay(True)
-            except Exception:
-                pass
-            cancel_requested = False
+            _set_nodelay(self.stdscr, True)
             while True:
                 try:
                     ch = self.stdscr.get_wch()
@@ -1093,26 +1134,26 @@ class CursesTUI:
                     break
                 except KeyboardInterrupt:
                     raise
-                if ch in (27, "\x1b"):
-                    seq = "\x1b"
-                    while True:
-                        try:
-                            nxt = self.stdscr.get_wch()
-                            if isinstance(nxt, int):
-                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
-                            else:
-                                seq += str(nxt)
-                        except (curses.error, EOFError, StopIteration):
-                            break
-                    if len(seq) == 1:
-                        cancel_requested = True
-                        break
-            return cancel_requested
+                if ch in (27, "\x1b") and len(_drain_escape_sequence(self.stdscr)) == 1:
+                    return True
+            return False
         finally:
-            try:
-                self.stdscr.nodelay(False)
-            except Exception:
-                pass
+            _set_nodelay(self.stdscr, False)
+
+    def _complete_command_keeping_value_menu(self) -> None:
+        """Completes the selected command, adding a space when it takes an argument.
+
+        Leaving "/skill" alone would close the value menu the user just opened.
+        """
+        completed = self.state.complete_selected_command()
+        if completed is None:
+            return
+        takes_argument = any(
+            completed in spellings for spellings, _t, _h in SUBCOMMAND_MENUS.values()
+        )
+        if takes_argument:
+            self.state.input_buffer = f"{completed} "
+            self.state.cursor_pos = len(self.state.input_buffer)
 
     def handle_key(self, ch: str | int, on_user_submit: Callable[[str], None]) -> bool:
         """Processes a single keystroke event.
@@ -1158,10 +1199,7 @@ class CursesTUI:
                 return True
             if cmd_matches:
                 if len(cmd_matches) == 1:
-                    completed = self.state.complete_selected_command()
-                    if completed in ("/model", "/resume", "/skill"):
-                        self.state.input_buffer = f"{completed} "
-                        self.state.cursor_pos = len(self.state.input_buffer)
+                    self._complete_command_keeping_value_menu()
                 else:
                     self.state.select_next_command()
                 return True
@@ -1189,10 +1227,7 @@ class CursesTUI:
                 self.state.complete_selected_file_tag()
                 return True
             if cmd_matches:
-                completed = self.state.complete_selected_command()
-                if completed in ("/model", "/resume", "/skill"):
-                    self.state.input_buffer = f"{completed} "
-                    self.state.cursor_pos = len(self.state.input_buffer)
+                self._complete_command_keeping_value_menu()
                 return True
             return True
 
@@ -1253,12 +1288,7 @@ class CursesTUI:
             stdscr.keypad(True)
             curses.curs_set(1)
 
-            # Reset any terminal modifyOtherKeys mode to preserve normal key typing (e.g. Shift+2 -> @)
-            try:
-                sys.stdout.write("\x1b[>4;0m")
-                sys.stdout.flush()
-            except Exception:
-                pass
+            _reset_key_reporting()
 
             self.draw(stdscr)
 
@@ -1275,18 +1305,9 @@ class CursesTUI:
                     continue
 
                 if ch in (27, "\x1b"):
-                    stdscr.nodelay(True)
-                    seq = "\x1b"
-                    while True:
-                        try:
-                            nxt = stdscr.get_wch()
-                            if isinstance(nxt, int):
-                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
-                            else:
-                                seq += str(nxt)
-                        except curses.error:
-                            break
-                    stdscr.nodelay(False)
+                    _set_nodelay(stdscr, True)
+                    seq = _drain_escape_sequence(stdscr)
+                    _set_nodelay(stdscr, False)
                     if len(seq) > 1:
                         ch = seq
 
@@ -1294,11 +1315,6 @@ class CursesTUI:
                     break
                 self.draw(stdscr)
 
-            # Restore normal key reporting mode
-            try:
-                sys.stdout.write("\x1b[>4;0m")
-                sys.stdout.flush()
-            except Exception:
-                pass
+            _reset_key_reporting()
 
         curses.wrapper(_main)
