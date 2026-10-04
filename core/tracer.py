@@ -79,13 +79,13 @@ def _format_edit_file_action(args: Any) -> str:
 
 
 ActionFormatter = Callable[[Any], str]
-_DEFAULT_ACTION_FORMATTERS: dict[str, ActionFormatter] = {
+# The global registry of tool summaries, mutable via register/unregister.
+_ACTION_FORMATTERS: dict[str, ActionFormatter] = {
     "bash": _format_bash_action,
     "read_file": _format_read_file_action,
     "write_file": _format_write_file_action,
     "edit_file": _format_edit_file_action,
 }
-_ACTION_FORMATTERS: dict[str, ActionFormatter] = dict(_DEFAULT_ACTION_FORMATTERS)
 
 
 def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> None:

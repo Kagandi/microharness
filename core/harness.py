@@ -109,6 +109,8 @@ __all__ = [
 DEFAULT_GLOBAL_DIR = get_default_global_dir()
 
 
+EMPTY_SPEC_ERROR = "Model specification cannot be empty."
+
 SKILL_COMMAND_ALIASES = ("/skill", "/skills", "skill", "skills")
 SKILL_COMMAND_PREFIXES = ("/skill ", "/skills ")
 
@@ -283,8 +285,8 @@ class Harness:
         return get_available_models_from_config(self.merged_config, self.provider_registry)
 
     def active_model_name(self) -> str:
-        """Best-effort display name for the model currently in use."""
-        return getattr(self.model, "model", "") or getattr(self.model, "model_name", "") or ""
+        """Display name for the model in use, empty when it does not report one."""
+        return getattr(self.model, "model", "") or ""
 
     def resolve_model_spec(self, spec: str) -> tuple[bool, str, str]:
         """Resolves a user-supplied model name to a canonical spec.
@@ -300,7 +302,7 @@ class Harness:
     ) -> tuple[bool, str | dict[str, Any], str]:
         """Turns a /model argument (name or 1-based index) into a buildable spec."""
         if not spec:
-            return False, None, "Model specification cannot be empty."
+            return False, None, EMPTY_SPEC_ERROR
         if not isinstance(spec, (str, dict)):
             return (
                 False,
@@ -313,7 +315,7 @@ class Harness:
 
         clean = spec.strip()
         if not clean:
-            return False, None, "Model specification cannot be empty."
+            return False, None, EMPTY_SPEC_ERROR
 
         available = self.get_available_models()
         if clean.isdigit():
@@ -729,10 +731,7 @@ class Harness:
     def _finalize_session(self, env: Environment, tracer: Tracer, run_dir: Path) -> None:
         """Writes the patch and trace for an interactive session that has ended."""
         patch_diff = env.get_git_patch()
-        if patch_diff:
-            patch_file = run_dir / "patch.diff"
-            patch_file.write_text(patch_diff, encoding="utf-8")
-            print(f"📦 Git patch saved to: {patch_file}")
+        self._write_patch(patch_diff, run_dir)
         _, md_path = tracer.finalize(
             finish_reason="session_ended",
             patch_diff=patch_diff,

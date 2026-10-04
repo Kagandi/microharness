@@ -590,7 +590,7 @@ def _dispatch_benchmark(context: CliContext) -> bool:
     return True
 
 
-def _resolve_cli_context(args: argparse.Namespace, parser: argparse.ArgumentParser) -> CliContext:
+def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
     """Resolves directories, configuration layers, and the model, in precedence order.
 
     Explicit flags beat environment variables, which beat the project config file,
@@ -676,7 +676,7 @@ def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
-    context = _resolve_cli_context(args, parser)
+    context = _resolve_cli_context(args)
 
     if _dispatch_benchmark(context):
         return

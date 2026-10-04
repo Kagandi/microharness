@@ -13,6 +13,50 @@ from typing import Any
 
 from core.interactive import command_catalog, format_model_desc, format_session_desc
 
+# Commands that open a value menu instead of the command catalog: their
+# spellings, the menu title, and the hint shown before a value is typed.
+SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
+    "skill": (("/skill", "/skills"), " Available Skills ", "Load or inspect a custom skill prompt"),
+    "model": (("/model", "/models"), " Available Models ", "Switch active model or show models from config"),
+    "resume": (("/resume", "/resumes"), " Previous Sessions ", "Show previous sessions or resume with /resume <id>"),
+}
+
+
+# (min, max) width of the command column per value menu. A fixed pair means a
+# fixed width; otherwise the column shrinks with the terminal. File menus use
+# their own bounds because their values are paths.
+MENU_COLUMN_BOUNDS: dict[str, tuple[int, int]] = {
+    "skill": (22, 22),
+    "model": (20, 36),
+    "resume": (26, 38),
+}
+FILE_MENU_COLUMN_BOUNDS = (24, 42)
+
+
+def menu_column_width(kind: str | None, box_w: int, is_file_menu: bool) -> int:
+    """Width of the command column for the menu being drawn."""
+    if is_file_menu:
+        low, high = FILE_MENU_COLUMN_BOUNDS
+        return max(low, min(high, box_w - 12))
+    if kind is None:
+        return 12
+    low, high = MENU_COLUMN_BOUNDS[kind]
+    return low if low == high else max(low, min(high, box_w - 20))
+
+
+def active_subcommand(buf: str) -> tuple[str, str | None] | None:
+    """Returns ``(kind, sub)`` when the input has opened a value menu.
+
+    ``sub`` is the text typed after the command word; ``None`` means the command
+    word itself was just typed, which is when the menu still shows its hint. The
+    outer ``None`` means no value menu is open at all.
+    """
+    command, space, sub = buf.partition(" ")
+    for kind, (spellings, _title, _hint) in SUBCOMMAND_MENUS.items():
+        if command in spellings:
+            return kind, sub.lstrip() if space else None
+    return None
+
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
     "\x1b[27;2;13~",
@@ -535,56 +579,47 @@ class TUIState:
         if not buf.startswith("/"):
             return []
 
-        # If user is typing /skill or /skill <subcommand>, match against available skills
-        if buf in ("/skill", "/skills") or buf.startswith(("/skill ", "/skills ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res: list[tuple[str, str]] = []
-            if not has_space:
-                res.append((prefix, "Load or inspect a custom skill prompt"))
-            for s_name, s_info in sorted(self.skills.items()):
-                if not sub or s_name.lower().startswith(sub):
-                    summary = _resource_field(s_info, 0, "summary", s_name)
-                    scope = _resource_field(s_info, 2, "scope", "project")
-                    res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
-            return res
+        # An argument-taking command lists its own values instead of the catalog.
+        subcommand = active_subcommand(buf)
+        if subcommand is None:
+            if " " in buf:
+                return []
+            return [
+                (cmd, desc)
+                for cmd, desc in self.command_catalog
+                if cmd.lower().startswith(buf)
+            ]
 
-        # If user is typing /model or /model <subcommand>, match against available models
-        if buf in ("/model", "/models") or buf.startswith(("/model ", "/models ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res_m: list[tuple[str, str]] = []
-            if not has_space:
-                res_m.append((prefix, "Switch active model or show models from config"))
-            for m in self.available_models:
-                m_name = m.get("name", "")
-                if not sub or m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
-                    res_m.append((f"{prefix} {m_name}", format_model_desc(m)))
-            return res_m
+        kind, sub = subcommand
+        _spellings, _title, hint = SUBCOMMAND_MENUS[kind]
+        prefix = buf.split(" ", 1)[0]
+        rows: list[tuple[str, str]] = []
+        if sub is None:
+            rows.append((prefix, hint))
+        rows += [(f"{prefix} {name}", desc) for name, desc in self._subcommand_values(kind, sub)]
+        return rows
 
-        # If user is typing /resume or /resume <subcommand>, match against available previous sessions
-        if buf in ("/resume", "/resumes") or buf.startswith(("/resume ", "/resumes ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res_s: list[tuple[str, str]] = []
-            if not has_space:
-                res_s.append((prefix, "Show previous sessions or resume with /resume <id>"))
-            for s in self.available_sessions:
-                run_id = s.get("run_id", "")
-                if not sub or run_id.lower().startswith(sub):
-                    res_s.append((f"{prefix} {run_id}", format_session_desc(s, preview_limit=35)))
-            return res_s
-
-        if " " in buf:
-            return []
-
+    def _subcommand_values(self, kind: str, sub: str) -> list[tuple[str, str]]:
+        """The ``(name, description)`` values a value menu can offer."""
+        if kind == "skill":
+            return [
+                (name, f"[{_resource_field(info, 2, 'scope', 'project')}] "
+                       f"{_resource_field(info, 0, 'summary', name)}")
+                for name, info in sorted(self.skills.items())
+                if not sub or name.lower().startswith(sub)
+            ]
+        if kind == "model":
+            return [
+                (model.get("name", ""), format_model_desc(model))
+                for model in self.available_models
+                if not sub
+                or model.get("name", "").lower().startswith(sub)
+                or (model.get("model") or "").lower().startswith(sub)
+            ]
         return [
-            (cmd, desc)
-            for cmd, desc in self.command_catalog
-            if cmd.lower().startswith(buf)
+            (session.get("run_id", ""), format_session_desc(session, preview_limit=35))
+            for session in self.available_sessions
+            if not sub or session.get("run_id", "").lower().startswith(sub)
         ]
 
     def select_next_command(self) -> None:
@@ -944,19 +979,8 @@ class CursesTUI:
         cmd_matches = self.state.get_matching_commands()
         matches = file_matches if file_matches else cmd_matches
         is_file_menu = bool(file_matches)
-        raw_cmd = self.state.input_buffer.lstrip().lower()
-        is_skill_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/skill", "/skills") or raw_cmd.startswith(("/skill ", "/skills ")))
-        )
-        is_model_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/model", "/models") or raw_cmd.startswith(("/model ", "/models ")))
-        )
-        is_resume_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/resume", "/resumes") or raw_cmd.startswith(("/resume ", "/resumes ")))
-        )
+        subcommand = active_subcommand(self.state.input_buffer.lstrip().lower())
+        menu_kind = None if is_file_menu else (subcommand[0] if subcommand else None)
 
         if matches:
             idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
@@ -974,16 +998,10 @@ class CursesTUI:
             start_y = max(1, sep_row - box_h)
             start_x = 0
 
-            if is_file_menu:
-                title_part = " Workspace Files "
-            elif is_skill_menu:
-                title_part = " Available Skills "
-            elif is_model_menu:
-                title_part = " Available Models "
-            elif is_resume_menu:
-                title_part = " Previous Sessions "
+            if menu_kind is None:
+                title_part = " Available Commands " if not is_file_menu else " Workspace Files "
             else:
-                title_part = " Available Commands "
+                title_part = SUBCOMMAND_MENUS[menu_kind][1]
 
             dash_count = max(0, box_w - 2 - len(title_part) - 2)
             border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
@@ -993,16 +1011,7 @@ class CursesTUI:
 
             try:
                 stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
-                if is_file_menu:
-                    cmd_col_w = max(24, min(42, box_w - 12))
-                elif is_skill_menu:
-                    cmd_col_w = 22
-                elif is_model_menu:
-                    cmd_col_w = max(20, min(36, box_w - 20))
-                elif is_resume_menu:
-                    cmd_col_w = max(26, min(38, box_w - 20))
-                else:
-                    cmd_col_w = 12
+                cmd_col_w = menu_column_width(menu_kind, box_w, is_file_menu)
 
                 for row_i, (cmd, desc) in enumerate(visible_matches):
                     y = start_y + 1 + row_i

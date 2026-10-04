@@ -424,7 +424,7 @@ class CommandRouter:
         stripped = user_input.strip()
         spec = next((s for s in self.specs if s.matches(stripped.lower())), None)
         if spec is not None:
-            return getattr(self, spec.handler)(command_argument(stripped), echo=stripped)
+            return getattr(self, spec.handler)(command_argument(stripped))
         return self._handle_input(stripped)
 
     def _handle_input(self, user_input: str) -> str:
@@ -458,17 +458,17 @@ class CommandRouter:
 
     # --- handlers -------------------------------------------------------
 
-    def _cmd_exit(self, _arg: str, echo: str = "") -> str:
+    def _cmd_exit(self, _arg: str) -> str:
         self.ctx.ui.info("Ending session.")
         return EXIT
 
-    def _cmd_help(self, _arg: str, echo: str = "") -> str:
+    def _cmd_help(self, _arg: str) -> str:
         for line in render_help_lines(self.ctx.commands, self.ctx.skills):
             self.ctx.ui.status(line)
         self.ctx.ui.status("")
         return SKIP
 
-    def _cmd_status(self, _arg: str, echo: str = "") -> str:
+    def _cmd_status(self, _arg: str) -> str:
         ui = self.ctx.ui
         for line in ui.render_context(
             self.ctx.memory.stats(),
@@ -479,7 +479,7 @@ class CommandRouter:
         ui.refresh()
         return SKIP
 
-    def _cmd_compact(self, _arg: str, echo: str = "") -> str:
+    def _cmd_compact(self, _arg: str) -> str:
         memory = self.ctx.memory
         before = memory.total_chars() // CHARS_PER_TOKEN
         compacted = memory.compact_if_needed(force=True)
@@ -495,13 +495,13 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_new(self, _arg: str, echo: str = "") -> str:
+    def _cmd_new(self, _arg: str) -> str:
         self.ctx.memory.reset()
         self.ctx.ui.info("✨ Started a fresh conversation context (workspace files preserved).")
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_model(self, arg: str, echo: str = "") -> str:
+    def _cmd_model(self, arg: str) -> str:
         if not arg:
             harness = self.ctx.harness
             self.ctx.ui.info("🤖 Available Models (from config):")
@@ -515,7 +515,7 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_resume(self, arg: str, echo: str = "") -> str:
+    def _cmd_resume(self, arg: str) -> str:
         if not arg:
             self.ctx.ui.info("📂 Recent Sessions:")
             for line in render_session_lines(self.ctx.harness.find_recent_sessions(limit=8)):
@@ -541,8 +541,9 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_skill(self, arg: str, echo: str = "") -> str:
-        outcome = resolve_skill_command(f"/skill {arg}".strip(), self.ctx.skills)
+    def _cmd_skill(self, arg: str) -> str:
+        invocation = f"/skill {arg}".strip()
+        outcome = resolve_skill_command(invocation, self.ctx.skills)
         if outcome.is_error:
             self.ctx.ui.error(outcome.message)
             return SKIP
@@ -552,9 +553,9 @@ class CommandRouter:
 
         self.ctx.ui.info(f"⚡ {outcome.message} ...")
         self.ctx.ui.refresh()
-        return self._add_user_prompt(outcome.prompt or "", echo=echo)
+        return self._add_user_prompt(outcome.prompt or "", echo=invocation)
 
-    def _cmd_reasoning(self, arg: str, echo: str = "") -> str:
+    def _cmd_reasoning(self, arg: str) -> str:
         harness = self.ctx.harness
         if not arg:
             current = harness.get_reasoning_effort()
@@ -579,7 +580,7 @@ class CommandRouter:
         self.ctx.ui.refresh()
         return SKIP
 
-    def _cmd_cache(self, arg: str, echo: str = "") -> str:
+    def _cmd_cache(self, arg: str) -> str:
         harness = self.ctx.harness
         if not arg:
             self._show_cache()

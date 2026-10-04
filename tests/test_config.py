@@ -186,7 +186,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
 
 class TestProjectToolTrust(unittest.TestCase):
     def _layers(self, global_cfg=None, project_cfg=None):
-        return ConfigLayers(global_config=global_cfg or {}, project_config=project_cfg or {})
+        return ConfigLayers.of(global_cfg or {}, project_cfg or {})
 
     def test_explicit_true_grants_trust(self):
         """Invariant: the CLI flag grants trust outright."""

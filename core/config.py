@@ -113,15 +113,27 @@ def load_project_config(workspace: Path | None = None) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ConfigLayers:
-    """The three configuration layers, kept separate so trust decisions can inspect each one."""
+    """The configuration layers, kept separate so trust decisions can inspect each one."""
 
     global_config: dict[str, Any]
     project_config: dict[str, Any]
+    merged: dict[str, Any]
 
-    @property
-    def merged(self) -> dict[str, Any]:
-        """Project keys shadow global keys; empty project files do not mask global defaults."""
-        return {**self.global_config, **self.project_config}
+    @classmethod
+    def of(
+        cls, global_config: dict[str, Any], project_config: dict[str, Any]
+    ) -> "ConfigLayers":
+        """Builds the layers and their merge once.
+
+        Project keys shadow global keys; an empty project file does not mask
+        global defaults. The merge is computed here so every consumer reads the
+        same dictionary instead of rebuilding it.
+        """
+        return cls(
+            global_config=global_config,
+            project_config=project_config,
+            merged={**global_config, **project_config},
+        )
 
     @classmethod
     def load(
@@ -129,7 +141,7 @@ class ConfigLayers:
         global_dir: Path | None = None,
         workspace: Path | None = None,
     ) -> "ConfigLayers":
-        return cls(
+        return cls.of(
             global_config=load_global_config(global_dir),
             project_config=load_project_config(workspace),
         )
