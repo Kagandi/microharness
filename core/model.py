@@ -5,15 +5,17 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
-from core import config, ratelimit
+from core import config
 from core.protocols import (
     CacheAwareModel,
     CancellableModel,
     DeadlineAwareModel,
     EndpointAwareModel,
     Model,
+    ModelCancelledError,
     NamedModel,
     ProviderAwareModel,
     RateLimitAwareModel,
@@ -30,9 +32,68 @@ from core.providers import (
     resolve_provider,
     seed_user_providers,
 )
-from core.ratelimit import ModelCancelledError, RateLimitError, RateLimitHints, RetryPolicy
 from core.types import Message, ToolCall
 from core.usage import UsageTelemetry
+
+
+class RateLimitError(RuntimeError):
+    """Raised when a provider returns HTTP 429, or 402 when the account is out of credit."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+# 402 means "pay before we serve you", so it never warrants a retry. 429 is a
+# throttle: worth waiting out, using the delay the server asked for when it sent one.
+RATE_LIMIT_STATUS = 429
+PAYMENT_REQUIRED_STATUS = 402
+TRANSIENT_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """How many attempts to make and how long to wait between them."""
+
+    max_attempts: int = 6
+    base_delay: float = 2.0
+    max_delay: float = 60.0
+
+    def backoff(self, attempt: int) -> float:
+        """Exponential backoff for ``attempt`` (0-based), capped at ``max_delay``."""
+        return min(self.base_delay * (2**attempt), self.max_delay)
+
+    def can_retry(self, attempt: int) -> bool:
+        return attempt < self.max_attempts - 1
+
+
+def extract_retry_delay(headers: Any) -> float | None:
+    """Reads how long a provider asked us to wait, from its standard headers.
+
+    Honours ``Retry-After`` (seconds) and ``X-RateLimit-Reset`` (an epoch stamp,
+    in seconds or milliseconds). Returns ``None`` when the provider sent neither,
+    in which case the caller falls back to its own backoff. Error bodies are not
+    parsed: a provider that only reports its delay there still recovers, just with
+    backoff rather than the exact figure.
+    """
+    if not headers:
+        return None
+    try:
+        retry_after = float(headers.get("Retry-After"))
+        if retry_after >= 0:
+            return retry_after
+    except (TypeError, ValueError):
+        pass
+
+    reset = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+    try:
+        stamp = float(reset)
+    except (TypeError, ValueError):
+        return None
+    if stamp > 1e11:  # milliseconds, not seconds
+        stamp /= 1000.0
+    return max(0.0, stamp - time.time())
+
 
 __all__ = [
     "CacheAwareModel",
@@ -50,13 +111,13 @@ __all__ = [
     "ReasoningAwareModel",
     "ResettableModel",
     "UsageReportingModel",
-    "MAX_RETRY_SLEEP_S",
+    "ModelCancelledError",
+    "RateLimitError",
     "RetryPolicy",
     "build_model_from_spec",
     "extract_retry_delay",
     "find_provider_by_endpoint",
     "get_available_models_from_config",
-    "is_unrecoverable_quota_error",
     "load_builtin_providers",
     "load_provider_registry",
     "normalize_cache_ttl",
@@ -66,10 +127,6 @@ __all__ = [
     "strip_json_comments",
 ]
 
-MAX_RETRY_SLEEP_S: float = RetryPolicy.max_retry_sleep_s
-extract_retry_delay = ratelimit.extract_retry_delay
-is_unrecoverable_quota_error = ratelimit.is_unrecoverable_quota_error
-format_delay = ratelimit.format_delay
 
 
 # Cache TTL and reasoning effort normalization live in core/config.py so the
@@ -294,34 +351,31 @@ class HttpChatModel(UsageTelemetry):
         return min(self.timeout, max(remaining, 0.1))
 
     def _handle_http_error(self, exc: urllib.error.HTTPError, attempt: int) -> None:
-        """Routes an HTTP error: quota/rate limit first, then transient server errors."""
+        """Routes an HTTP error: throttling first, then transient server errors."""
         body = exc.read().decode("utf-8", errors="replace")
-        if exc.code in ratelimit.RATE_LIMIT_STATUS_CODES:
-            self._retry_rate_limited(exc, body, attempt)
+        if exc.code in (RATE_LIMIT_STATUS, PAYMENT_REQUIRED_STATUS):
+            self._wait_out_rate_limit(exc, body, attempt)
             return
-        if exc.code in ratelimit.TRANSIENT_STATUS_CODES and self.retry.can_retry(attempt):
+        if exc.code in TRANSIENT_STATUS and self.retry.can_retry(attempt):
             self._sleep_before_retry(self.retry.backoff(attempt), f" HTTP {exc.code}")
             return
         raise RuntimeError(
             f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{body}"
         ) from exc
 
-    def _retry_rate_limited(self, exc: urllib.error.HTTPError, body: str, attempt: int) -> None:
-        """Waits out a 429/402, failing fast when the limit is not worth retrying."""
-        headers = exc.headers
-        hints = RateLimitHints(
-            body=body,
-            retry_after=headers.get("Retry-After") if headers else None,
-            reset=(
-                (headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset"))
-                if headers
-                else None
-            ),
-        )
-        delay = ratelimit.extract_retry_delay(hints.body, hints.retry_after, hints.reset)
-        self._raise_if_rate_limit_is_terminal(exc.code, body, delay)
+    def _wait_out_rate_limit(
+        self, exc: urllib.error.HTTPError, body: str, attempt: int
+    ) -> None:
+        """Waits out a 429, or fails immediately on 402 (no credit, no point retrying)."""
+        delay = extract_retry_delay(exc.headers)
+        if exc.code == PAYMENT_REQUIRED_STATUS:
+            raise RateLimitError(
+                f"Model API rejected the request for payment (HTTP 402) from {self.endpoint}:\n{body}",
+                retry_after=delay,
+            ) from exc
 
-        delay = ratelimit.resolve_rate_limit_delay(hints, attempt, self.retry)
+        if delay is None:
+            delay = self.retry.backoff(attempt)
         # Time spent honouring a server-requested pause is not charged to the task budget.
         self.total_rate_limit_wait_s += delay
         if self.deadline is not None:
@@ -329,36 +383,15 @@ class HttpChatModel(UsageTelemetry):
 
         if not self.retry.can_retry(attempt):
             raise RateLimitError(
-                f"Model API rate limit (HTTP {exc.code}) exceeded after "
+                f"Model API rate limit (HTTP 429) exceeded after "
                 f"{self.retry.max_attempts} retries from {self.endpoint}:\n{body}",
                 retry_after=delay,
             ) from exc
         print(
-            f"\n⚠️ [Rate Limit {exc.code}]: Waiting {delay:.1f}s before retry "
+            f"\n⚠️ [Rate Limit 429]: Waiting {delay:.1f}s before retry "
             f"({attempt + 1}/{self.retry.max_attempts})..."
         )
         self._wait_or_cancel(delay)
-
-    def _raise_if_rate_limit_is_terminal(self, code: int, body: str, delay: float | None) -> None:
-        """Converts an unrecoverable or absurdly long rate limit into a hard failure.
-
-        A quota error that still carries a short, trusted reset hint is retried,
-        so a mid-day limit that clears soon does not end the run.
-        """
-        within_budget = delay is not None and delay <= self.retry.max_retry_sleep_s
-        if ratelimit.is_unrecoverable_quota_error(code, body) and not within_budget:
-            raise RateLimitError(
-                f"Model API daily quota or credit limit exhausted (HTTP {code}) "
-                f"from {self.endpoint}:\n{body}",
-                retry_after=delay,
-            )
-        if delay is not None and delay > self.retry.max_retry_sleep_s:
-            raise RateLimitError(
-                f"Model API rate limit retry delay ({ratelimit.format_delay(delay)}) exceeds "
-                f"maximum allowed sleep ({self.retry.max_retry_sleep_s:.0f}s). Daily quota or "
-                f"prolonged limit reached from {self.endpoint}:\n{body}",
-                retry_after=delay,
-            )
 
     def _handle_timeout(self, attempt: int) -> None:
         """Retries a timed-out request unless the task deadline has already passed."""

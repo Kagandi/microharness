@@ -13,8 +13,7 @@ from typing import Any
 
 from core.loop import AgentLoop
 from core.memory import Memory
-from core.protocols import CancellableModel, Model
-from core.ratelimit import ModelCancelledError
+from core.protocols import CancellableModel, Model, ModelCancelledError
 from core.tracer import Tracer, _format_action_summary, _pair_calls_with_results
 from core.types import Message, StepTrace
 

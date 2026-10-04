@@ -55,6 +55,14 @@ class DeadlineAwareModel(Model, Protocol):
     def set_deadline(self, deadline: float | None) -> None: ...
 
 
+class ModelCancelledError(RuntimeError):
+    """Raised when a cancel probe reports that the user aborted the request.
+
+    Only raised while the model is *waiting* (retry backoff). An in-flight HTTP
+    read cannot be interrupted this way; see SPEC.md section 5.
+    """
+
+
 @runtime_checkable
 class CancellableModel(Model, Protocol):
     """Can abandon a pending wait when the user cancels.

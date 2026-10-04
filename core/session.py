@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from core.loop import AgentLoop
+from core.model import RateLimitError
 from core.protocols import DeadlineAwareModel, Model, RateLimitAwareModel
-from core.ratelimit import RateLimitError
 from core.types import Message
 
 if TYPE_CHECKING:

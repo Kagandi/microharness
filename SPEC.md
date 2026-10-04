@@ -45,8 +45,7 @@ microharness/
 │   ├── environment.py          # Workspace & bash execution (in-place & sandbox)
 │   ├── tools.py                # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py               # Context manager, stats & compaction policies
-│   ├── protocols.py            # Model protocol + optional capability protocols
-│   ├── ratelimit.py            # Rate-limit classification, retry-delay parsing & RetryPolicy
+│   ├── protocols.py            # Model protocol, capability protocols & cancellation
 │   ├── usage.py                # Token normalization, per-model telemetry & run totals
 │   ├── providers.py            # Provider registry, model-spec resolution & client construction
 │   ├── model.py                # Generic HttpChatModel & MockModel clients
@@ -71,7 +70,6 @@ microharness/
     ├── test_evaluator.py       # Grader assertions & negative failure tests
     ├── test_config.py          # Config cascade, JSONC parsing & tool-trust boundary
     ├── test_protocols.py       # Capability protocol detection
-    ├── test_ratelimit.py       # Retry-delay parsing, quota classification & backoff
     ├── test_usage.py           # Token normalization & telemetry accounting
     ├── test_providers.py       # Provider registry, model specs & available models
     ├── test_skills.py          # Skill discovery, summaries & activation
@@ -217,7 +215,7 @@ Maintains message history across multi-turn sessions with proactive and on-deman
 
 ---
 
-### 3.5 Pluggable Model Interface (`core/protocols.py`, `core/model.py`, `core/ratelimit.py`, `core/usage.py`, `core/providers.py`)
+### 3.5 Pluggable Model Interface (`core/protocols.py`, `core/model.py`, `core/usage.py`, `core/providers.py`)
 ```python
 class Model(Protocol):
     def generate(
@@ -236,7 +234,7 @@ probes with `isinstance` and degrades gracefully when absent:
 | Reasoning effort | `ReasoningAwareModel` | `/reasoning` switching |
 | Task deadline | `DeadlineAwareModel` | Bounding in-flight HTTP requests |
 | Cooperative cancel | `CancellableModel` | Esc during a retry backoff |
-| Rate-limit telemetry | `RateLimitAwareModel` | Deadline accounting and reporting |
+| Throttle telemetry | `RateLimitAwareModel` | Reporting wait time kept out of the deadline |
 | Per-step usage | `UsageReportingModel` | Step-level token totals in the trace |
 | Identity | `NamedModel`, `EndpointAwareModel`, `ProviderAwareModel` | Model/endpoint/provider display |
 
@@ -443,7 +441,7 @@ All features are tested against rigorous, non-tautological standards in `tests/`
 * `test_tui.py`: Table rendering and CJK width handling, key decoding including Shift+Enter, floating autocomplete menus for commands/files/skills/models/sessions, Enter-key menu selection, mid-turn `Esc` cancellation, and the headless `run_tui` flow including resume step-numbering continuity.
 
 ### Mutation Testing
-Correctness claims above are enforced by mutation testing rather than assertion count. Each guard is verified by introducing a deliberate defect and confirming the suite fails, so a passing test cannot be satisfied by a no-op. Current status: every mutant across the plugin trust boundary, deadline clamping, rate-limit delta accounting, tool shadowing, project-tool discovery scoping, model-name recognition, session reconstruction, crash recovery, serialization resilience, session-discovery ordering, and resume step numbering is killed by at least one test. Equivalent mutants (e.g. removing an explicit `flush()` immediately before a `with`-block close) are verified as equivalent by construction rather than counted as coverage.
+Correctness claims above are enforced by mutation testing rather than assertion count. Each guard is verified by introducing a deliberate defect and confirming the suite fails, so a passing test cannot be satisfied by a no-op. Current status: every mutant across the plugin trust boundary, deadline clamping, throttle-wait accounting, tool shadowing, project-tool discovery scoping, model-name recognition, session reconstruction, crash recovery, serialization resilience, session-discovery ordering, and resume step numbering is killed by at least one test. Equivalent mutants (e.g. removing an explicit `flush()` immediately before a `with`-block close) are verified as equivalent by construction rather than counted as coverage.
 
 ---
 
@@ -462,7 +460,7 @@ Deliberately unimplemented or bounded behaviour, recorded so it is not mistaken 
 
 **Why it is wanted**:
 1. **The key currently lies.** `Esc` is the natural cancel key, and today it silently does nothing for the exact interval where a user is most likely to press it — a hung or slow provider. The status bar mitigates this by documenting the timing, but a user who has already learned that `Esc` cancels elsewhere will still read the frozen UI as a dropped keypress.
-2. **Rate limits make the worst case routine, not theoretical.** The backoff ladder sleeps `min(2 * 2**attempt, 60)` per retry across 6 attempts, so a rate-limited turn can spend roughly two minutes waiting. This is now interruptible, but any provider-side stall inside a single request is not, and that is the more common shape of "nothing is happening".
+2. **Rate limits make the worst case routine, not theoretical.** The backoff ladder sleeps `min(2 * 2**attempt, 60)` per retry across 6 attempts, so a throttled turn can spend roughly two minutes waiting (or longer when the provider asks for it). This is interruptible via `Esc`, but a provider-side stall inside a single request is not, and that is the more common shape of "nothing is happening".
 3. **Timeouts are the wrong tool.** The only bound available today is the run-level `--timeout`, which is far too coarse to be an interaction primitive.
 
 **What it requires** (why this is a project rather than a patch):

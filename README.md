@@ -210,7 +210,7 @@ You can inspect or control the harness runtime directly:
 The two cancel keys are **not** equivalent, and the status bar says so while a turn runs:
 
 * **`Ctrl+C`** aborts the active step immediately, including a request that is already in flight. The incomplete tool turn is dropped and the session stays usable.
-* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a rate-limit backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
+* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a throttle backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
 
 `Esc` cannot abort a request that is currently waiting on the provider, because the HTTP timeout covers time-to-first-byte and shortening it would break slow models. Use `Ctrl+C` for that. See SPEC.md §5.2 for the planned work to unify the two.
 
@@ -389,8 +389,7 @@ microharness/
 │   ├── environment.py  # Workspace & bash runner (supports in-place and sandbox)
 │   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py       # Context manager & 80% high-water mark compaction
-│   ├── protocols.py    # Model protocol + optional capability protocols (cache, deadline, ...)
-│   ├── ratelimit.py    # Rate-limit classification, retry-delay parsing & RetryPolicy
+│   ├── protocols.py    # Model protocol, capability protocols (cache, deadline, cancel) & cancellation
 │   ├── usage.py        # Token normalization, per-model telemetry & run-level totals
 │   ├── providers.py    # Provider registry, model-spec resolution & client construction
 │   ├── model.py        # Generic HttpChatModel & MockModel clients
@@ -416,7 +415,6 @@ microharness/
     ├── test_evaluator.py   # Grader assertions tests
     ├── test_config.py      # Config cascade, JSONC parsing & tool-trust boundary tests
     ├── test_protocols.py   # Capability protocol detection tests
-    ├── test_ratelimit.py   # Retry-delay parsing, quota classification & backoff tests
     ├── test_usage.py       # Token normalization & telemetry accounting tests
     ├── test_providers.py   # Provider registry, model specs & available-model tests
     ├── test_skills.py      # Skill discovery, summaries & activation tests

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 from core.memory import Memory
 from core.model import MockModel
-from core.ratelimit import ModelCancelledError
+from core.protocols import ModelCancelledError
 from core.tui_session import TuiTurnRunner, replay_messages
 from core.types import Message, ToolCall
 
