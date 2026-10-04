@@ -6,7 +6,9 @@ import unicodedata
 import unittest
 from unittest.mock import MagicMock, patch
 
+from core.commands import Command
 from core.interactive import COMMAND_SPECS
+from core.skills import Skill
 from core.tui import (
     CursesTUI,
     TUILine,
@@ -704,7 +706,9 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(state.input_buffer, "/compact")
 
         # Custom workspace commands
-        state.set_custom_commands({"review": ("template", "prompt", "project")})
+        state.set_custom_commands(
+            {"review": Command("review", "Review PR", "template", "project")}
+        )
         state.input_buffer = "/rev"
         r_matches = state.get_matching_commands()
         self.assertEqual(len(r_matches), 1)
@@ -845,7 +849,7 @@ class TestTUI(unittest.TestCase):
     def test_escape_dismisses_menu_without_exiting(self):
         """Invariant: Esc closes an open command menu and keeps the session alive."""
         state = TUIState(title="t")
-        state.set_custom_commands({"alpha": "does alpha"})
+        state.set_custom_commands({"alpha": Command("alpha", "does alpha", "t", "project")})
         state.input_buffer = "/al"
         tui = CursesTUI(state)
         self.assertEqual(len(state.get_matching_commands()), 1)
@@ -856,8 +860,13 @@ class TestTUI(unittest.TestCase):
         """Invariant: /skill matches available skills under /skill <name> with navigation and drawing."""
         state = TUIState()
         skills = {
-            "deploy-tool": ("Deploy app to production", "skills/deploy/SKILL.md", "project", "deploy instructions"),
-            "my-linter": ("Lint code with ruff", "skills/lint/SKILL.md", "global", "lint instructions"),
+            name: Skill(name, summary, path, scope, instructions)
+            for name, summary, path, scope, instructions in (
+                ("deploy-tool", "Deploy app to production", "skills/deploy/SKILL.md",
+                 "project", "deploy instructions"),
+                ("my-linter", "Lint code with ruff", "skills/lint/SKILL.md",
+                 "global", "lint instructions"),
+            )
         }
         state.set_skills(skills)
 
@@ -902,8 +911,13 @@ class TestTUI(unittest.TestCase):
         """Invariant: Discovered skills are registered as direct /{skill} commands in the catalog and autocompleted."""
         state = TUIState()
         skills = {
-            "deploy-tool": ("Deploy app to production", "skills/deploy/SKILL.md", "project", "deploy instructions"),
-            "my-linter": ("Lint code with ruff", "skills/lint/SKILL.md", "global", "lint instructions"),
+            name: Skill(name, summary, path, scope, instructions)
+            for name, summary, path, scope, instructions in (
+                ("deploy-tool", "Deploy app to production", "skills/deploy/SKILL.md",
+                 "project", "deploy instructions"),
+                ("my-linter", "Lint code with ruff", "skills/lint/SKILL.md",
+                 "global", "lint instructions"),
+            )
         }
         state.set_skills(skills)
 
@@ -927,7 +941,9 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(state.input_buffer, "/my-linter")
 
         # 4. Custom command overrides skill if name collides
-        state.set_custom_commands({"deploy-tool": ("Override deploy", "echo override", "workspace")})
+        state.set_custom_commands(
+            {"deploy-tool": Command("deploy-tool", "Override deploy", "echo override", "workspace")}
+        )
         state.input_buffer = "/dep"
         m = state.get_matching_commands()
         self.assertEqual(len(m), 1)

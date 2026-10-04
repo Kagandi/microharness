@@ -426,16 +426,6 @@ def parse_markdown_to_tui_lines(text: str, max_width: int = 80) -> list[TUILine]
     return result
 
 
-def _resource_field(info: Any, index: int, name: str, default: Any) -> Any:
-    """Reads a field from a Command/Skill dataclass, falling back to a legacy tuple shape."""
-    value = getattr(info, name, None)
-    if value is not None:
-        return value
-    if isinstance(info, (tuple, list)) and len(info) > index:
-        return info[index]
-    return default
-
-
 @dataclass
 class TUILine:
     text: str
@@ -491,7 +481,7 @@ class TUIState:
         """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
         catalog = command_catalog()
         for cmd_name, cmd_info in sorted(self.custom_commands.items()):
-            scope = _resource_field(cmd_info, 2, "scope", "")
+            scope = getattr(cmd_info, "scope", "")
             desc = f"Custom command [{scope}]" if scope else f"Custom command: /{cmd_name}"
             catalog.append((f"/{cmd_name}", desc))
 
@@ -499,8 +489,8 @@ class TUIState:
         for s_name, s_info in sorted(self.skills.items()):
             slash_skill = f"/{s_name}"
             if slash_skill.lower() not in existing_cmds:
-                summary = _resource_field(s_info, 0, "summary", s_name)
-                scope = _resource_field(s_info, 2, "scope", "project")
+                summary = getattr(s_info, "summary", s_name)
+                scope = getattr(s_info, "scope", "project")
                 catalog.append((slash_skill, f"Skill [{scope}] {summary}"))
                 existing_cmds.add(slash_skill.lower())
 
@@ -603,8 +593,8 @@ class TUIState:
         """The ``(name, description)`` values a value menu can offer."""
         if kind == "skill":
             return [
-                (name, f"[{_resource_field(info, 2, 'scope', 'project')}] "
-                       f"{_resource_field(info, 0, 'summary', name)}")
+                (name, f"[{getattr(info, 'scope', 'project')}] "
+                       f"{getattr(info, 'summary', name)}")
                 for name, info in sorted(self.skills.items())
                 if not sub or name.lower().startswith(sub)
             ]
