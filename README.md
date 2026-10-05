@@ -30,7 +30,7 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 ```json
 {
   "endpoint": "https://openrouter.ai/api/v1",
-  "model": "anthropic/claude-3.5-sonnet",
+  "model": "anthropic/claude-5.5-sonnet",
   "api_key": "sk-or-v1-...",
   "max_context_chars": 32000,
   "trigger_ratio": 0.80,
@@ -38,7 +38,7 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
   "sandbox": false,
   "models": {
     "fast": { "model": "gemini-2.5-flash", "provider": "google", "description": "Fast flash model" },
-    "smart": { "model": "anthropic/claude-3.5-sonnet", "provider": "openrouter", "description": "Frontier reasoning model" }
+    "smart": { "model": "anthropic/claude-5.5-sonnet", "provider": "openrouter", "description": "Frontier reasoning model" }
   }
 }
 ```
