@@ -11,6 +11,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.interactive import command_catalog, format_model_desc, format_session_desc
+
+# Commands that open a value menu instead of the command catalog: their
+# spellings, the menu title, and the hint shown before a value is typed.
+SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
+    "skill": (("/skill", "/skills"), " Available Skills ", "Load or inspect a custom skill prompt"),
+    "model": (("/model", "/models"), " Available Models ", "Switch active model or show models from config"),
+    "resume": (("/resume", "/resumes"), " Previous Sessions ", "Show previous sessions or resume with /resume <id>"),
+}
+
+
+# (min, max) width of the command column per value menu. A fixed pair means a
+# fixed width; otherwise the column shrinks with the terminal. File menus use
+# their own bounds because their values are paths.
+MENU_COLUMN_BOUNDS: dict[str, tuple[int, int]] = {
+    "skill": (22, 22),
+    "model": (20, 36),
+    "resume": (26, 38),
+}
+FILE_MENU_COLUMN_BOUNDS = (24, 42)
+
+
+def menu_column_width(kind: str | None, box_w: int, is_file_menu: bool) -> int:
+    """Width of the command column for the menu being drawn."""
+    if is_file_menu:
+        low, high = FILE_MENU_COLUMN_BOUNDS
+        return max(low, min(high, box_w - 12))
+    if kind is None:
+        return 12
+    low, high = MENU_COLUMN_BOUNDS[kind]
+    return low if low == high else max(low, min(high, box_w - 20))
+
+
+def active_subcommand(buf: str) -> tuple[str, str | None] | None:
+    """Returns ``(kind, sub)`` when the input has opened a value menu.
+
+    ``sub`` is the text typed after the command word; ``None`` means the command
+    word itself was just typed, which is when the menu still shows its hint. The
+    outer ``None`` means no value menu is open at all.
+    """
+    command, space, sub = buf.partition(" ")
+    for kind, (spellings, _title, _hint) in SUBCOMMAND_MENUS.items():
+        if command in spellings:
+            return kind, sub.lstrip() if space else None
+    return None
+
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
     "\x1b[27;2;13~",
@@ -22,18 +68,6 @@ SHIFT_ENTER_SEQUENCES: set[str | int] = {
     545,
     546,
 }
-
-DEFAULT_COMMANDS: list[tuple[str, str]] = [
-    ("/model", "Switch active model or show models from config"),
-    ("/resume", "Show previous sessions or resume with /resume <id>"),
-    ("/compact", "Free context tokens by compacting older turn observations"),
-    ("/status", "Show current token usage, cache rate, and context breakdown"),
-    ("/new", "Start fresh session while preserving workspace changes"),
-    ("/skill", "Show available skills or activate with /skill <name>"),
-    ("/help", "List all available built-in and workspace custom commands"),
-    ("/exit", "Exit the interactive agent session"),
-]
-
 
 def compact_path(path_str: str) -> str:
     """Compacts an absolute path with ~ if within the user's home directory."""
@@ -50,7 +84,7 @@ def compact_path(path_str: str) -> str:
         if p_str.startswith(resolved_home + "/"):
             return "~" + p_str[len(resolved_home) :]
         return p_str
-    except Exception:
+    except (OSError, ValueError):
         return path_str
 
 
@@ -136,7 +170,7 @@ def get_git_branch(workspace: Path | str) -> str:
             if content.startswith("ref: refs/heads/"):
                 return content[len("ref: refs/heads/") :]
             return content[:7]
-    except Exception:
+    except OSError:
         pass
     return ""
 
@@ -422,7 +456,7 @@ class TUIState:
         self.reasoning: str = ""
         self.cwd: str = ""
         self.git_branch: str = ""
-        self.command_catalog: list[tuple[str, str]] = list(DEFAULT_COMMANDS)
+        self.command_catalog: list[tuple[str, str]] = command_catalog()
         self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
         self.available_models: list[dict[str, Any]] = []
@@ -445,28 +479,18 @@ class TUIState:
 
     def _rebuild_command_catalog(self) -> None:
         """Rebuilds the catalog with built-in commands, custom commands, and direct skills."""
-        catalog = list(DEFAULT_COMMANDS)
+        catalog = command_catalog()
         for cmd_name, cmd_info in sorted(self.custom_commands.items()):
-            desc = f"Custom command: /{cmd_name}"
-            if isinstance(cmd_info, (tuple, list)) and len(cmd_info) >= 3:
-                scope = cmd_info[2]
-                desc = f"Custom command [{scope}]"
+            scope = getattr(cmd_info, "scope", "")
+            desc = f"Custom command [{scope}]" if scope else f"Custom command: /{cmd_name}"
             catalog.append((f"/{cmd_name}", desc))
 
         existing_cmds = {cmd.lower() for cmd, _ in catalog}
         for s_name, s_info in sorted(self.skills.items()):
             slash_skill = f"/{s_name}"
             if slash_skill.lower() not in existing_cmds:
-                summary = (
-                    s_info[0]
-                    if isinstance(s_info, (tuple, list)) and len(s_info) > 0
-                    else s_name
-                )
-                scope = (
-                    s_info[2]
-                    if isinstance(s_info, (tuple, list)) and len(s_info) > 2
-                    else "project"
-                )
+                summary = getattr(s_info, "summary", s_name)
+                scope = getattr(s_info, "scope", "project")
                 catalog.append((slash_skill, f"Skill [{scope}] {summary}"))
                 existing_cmds.add(slash_skill.lower())
 
@@ -545,68 +569,47 @@ class TUIState:
         if not buf.startswith("/"):
             return []
 
-        # If user is typing /skill or /skill <subcommand>, match against available skills
-        if buf in ("/skill", "/skills") or buf.startswith(("/skill ", "/skills ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res: list[tuple[str, str]] = []
-            if not has_space:
-                res.append((prefix, "Load or inspect a custom skill prompt"))
-            for s_name, s_info in sorted(self.skills.items()):
-                if not sub or s_name.lower().startswith(sub):
-                    summary = (
-                        s_info[0]
-                        if isinstance(s_info, (tuple, list)) and len(s_info) > 0
-                        else s_name
-                    )
-                    scope = (
-                        s_info[2]
-                        if isinstance(s_info, (tuple, list)) and len(s_info) > 2
-                        else "project"
-                    )
-                    res.append((f"{prefix} {s_name}", f"[{scope}] {summary}"))
-            return res
+        # An argument-taking command lists its own values instead of the catalog.
+        subcommand = active_subcommand(buf)
+        if subcommand is None:
+            if " " in buf:
+                return []
+            return [
+                (cmd, desc)
+                for cmd, desc in self.command_catalog
+                if cmd.lower().startswith(buf)
+            ]
 
-        # If user is typing /model or /model <subcommand>, match against available models
-        if buf in ("/model", "/models") or buf.startswith(("/model ", "/models ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res_m: list[tuple[str, str]] = []
-            if not has_space:
-                res_m.append((prefix, "Switch active model or show models from config"))
-            for m in self.available_models:
-                m_name = m.get("name", "")
-                if not sub or m_name.lower().startswith(sub) or (m.get("model") and m["model"].lower().startswith(sub)):
-                    prov = m.get("provider") or "model"
-                    desc = m.get("description") or f"Model {m_name}"
-                    res_m.append((f"{prefix} {m_name}", f"[{prov}] {desc}"))
-            return res_m
+        kind, sub = subcommand
+        _spellings, _title, hint = SUBCOMMAND_MENUS[kind]
+        prefix = buf.split(" ", 1)[0]
+        rows: list[tuple[str, str]] = []
+        if sub is None:
+            rows.append((prefix, hint))
+        rows += [(f"{prefix} {name}", desc) for name, desc in self._subcommand_values(kind, sub)]
+        return rows
 
-        # If user is typing /resume or /resume <subcommand>, match against available previous sessions
-        if buf in ("/resume", "/resumes") or buf.startswith(("/resume ", "/resumes ")):
-            prefix = buf.split(" ", 1)[0]
-            has_space = " " in buf
-            sub = buf.split(" ", 1)[1].lstrip() if has_space else ""
-            res_s: list[tuple[str, str]] = []
-            if not has_space:
-                res_s.append((prefix, "Show previous sessions or resume with /resume <id>"))
-            for s in self.available_sessions:
-                run_id = s.get("run_id", "")
-                if not sub or run_id.lower().startswith(sub):
-                    steps = s.get("total_steps", 0)
-                    prev = s.get("preview", "")[:35]
-                    res_s.append((f"{prefix} {run_id}", f"({steps} steps) {prev}"))
-            return res_s
-
-        if " " in buf:
-            return []
-
+    def _subcommand_values(self, kind: str, sub: str) -> list[tuple[str, str]]:
+        """The ``(name, description)`` values a value menu can offer."""
+        if kind == "skill":
+            return [
+                (name, f"[{getattr(info, 'scope', 'project')}] "
+                       f"{getattr(info, 'summary', name)}")
+                for name, info in sorted(self.skills.items())
+                if not sub or name.lower().startswith(sub)
+            ]
+        if kind == "model":
+            return [
+                (model.get("name", ""), format_model_desc(model))
+                for model in self.available_models
+                if not sub
+                or model.get("name", "").lower().startswith(sub)
+                or (model.get("model") or "").lower().startswith(sub)
+            ]
         return [
-            (cmd, desc)
-            for cmd, desc in self.command_catalog
-            if cmd.lower().startswith(buf)
+            (session.get("run_id", ""), format_session_desc(session, preview_limit=35))
+            for session in self.available_sessions
+            if not sub or session.get("run_id", "").lower().startswith(sub)
         ]
 
     def select_next_command(self) -> None:
@@ -752,51 +755,125 @@ class TUIState:
         return val
 
 
+# Terminals that report shifted number-row keys with a modifier need the
+# character the unshifted key would not produce.
+SHIFTED_NUMBER_KEYS: dict[int, str] = {
+    49: "!", 50: "@", 51: "#", 52: "$", 53: "%",
+    54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
+}
+
+# The two encodings a terminal may use for a modified key, each with the capture
+# group holding the codepoint and the group holding the modifier.
+#   CSI-u:          \x1b[<code>;<modifiers>u
+#   modifyOtherKeys: \x1b[27;<modifiers>;<code>~
+KEY_SEQUENCE_PATTERNS: tuple[tuple[re.Pattern[str], int, int], ...] = (
+    (re.compile(r"^\x1b\[(\d+)(?:;(\d+))?u$"), 0, 1),
+    (re.compile(r"^\x1b\[27;(\d+);(\d+)~$"), 1, 0),
+)
+
+SHIFTED_MODIFIERS = (2, 3)
+
+
+def _parse_key_sequence(seq: str) -> tuple[int, int] | None:
+    """Extracts ``(codepoint, modifier)`` from a recognized key sequence."""
+    for pattern, code_group, modifier_group in KEY_SEQUENCE_PATTERNS:
+        if match := pattern.match(seq):
+            groups = match.groups()
+            return int(groups[code_group]), int(groups[modifier_group] or 1)
+    return None
+
+
+def _character_for(code: int, modifier: int) -> str | None:
+    """Maps a decoded key to a character, or ``None`` when it produces none."""
+    if code == 13:
+        return None  # Enter / Shift-Enter are handled as navigation, not text
+    if code == 64:
+        return "@"  # terminals disagree on whether Shift+2 arrives as 50 or 64
+    if modifier in SHIFTED_MODIFIERS and code in SHIFTED_NUMBER_KEYS:
+        return SHIFTED_NUMBER_KEYS[code]
+    if 32 <= code <= 126:
+        return chr(code)
+    return None
+
+
+# Transcript tags whose lines are drawn segment by segment for inline styling.
+INLINE_MARKUP_TAGS = ("agent", "user", "blockquote", "table_row")
+
+
+def _safe(write: Any, *args: Any) -> None:
+    """Writes to a curses window, ignoring writes that land outside it.
+
+    Drawing right up to the screen edge is normal, and curses reports it as an
+    error rather than clipping, so the failure is expected and not worth
+    interrupting a repaint for.
+    """
+    try:
+        write(*args)
+    except curses.error:
+        pass
+
+
+@dataclass(frozen=True)
+class ScreenLayout:
+    """Row positions for one frame, derived from the terminal height and input size."""
+
+    input_lines: int
+    input_box_height: int
+    input_start_row: int
+    telemetry_row: int
+    path_row: int
+    separator_row: int
+
+
+def _set_nodelay(window: Any, enabled: bool) -> None:
+    """Switches a curses window between blocking reads and polling reads."""
+    try:
+        window.nodelay(enabled)
+    except curses.error:
+        pass
+
+
+def _drain_escape_sequence(window: Any) -> str:
+    """Reads the remainder of an escape sequence without blocking.
+
+    Returns the sequence text including its leading ESC. A bare Escape leaves
+    nothing behind, which is how a lone keypress is told apart from CSI-u and
+    modifyOtherKeys sequences that decode to ordinary characters.
+    """
+    seq = "\x1b"
+    while True:
+        try:
+            nxt = window.get_wch()
+        except (curses.error, EOFError, StopIteration):
+            break
+        seq += chr(nxt) if isinstance(nxt, int) and 0 <= nxt <= 0x10FFFF else str(nxt)
+    return seq
+
+
+def _reset_key_reporting() -> None:
+    """Restores normal key reporting so typing "Shift+2" reaches us as "@".
+
+    Terminals left in modifyOtherKeys mode deliver shifted keys as escape
+    sequences, which would turn ordinary typing into navigation.
+    """
+    try:
+        sys.stdout.write("\x1b[>4;0m")
+        sys.stdout.flush()
+    except OSError:
+        pass
+
+
 def decode_terminal_sequence(seq: str) -> str | None:
     """Decodes modifyOtherKeys or CSI-u key sequences into characters if applicable.
 
-    For example, Shift+2 can be encoded as `\x1b[27;2;50~` or `\x1b[50;2u`, which maps to '@'.
+    For example, Shift+2 can be encoded as ``\x1b[27;2;50~`` or ``\x1b[50;2u``, which
+    maps to ``@``.
     """
     if not isinstance(seq, str) or not seq.startswith("\x1b"):
         return None
-
-    # 1. CSI-u: \x1b[<codepoint>;<modifiers>u
-    m_csi_u = re.match(r"^\x1b\[(\d+)(?:;(\d+))?u$", seq)
-    if m_csi_u:
-        code = int(m_csi_u.group(1))
-        mod = int(m_csi_u.group(2) or "1")
-        if code == 13:
-            return None  # Enter / Shift-Enter handled separately
-        if code == 64:
-            return "@"
-        shift_num_map = {
-            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
-            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
-        }
-        if (mod == 2 or mod == 3) and code in shift_num_map:
-            return shift_num_map[code]
-        if 32 <= code <= 126:
-            return chr(code)
-
-    # 2. modifyOtherKeys: \x1b[27;<modifier>;<keycode>~
-    m_mok = re.match(r"^\x1b\[27;(\d+);(\d+)~$", seq)
-    if m_mok:
-        mod = int(m_mok.group(1))
-        code = int(m_mok.group(2))
-        if code == 13:
-            return None  # Enter / Shift-Enter handled separately
-        if code == 64:
-            return "@"
-        shift_num_map = {
-            50: "@", 49: "!", 51: "#", 52: "$", 53: "%",
-            54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
-        }
-        if (mod == 2 or mod == 3) and code in shift_num_map:
-            return shift_num_map[code]
-        if 32 <= code <= 126:
-            return chr(code)
-
-    return None
+    if (parsed := _parse_key_sequence(seq)) is None:
+        return None
+    return _character_for(*parsed)
 
 
 class CursesTUI:
@@ -831,274 +908,266 @@ class CursesTUI:
             stdscr.refresh()
             return
 
-        # 1. Header Bar (Row 0)
-        header_text = f" {self.state.title} "
-        header_text = header_text[: w - 1]
-        try:
-            stdscr.attron(curses.A_BOLD)
-            stdscr.addstr(0, 0, header_text)
-            stdscr.attroff(curses.A_BOLD)
-        except curses.error:
-            pass
-
-        # 2. Header separator line (Row 1)
-        try:
-            stdscr.addstr(1, 0, "─" * (w - 1), curses.A_DIM)
-        except curses.error:
-            pass
-
-        # 3. Main Transcript Area (Rows 2 to H - 5 or dynamic multiline input)
-        raw_lines = self.state.input_buffer.split("\n")
-        num_input_lines = len(raw_lines)
-        input_box_h = max(1, min(6, num_input_lines))
-        input_start_y = h - input_box_h
-        telemetry_row = input_start_y - 1
-        path_row = telemetry_row - 1
-        sep_row = path_row - 1
-
-        transcript_height = max(1, sep_row - 2)
-        visible_lines = self.state.get_visible_slice(height=transcript_height, width=w)
-        for i, (text, tag) in enumerate(visible_lines):
-            row = 2 + i
-            if row >= sep_row:
-                break
-            attr = curses.A_NORMAL
-            if tag in ("user", "heading"):
-                attr = curses.color_pair(1) | curses.A_BOLD if self.has_colors else curses.A_BOLD
-            elif tag == "table_header":
-                attr = curses.A_BOLD
-            elif tag == "table_row":
-                attr = curses.A_NORMAL
-            elif tag in ("table_border", "code_border", "blockquote", "dim", "system"):
-                attr = curses.A_DIM
-            elif tag == "code":
-                attr = curses.color_pair(2) if self.has_colors else curses.A_NORMAL
-            elif tag == "thought":
-                attr = curses.color_pair(3) | curses.A_DIM if self.has_colors else curses.A_DIM
-            elif tag == "action":
-                attr = curses.color_pair(2) if self.has_colors else curses.A_NORMAL
-            elif tag == "error":
-                attr = curses.color_pair(4) | curses.A_BOLD if self.has_colors else curses.A_BOLD
-            elif tag == "agent":
-                attr = curses.color_pair(6) if self.has_colors else curses.A_NORMAL
-
-            if tag in ("agent", "user", "blockquote", "table_row"):
-                segments = parse_inline_segments(text)
-                col = 1
-                italic_attr = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
-                for seg_text, style in segments:
-                    if col >= w - 1:
-                        break
-                    avail = w - 1 - col
-                    chunk = seg_text[:avail]
-                    seg_attr = attr
-                    if style == "bold":
-                        seg_attr |= curses.A_BOLD
-                    elif style == "italic":
-                        seg_attr |= italic_attr
-                    elif style == "bold_italic":
-                        seg_attr |= (curses.A_BOLD | italic_attr)
-                    elif style == "code":
-                        seg_attr = (curses.color_pair(2) | curses.A_BOLD) if self.has_colors else curses.A_BOLD
-
-                    try:
-                        stdscr.addstr(row, col, chunk, seg_attr)
-                    except curses.error:
-                        pass
-                    col += len(chunk)
-            else:
-                try:
-                    stdscr.addstr(row, 1, text[: w - 2], attr)
-                except curses.error:
-                    pass
-
-        # 4. Status Cockpit: Row input_start_y - 3 (Sep), Row input_start_y - 2 (Path), Row input_start_y - 1 (Telemetry)
-        path_label = self.state.cwd or ""
-        if self.state.git_branch:
-            path_label = f"{path_label} ({self.state.git_branch})" if path_label else f"({self.state.git_branch})"
-        path_text = f" {path_label} " if path_label else ""
-
-        parts: list[str] = []
-        model_label = ""
-        if self.state.provider_name and self.state.model_name:
-            if self.state.model_name.lower().startswith(self.state.provider_name.lower() + "/"):
-                model_label = self.state.model_name
-            else:
-                model_label = f"{self.state.provider_name}/{self.state.model_name}"
-        elif self.state.model_name:
-            model_label = self.state.model_name
-        elif self.state.provider_name:
-            model_label = self.state.provider_name
-
-        if model_label:
-            parts.append(model_label)
-
-        if self.state.cache_ttl:
-            parts.append(f"cache: {self.state.cache_ttl}")
-        if self.state.reasoning:
-            parts.append(f"reasoning: {self.state.reasoning}")
-
-        parts.append(
-            f"context: {self.state.status_tokens:,} / {self.state.max_tokens:,} tokens ({self.state.usage_pct:.1f}%)"
-        )
-        if self.state.cache_hit_pct > 0:
-            parts.append(f"cache hit: {self.state.cache_hit_pct:.1f}%")
-        parts.append(f"msgs: {self.state.messages_count}")
-
-        if self.state.scroll_offset > 0:
-            parts.append(f"[scrolled +{self.state.scroll_offset}]")
-
-        if self.state.turn_active:
-            parts.append("[running · Esc cancels after current step · Ctrl+C cancels now]")
-
-        status_text = " " + " · ".join(parts) + " "
-
-        try:
-            stdscr.addstr(sep_row, 0, "─" * (w - 1), curses.A_DIM)
-            if path_text:
-                stdscr.addstr(path_row, 0, path_text[: w - 1], curses.A_DIM)
-            stdscr.addstr(telemetry_row, 0, status_text[: w - 1], curses.A_REVERSE)
-        except curses.error:
-            pass
-
-        # 5. Floating Autocomplete Menu (Workspace Files or Slash Commands)
-        file_matches = self.state.get_matching_file_tags()
-        cmd_matches = self.state.get_matching_commands()
-        matches = file_matches if file_matches else cmd_matches
-        is_file_menu = bool(file_matches)
-        raw_cmd = self.state.input_buffer.lstrip().lower()
-        is_skill_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/skill", "/skills") or raw_cmd.startswith(("/skill ", "/skills ")))
-        )
-        is_model_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/model", "/models") or raw_cmd.startswith(("/model ", "/models ")))
-        )
-        is_resume_menu = (
-            not is_file_menu
-            and (raw_cmd in ("/resume", "/resumes") or raw_cmd.startswith(("/resume ", "/resumes ")))
-        )
-
-        if matches:
-            idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
-            max_items = max(6, min(len(matches), max(6, sep_row - 6)))
-            if len(matches) <= max_items:
-                visible_matches = matches
-                rel_idx = idx
-            else:
-                start_m = max(0, min(idx - max_items // 2, len(matches) - max_items))
-                visible_matches = matches[start_m : start_m + max_items]
-                rel_idx = idx - start_m
-
-            box_h = len(visible_matches) + 4
-            box_w = max(10, w - 1)
-            start_y = max(1, sep_row - box_h)
-            start_x = 0
-
-            if is_file_menu:
-                title_part = " Workspace Files "
-            elif is_skill_menu:
-                title_part = " Available Skills "
-            elif is_model_menu:
-                title_part = " Available Models "
-            elif is_resume_menu:
-                title_part = " Previous Sessions "
-            else:
-                title_part = " Available Commands "
-
-            dash_count = max(0, box_w - 2 - len(title_part) - 2)
-            border_top = "┌─" + title_part + ("─" * dash_count) + "┐"
-            mid_sep = "├" + "─" * (box_w - 2) + "┤"
-            border_bot = "└" + "─" * (box_w - 2) + "┘"
-            tip_text = "   Tab / ↑ / ↓: Navigate  ·  Enter / →: Select  ·  Esc: Dismiss"
-
-            try:
-                stdscr.addstr(start_y, start_x, border_top[:box_w], curses.A_DIM)
-                if is_file_menu:
-                    cmd_col_w = max(24, min(42, box_w - 12))
-                elif is_skill_menu:
-                    cmd_col_w = 22
-                elif is_model_menu:
-                    cmd_col_w = max(20, min(36, box_w - 20))
-                elif is_resume_menu:
-                    cmd_col_w = max(26, min(38, box_w - 20))
-                else:
-                    cmd_col_w = 12
-
-                for row_i, (cmd, desc) in enumerate(visible_matches):
-                    y = start_y + 1 + row_i
-                    is_selected = (row_i == rel_idx)
-                    prefix = "  > " if is_selected else "    "
-                    line_content = f"{prefix}{cmd:<{cmd_col_w}} {desc}"
-                    line_content = line_content[: box_w - 2].ljust(box_w - 2)
-                    attr = (
-                        (curses.color_pair(1) | curses.A_BOLD | curses.A_REVERSE)
-                        if (is_selected and self.has_colors)
-                        else (curses.A_REVERSE if is_selected else curses.A_NORMAL)
-                    )
-                    stdscr.addstr(y, start_x, "│", curses.A_DIM)
-                    stdscr.addstr(y, start_x + 1, line_content, attr)
-                    stdscr.addstr(y, start_x + box_w - 1, "│", curses.A_DIM)
-
-                y_sep = start_y + 1 + len(visible_matches)
-                stdscr.addstr(y_sep, start_x, mid_sep[:box_w], curses.A_DIM)
-
-                y_tip = y_sep + 1
-                tip_content = tip_text[: box_w - 2].ljust(box_w - 2)
-                stdscr.addstr(y_tip, start_x, "│", curses.A_DIM)
-                stdscr.addstr(y_tip, start_x + 1, tip_content, curses.A_DIM)
-                stdscr.addstr(y_tip, start_x + box_w - 1, "│", curses.A_DIM)
-
-                stdscr.addstr(start_y + box_h - 1, start_x, border_bot[:box_w], curses.A_DIM)
-            except curses.error:
-                pass
-
-        # 6. Bottom Anchored Input Box (Multiline Support)
-        prompt_label = "> "
-        cont_label = "  "
-        avail_input_w = max(5, w - len(prompt_label) - 2)
-
-        before_cursor = self.state.input_buffer[: self.state.cursor_pos]
-        cursor_line_idx = before_cursor.count("\n")
-        cursor_col_in_line = len(before_cursor.split("\n")[-1])
-        start_line_idx = max(0, num_input_lines - input_box_h)
-
-        try:
-            for row_i in range(input_box_h):
-                cur_line_idx = start_line_idx + row_i
-                cur_text = raw_lines[cur_line_idx]
-                prefix = prompt_label if cur_line_idx == 0 else cont_label
-                display_chunk = cur_text[-avail_input_w:]
-                row_y = input_start_y + row_i
-                stdscr.addstr(row_y, 0, prefix, curses.A_BOLD if cur_line_idx == 0 else curses.A_DIM)
-                stdscr.addstr(row_y, len(prefix), display_chunk)
-
-            if cursor_line_idx >= start_line_idx:
-                c_y = input_start_y + (cursor_line_idx - start_line_idx)
-                cur_line_text = raw_lines[cursor_line_idx]
-                if len(cur_line_text) > avail_input_w:
-                    disp_offset = len(cur_line_text) - avail_input_w
-                    rel_col = max(0, cursor_col_in_line - disp_offset)
-                else:
-                    rel_col = cursor_col_in_line
-                c_x = min(w - 1, len(prompt_label) + rel_col)
-                stdscr.move(c_y, c_x)
-        except curses.error:
-            pass
-
+        self._draw_header(stdscr, w)
+        layout = self._screen_layout(h)
+        self._draw_transcript(stdscr, w, layout)
+        self._draw_status(stdscr, w, layout)
+        self._draw_autocomplete(stdscr, w, layout)
+        self._draw_input(stdscr, w, layout)
         stdscr.refresh()
+
+    def _draw_header(self, stdscr: Any, w: int) -> None:
+        """Draws the title bar and the rule beneath it."""
+        _safe(stdscr.addstr, 0, 0, f" {self.state.title} "[: w - 1], curses.A_BOLD)
+        _safe(stdscr.addstr, 1, 0, "─" * (w - 1), curses.A_DIM)
+
+    def _screen_layout(self, height: int) -> "ScreenLayout":
+        """Resolves the row each region occupies for the current input height."""
+        input_lines = len(self.state.input_buffer.split("\n"))
+        box_height = max(1, min(6, input_lines))
+        input_start = height - box_height
+        telemetry_row = input_start - 1
+        path_row = telemetry_row - 1
+        return ScreenLayout(
+            input_lines=input_lines,
+            input_box_height=box_height,
+            input_start_row=input_start,
+            telemetry_row=telemetry_row,
+            path_row=path_row,
+            separator_row=path_row - 1,
+        )
+
+    def _draw_transcript(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
+        """Draws the scrollable conversation area above the status cockpit."""
+        height = max(1, layout.separator_row - 2)
+        italic = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
+        for index, (text, tag) in enumerate(
+            self.state.get_visible_slice(height=height, width=w)
+        ):
+            row = 2 + index
+            if row >= layout.separator_row:
+                break
+            attr = self._tag_attribute(tag)
+            if tag in INLINE_MARKUP_TAGS:
+                self._draw_markup_row(stdscr, row, w, text, attr, italic)
+            else:
+                _safe(stdscr.addstr, row, 1, text[: w - 2], attr)
+
+    def _tag_attribute(self, tag: str) -> int:
+        """Curses attribute for a transcript line tag, falling back to normal."""
+        if tag in ("user", "heading"):
+            return self._colored(1, curses.A_BOLD)
+        if tag == "table_header":
+            return curses.A_BOLD
+        if tag in ("table_border", "code_border", "blockquote", "dim", "system"):
+            return curses.A_DIM
+        if tag == "action":
+            return self._colored(2, curses.A_NORMAL)
+        if tag == "thought":
+            return self._colored(3, curses.A_DIM)
+        if tag == "error":
+            return self._colored(4, curses.A_BOLD)
+        if tag == "code":
+            return self._colored(2, curses.A_NORMAL)
+        if tag == "agent":
+            return self._colored(6, curses.A_NORMAL)
+        return curses.A_NORMAL
+
+    def _colored(self, pair: int, fallback: int) -> int:
+        """A color pair when colors are available, otherwise a plain attribute."""
+        return curses.color_pair(pair) | fallback if self.has_colors else fallback
+
+    def _draw_markup_row(
+        self, stdscr: Any, row: int, w: int, text: str, attr: int, italic: int
+    ) -> None:
+        """Draws one line segment by segment so inline styles survive."""
+        col = 1
+        for segment, style in parse_inline_segments(text):
+            if col >= w - 1:
+                break
+            chunk = segment[: w - 1 - col]
+            _safe(stdscr.addstr, row, col, chunk, self._styled(attr, style, italic))
+            col += len(chunk)
+
+    def _styled(self, base: int, style: str, italic: int) -> int:
+        """Applies an inline markdown style on top of a line's base attribute."""
+        if style == "bold":
+            return base | curses.A_BOLD
+        if style == "italic":
+            return base | italic
+        if style == "bold_italic":
+            return base | curses.A_BOLD | italic
+        if style == "code":
+            return self._colored(2, curses.A_BOLD)
+        return base
+
+    def _draw_status(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
+        """Draws the path line and the reverse-video telemetry bar."""
+        _safe(stdscr.addstr, layout.separator_row, 0, "─" * (w - 1), curses.A_DIM)
+        if path := self._path_label():
+            _safe(stdscr.addstr, layout.path_row, 0, f" {path} "[: w - 1], curses.A_DIM)
+        status = " " + " · ".join(self._status_parts()) + " "
+        _safe(stdscr.addstr, layout.telemetry_row, 0, status[: w - 1], curses.A_REVERSE)
+
+    def _path_label(self) -> str:
+        """Workspace path with the git branch appended, when one is known."""
+        if not self.state.cwd:
+            return f"({self.state.git_branch})" if self.state.git_branch else ""
+        if self.state.git_branch:
+            return f"{self.state.cwd} ({self.state.git_branch})"
+        return self.state.cwd
+
+    def _status_parts(self) -> list[str]:
+        """The telemetry fields shown in the status bar, in display order."""
+        state = self.state
+        parts: list[str] = [self._model_label()] if self._model_label() else []
+        if state.cache_ttl:
+            parts.append(f"cache: {state.cache_ttl}")
+        if state.reasoning:
+            parts.append(f"reasoning: {state.reasoning}")
+        parts.append(
+            f"context: {state.status_tokens:,} / {state.max_tokens:,} tokens ({state.usage_pct:.1f}%)"
+        )
+        if state.cache_hit_pct > 0:
+            parts.append(f"cache hit: {state.cache_hit_pct:.1f}%")
+        parts.append(f"msgs: {state.messages_count}")
+        if state.scroll_offset > 0:
+            parts.append(f"[scrolled +{state.scroll_offset}]")
+        if state.turn_active:
+            parts.append("[running · Esc cancels after current step · Ctrl+C cancels now]")
+        return parts
+
+    def _model_label(self) -> str:
+        """Provider-qualified model name, without repeating a provider already in the id."""
+        state = self.state
+        if state.provider_name and state.model_name:
+            if state.model_name.lower().startswith(state.provider_name.lower() + "/"):
+                return state.model_name
+            return f"{state.provider_name}/{state.model_name}"
+        return state.model_name or state.provider_name
+
+    def _draw_autocomplete(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
+        """Draws the floating file/command menu above the input box."""
+        file_matches = self.state.get_matching_file_tags()
+        matches = file_matches or self.state.get_matching_commands()
+        if not matches:
+            return
+        is_file_menu = bool(file_matches)
+        subcommand = active_subcommand(self.state.input_buffer.lstrip().lower())
+        menu_kind = None if is_file_menu else (subcommand[0] if subcommand else None)
+
+        visible, selected = self._visible_menu_slice(matches, layout.separator_row)
+        box_height = len(visible) + 4
+        box_width = max(10, w - 1)
+        top = max(1, layout.separator_row - box_height)
+        try:
+            self._draw_menu_frame(stdscr, top, box_width, box_height, menu_kind, is_file_menu)
+            column_width = menu_column_width(menu_kind, box_width, is_file_menu)
+            for row, (command, description) in enumerate(visible, start=1):
+                self._draw_menu_row(
+                    stdscr, top + row, box_width, command, description, column_width,
+                    row - 1 == selected,
+                )
+            self._draw_menu_footer(stdscr, top, box_width, box_height, len(visible))
+        except curses.error:
+            pass
+
+    def _visible_menu_slice(
+        self, matches: list[tuple[str, str]], separator_row: int
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Scrolls the match list around the selection to fit above the input box."""
+        limit = max(6, min(len(matches), max(6, separator_row - 6)))
+        index = max(0, min(self.state.selected_command_idx, len(matches) - 1))
+        if len(matches) <= limit:
+            return matches, index
+        start = max(0, min(index - limit // 2, len(matches) - limit))
+        return matches[start : start + limit], index - start
+
+    def _menu_title(self, menu_kind: str | None, is_file_menu: bool) -> str:
+        """Heading shown in the menu's top border."""
+        if menu_kind is not None:
+            return SUBCOMMAND_MENUS[menu_kind][1]
+        return " Workspace Files " if is_file_menu else " Available Commands "
+
+    def _draw_menu_frame(
+        self, stdscr: Any, top: int, width: int, height: int, menu_kind: str | None, is_file: bool
+    ) -> None:
+        """Draws the menu's top border with its title."""
+        title = self._menu_title(menu_kind, is_file)
+        dash_count = max(0, width - 2 - len(title) - 2)
+        stdscr.addstr(top, 0, ("┌─" + title + "─" * dash_count + "┐")[:width], curses.A_DIM)
+
+    def _draw_menu_row(
+        self, stdscr: Any, y: int, width: int, command: str, description: str,
+        column_width: int, selected: bool,
+    ) -> None:
+        """Draws one menu entry between the box's vertical rules."""
+        prefix = "  > " if selected else "    "
+        content = f"{prefix}{command:<{column_width}} {description}"
+        content = content[: width - 2].ljust(width - 2)
+        attr = (
+            (curses.color_pair(1) | curses.A_BOLD | curses.A_REVERSE)
+            if (selected and self.has_colors)
+            else (curses.A_REVERSE if selected else curses.A_NORMAL)
+        )
+        stdscr.addstr(y, 0, "│", curses.A_DIM)
+        stdscr.addstr(y, 1, content, attr)
+        stdscr.addstr(y, width - 1, "│", curses.A_DIM)
+
+    def _draw_menu_footer(
+        self, stdscr: Any, top: int, width: int, height: int, rows: int
+    ) -> None:
+        """Draws the menu's separator, keyboard hint, and bottom border."""
+        tip = "   Tab / ↑ / ↓: Navigate  ·  Enter / →: Select  ·  Esc: Dismiss"
+        separator_row = top + 1 + rows
+        stdscr.addstr(separator_row, 0, ("├" + "─" * (width - 2) + "┤")[:width], curses.A_DIM)
+        stdscr.addstr(separator_row + 1, 0, "│", curses.A_DIM)
+        stdscr.addstr(separator_row + 1, 1, tip[: width - 2].ljust(width - 2), curses.A_DIM)
+        stdscr.addstr(separator_row + 1, width - 1, "│", curses.A_DIM)
+        stdscr.addstr(top + height - 1, 0, ("└" + "─" * (width - 2) + "┘")[:width], curses.A_DIM)
+
+    def _draw_input(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
+        """Draws the bottom-anchored prompt and places the cursor."""
+        prompt, continuation = "> ", "  "
+        available = max(5, w - len(prompt) - 2)
+        lines = self.state.input_buffer.split("\n")
+        first_line = max(0, layout.input_lines - layout.input_box_height)
+
+        try:
+            for row in range(layout.input_box_height):
+                index = first_line + row
+                text = lines[index]
+                label = prompt if index == 0 else continuation
+                y = layout.input_start_row + row
+                stdscr.addstr(y, 0, label, curses.A_BOLD if index == 0 else curses.A_DIM)
+                stdscr.addstr(y, len(label), text[-available:])
+            if (cursor := self._cursor_position(w, layout, available, len(prompt))):
+                stdscr.move(*cursor)
+        except curses.error:
+            pass
+
+    def _cursor_position(
+        self, w: int, layout: "ScreenLayout", available: int, prompt_width: int
+    ) -> tuple[int, int] | None:
+        """Where the cursor sits, accounting for the tail of a scrolled input line."""
+        first_line = max(0, layout.input_lines - layout.input_box_height)
+        before = self.state.input_buffer[: self.state.cursor_pos]
+        line_index = before.count("\n")
+        if line_index < first_line:
+            return None  # the cursor sits above the visible input box
+        line_text = self.state.input_buffer.split("\n")[line_index]
+        column = len(before.split("\n")[-1])
+        offset = max(0, len(line_text) - available)
+        return layout.input_start_row + (line_index - first_line), min(
+            w - 1, prompt_width + max(0, column - offset)
+        )
 
     def check_cancel_requested(self) -> bool:
         """Non-blocking check if Escape key was pressed by user during execution."""
         if not self.stdscr:
             return False
         try:
-            try:
-                self.stdscr.nodelay(True)
-            except Exception:
-                pass
-            cancel_requested = False
+            _set_nodelay(self.stdscr, True)
             while True:
                 try:
                     ch = self.stdscr.get_wch()
@@ -1106,26 +1175,26 @@ class CursesTUI:
                     break
                 except KeyboardInterrupt:
                     raise
-                if ch in (27, "\x1b"):
-                    seq = "\x1b"
-                    while True:
-                        try:
-                            nxt = self.stdscr.get_wch()
-                            if isinstance(nxt, int):
-                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
-                            else:
-                                seq += str(nxt)
-                        except (curses.error, EOFError, StopIteration):
-                            break
-                    if len(seq) == 1:
-                        cancel_requested = True
-                        break
-            return cancel_requested
+                if ch in (27, "\x1b") and len(_drain_escape_sequence(self.stdscr)) == 1:
+                    return True
+            return False
         finally:
-            try:
-                self.stdscr.nodelay(False)
-            except Exception:
-                pass
+            _set_nodelay(self.stdscr, False)
+
+    def _complete_command_keeping_value_menu(self) -> None:
+        """Completes the selected command, adding a space when it takes an argument.
+
+        Leaving "/skill" alone would close the value menu the user just opened.
+        """
+        completed = self.state.complete_selected_command()
+        if completed is None:
+            return
+        takes_argument = any(
+            completed in spellings for spellings, _t, _h in SUBCOMMAND_MENUS.values()
+        )
+        if takes_argument:
+            self.state.input_buffer = f"{completed} "
+            self.state.cursor_pos = len(self.state.input_buffer)
 
     def handle_key(self, ch: str | int, on_user_submit: Callable[[str], None]) -> bool:
         """Processes a single keystroke event.
@@ -1171,10 +1240,7 @@ class CursesTUI:
                 return True
             if cmd_matches:
                 if len(cmd_matches) == 1:
-                    completed = self.state.complete_selected_command()
-                    if completed in ("/model", "/resume", "/skill"):
-                        self.state.input_buffer = f"{completed} "
-                        self.state.cursor_pos = len(self.state.input_buffer)
+                    self._complete_command_keeping_value_menu()
                 else:
                     self.state.select_next_command()
                 return True
@@ -1202,10 +1268,7 @@ class CursesTUI:
                 self.state.complete_selected_file_tag()
                 return True
             if cmd_matches:
-                completed = self.state.complete_selected_command()
-                if completed in ("/model", "/resume", "/skill"):
-                    self.state.input_buffer = f"{completed} "
-                    self.state.cursor_pos = len(self.state.input_buffer)
+                self._complete_command_keeping_value_menu()
                 return True
             return True
 
@@ -1266,12 +1329,7 @@ class CursesTUI:
             stdscr.keypad(True)
             curses.curs_set(1)
 
-            # Reset any terminal modifyOtherKeys mode to preserve normal key typing (e.g. Shift+2 -> @)
-            try:
-                sys.stdout.write("\x1b[>4;0m")
-                sys.stdout.flush()
-            except Exception:
-                pass
+            _reset_key_reporting()
 
             self.draw(stdscr)
 
@@ -1288,18 +1346,9 @@ class CursesTUI:
                     continue
 
                 if ch in (27, "\x1b"):
-                    stdscr.nodelay(True)
-                    seq = "\x1b"
-                    while True:
-                        try:
-                            nxt = stdscr.get_wch()
-                            if isinstance(nxt, int):
-                                seq += chr(nxt) if 0 <= nxt <= 0x10FFFF else ""
-                            else:
-                                seq += str(nxt)
-                        except curses.error:
-                            break
-                    stdscr.nodelay(False)
+                    _set_nodelay(stdscr, True)
+                    seq = _drain_escape_sequence(stdscr)
+                    _set_nodelay(stdscr, False)
                     if len(seq) > 1:
                         ch = seq
 
@@ -1307,11 +1356,6 @@ class CursesTUI:
                     break
                 self.draw(stdscr)
 
-            # Restore normal key reporting mode
-            try:
-                sys.stdout.write("\x1b[>4;0m")
-                sys.stdout.flush()
-            except Exception:
-                pass
+            _reset_key_reporting()
 
         curses.wrapper(_main)

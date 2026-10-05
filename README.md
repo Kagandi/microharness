@@ -12,6 +12,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 | :--- | :--- | :--- |
 | **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
 | **Harness** *(The Chassis)* | The outer environment: workspace directory, sandboxing, budgets, memory compaction, telemetry/tracing, and grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
+| **Interactive Router** | One command table (`/model`, `/resume`, `/compact`, `/skill`, ...) shared by the CLI session and the TUI, so the two frontends cannot drift. | [`core/interactive.py`](file:///Users/dimakagan/Projects/mini-harness/core/interactive.py) |
 
 ---
 
@@ -209,7 +210,7 @@ You can inspect or control the harness runtime directly:
 The two cancel keys are **not** equivalent, and the status bar says so while a turn runs:
 
 * **`Ctrl+C`** aborts the active step immediately, including a request that is already in flight. The incomplete tool turn is dropped and the session stays usable.
-* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a rate-limit backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
+* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a throttle backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
 
 `Esc` cannot abort a request that is currently waiting on the provider, because the HTTP timeout covers time-to-first-byte and shortening it would break slow models. Use `Ctrl+C` for that. See SPEC.md §5.2 for the planned work to unify the two.
 
@@ -384,15 +385,26 @@ microharness/
 │   └── runner.py       # Benchmark orchestrator, scorecard table & incremental JSON report export
 ├── core/
 │   ├── types.py        # Clean dataclasses (Message, ToolCall, Task, Trajectory, RunResult)
-│   ├── prompts.py      # System prompt templates
+│   ├── prompts.py      # System prompt templates & prompt assembly
 │   ├── environment.py  # Workspace & bash runner (supports in-place and sandbox)
 │   ├── tools.py        # Pluggable tool protocol & built-ins (bash, read_file, write_file)
 │   ├── memory.py       # Context manager & 80% high-water mark compaction
-│   ├── model.py        # Model protocol, generic HttpChatModel & MockModel
+│   ├── protocols.py    # Model protocol, capability protocols (cache, deadline, cancel) & cancellation
+│   ├── usage.py        # Token normalization, per-model telemetry & run-level totals
+│   ├── providers.py    # Provider registry, model-spec resolution & client construction
+│   ├── model.py        # Generic HttpChatModel & MockModel clients
+│   ├── config.py       # Cascading configuration, JSONC reading & setting resolution
+│   ├── skills.py       # Progressive-disclosure skills (discovery, summaries, activation)
+│   ├── commands.py     # Custom slash commands & slash-input resolution
+│   ├── discovery.py    # Hierarchical resource discovery & @file-tagging
+│   ├── interactive.py  # Interactive command router shared by the CLI session & the TUI
+│   ├── session.py      # Step driver, session index, resumption & trace reconstruction
 │   ├── loop.py         # Native tool-calling loop (~40 lines)
 │   ├── evaluator.py    # Automated graders (CommandTestEvaluator, FileContentEvaluator)
 │   ├── tracer.py       # Telemetry collector, modern CLI renderer & trace exporter
-│   └── harness.py      # Harness orchestrator with global config & commands support
+│   ├── tui.py          # Full-screen curses TUI (markdown rendering, autocomplete)
+│   ├── tui_session.py  # TUI turn driver: step rendering & cooperative cancellation
+│   └── harness.py      # Harness orchestrator wiring the chassis together
 └── tests/
     ├── test_benchmarks.py  # Mini-SWE baseline failure, anti-cheating & reference tests
     ├── test_harbor.py      # Harbor task parsing, Docker image validation & evaluator tests
@@ -401,5 +413,15 @@ microharness/
     ├── test_memory.py      # Conversation history, stats & 80% compaction tests
     ├── test_model.py       # Endpoint normalization, serialization & mock model tests
     ├── test_evaluator.py   # Grader assertions tests
+    ├── test_config.py      # Config cascade, JSONC parsing & tool-trust boundary tests
+    ├── test_protocols.py   # Capability protocol detection tests
+    ├── test_usage.py       # Token normalization & telemetry accounting tests
+    ├── test_providers.py   # Provider registry, model specs & available-model tests
+    ├── test_skills.py      # Skill discovery, summaries & activation tests
+    ├── test_commands.py    # Slash-command discovery, expansion & resolution tests
+    ├── test_prompts.py     # Prompt assembly & AGENTS.md cascading tests
+    ├── test_session.py     # Step driver retries, deadlines & session resumption tests
+    ├── test_interactive.py # Command router & rendering tests
+    ├── test_tui_session.py # TUI turn rendering & cancellation tests
     └── test_harness.py     # End-to-end lifecycle, global config, commands & guardrails tests
 ```

@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,8 +10,6 @@ from core.model import (
     MockModel,
     RateLimitError,
     ReasoningAwareModel,
-    _format_delay,
-    _is_unrecoverable_quota_error,
     build_model_from_spec,
     extract_retry_delay,
     find_provider_by_endpoint,
@@ -860,88 +859,56 @@ class TestModel(unittest.TestCase):
         self.assertNotIn("reasoning", payload_none)
         self.assertEqual(payload_none["messages"][0]["content"], "Be helpful")
 
-    def test_extract_retry_delay_from_google_rpc_retry_info(self):
-        """Invariant: extract_retry_delay correctly parses Google RPC RetryInfo retryDelay."""
-        google_err = json.dumps([{
-            "error": {
-                "code": 429,
-                "message": "Resource exhausted",
-                "details": [
-                    {
-                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
-                        "retryDelay": "55s"
-                    }
-                ]
-            }
-        }])
-        delay = extract_retry_delay(google_err)
-        self.assertEqual(delay, 55.0)
+    def test_extract_retry_delay_from_retry_after_header(self):
+        """Invariant: the standard Retry-After header is honoured verbatim."""
+        self.assertEqual(extract_retry_delay({"Retry-After": "42"}), 42.0)
+        self.assertEqual(extract_retry_delay({"Retry-After": "0"}), 0.0)
 
-    def test_extract_retry_delay_from_regex(self):
-        """Invariant: extract_retry_delay matches text patterns like 'Please retry in Xs'."""
-        msg1 = "Quota exceeded for model gemini-3.8-flash. Please retry in 55.116226147s."
-        self.assertAlmostEqual(extract_retry_delay(msg1), 55.116226147, places=5)
+    def test_extract_retry_delay_from_reset_header(self):
+        """Invariant: an X-RateLimit-Reset epoch stamp becomes the remaining wait."""
+        seconds = extract_retry_delay({"X-RateLimit-Reset": str(time.time() + 30)})
+        self.assertAlmostEqual(seconds, 30.0, delta=1.5)
 
-        msg2 = "Rate limit reached. Retry after 12.5 seconds."
-        self.assertEqual(extract_retry_delay(msg2), 12.5)
+        millis = extract_retry_delay({"x-ratelimit-reset": str((time.time() + 20) * 1000)})
+        self.assertAlmostEqual(millis, 20.0, delta=1.5)
 
-        msg3 = "Please try again in 30s"
-        self.assertEqual(extract_retry_delay(msg3), 30.0)
-
-    def test_extract_retry_delay_from_header(self):
-        """Invariant: HTTP Retry-After header is honored when present."""
-        delay = extract_retry_delay(err_body="rate limited", retry_header="42")
-        self.assertEqual(delay, 42.0)
+    def test_extract_retry_delay_elapsed_reset_is_zero_not_negative(self):
+        """Invariant: a reset stamp already in the past yields no wait at all."""
+        self.assertEqual(extract_retry_delay({"X-RateLimit-Reset": str(time.time() - 60)}), 0.0)
 
     def test_extract_retry_delay_negative_cases(self):
-        """Invariant: extract_retry_delay returns None for missing or unparseable delays."""
-        self.assertIsNone(extract_retry_delay(""))
-        self.assertIsNone(extract_retry_delay("Generic rate limit without retry time"))
-        self.assertIsNone(extract_retry_delay("{}", retry_header="not-a-number"))
-
-    def test_is_unrecoverable_quota_error(self):
-        """Invariant: detects unrecoverable daily quota or payment errors."""
-        self.assertTrue(_is_unrecoverable_quota_error(402, "Payment required"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "Free tier limit exceeded for today"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "Daily request limit reached"))
-        self.assertTrue(_is_unrecoverable_quota_error(429, "User has insufficient credits"))
-        # Negative case: transient rate limit without daily keywords
-        self.assertFalse(_is_unrecoverable_quota_error(429, "Too many requests per minute. Retry in 10s"))
+        """Invariant: absent, malformed, or negative hints fall back to caller backoff."""
+        self.assertIsNone(extract_retry_delay({}))
+        self.assertIsNone(extract_retry_delay(None))
+        self.assertIsNone(extract_retry_delay({"Retry-After": "soon"}))
+        self.assertIsNone(extract_retry_delay({"Retry-After": "-5"}))
 
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
-    def test_send_request_smart_retry_google_55s(self, mock_urlopen, mock_sleep):
-        """Invariant: _send_request waits the exact parsed Google retry delay and succeeds on retry."""
+    def test_send_request_falls_back_to_backoff_without_delay_headers(self, mock_urlopen, mock_sleep):
+        """Invariant: a 429 with no delay header uses exponential backoff, not a guessed delay."""
         import urllib.error
-        google_429_body = json.dumps([{
-            "error": {
-                "code": 429,
-                "message": "Quota exceeded. Please retry in 55.1s.",
-                "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "55s"}]
-            }
-        }]).encode("utf-8")
 
         err = urllib.error.HTTPError(
             url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             code=429,
             msg="Too Many Requests",
             hdrs=None,
-            fp=MagicMock(read=MagicMock(return_value=google_429_body)),
+            fp=MagicMock(read=MagicMock(return_value=b'{"error": {"code": 429}}')),
         )
-
         success_resp = MagicMock()
-        success_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode("utf-8")
+        success_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "recovered"}}]}
+        ).encode("utf-8")
         success_resp.__enter__.return_value = success_resp
 
-        # First call fails with 429, second call succeeds
         mock_urlopen.side_effect = [err, success_resp]
 
-        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini-3.8-flash")
-        result = m._send_request(payload={"model": "gemini-3.8-flash"}, headers={})
+        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini")
+        result = m._send_request(payload={"model": "gemini"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
-        # Slept exactly 55.0 + 1.0 = 56.0s
-        mock_sleep.assert_called_once_with(56.0)
+        mock_sleep.assert_called_once_with(2.0)
 
     def test_wait_or_cancel_aborts_backoff_when_probe_fires(self):
         """Invariant: an installed cancel probe cuts a retry backoff short and raises."""
@@ -1061,29 +1028,6 @@ class TestModel(unittest.TestCase):
 
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
-    def test_send_request_exceeds_max_retry_sleep_fails_immediately(self, mock_urlopen, mock_sleep):
-        """Invariant: _send_request refuses to hang for hours if delay > MAX_RETRY_SLEEP_S (120s)."""
-        import urllib.error
-        err_body = b"Daily quota limit exceeded. Please retry in 50000s."
-        err = urllib.error.HTTPError(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            code=429,
-            msg="Too Many Requests",
-            hdrs=None,
-            fp=MagicMock(read=MagicMock(return_value=err_body)),
-        )
-        mock_urlopen.side_effect = err
-
-        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="test")
-        with self.assertRaises(RateLimitError) as ctx:
-            m._send_request(payload={"model": "test"}, headers={})
-
-        self.assertIn("exceeds maximum allowed sleep", str(ctx.exception))
-        # time.sleep must NEVER have been called for 50,000s
-        mock_sleep.assert_not_called()
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
     def test_send_request_http_402_fails_immediately(self, mock_urlopen, mock_sleep):
         """Invariant: HTTP 402 (Insufficient credits) fails immediately without retry loop."""
         import urllib.error
@@ -1101,63 +1045,27 @@ class TestModel(unittest.TestCase):
         with self.assertRaises(RateLimitError) as ctx:
             m._send_request(payload={"model": "test"}, headers={})
 
-        self.assertIn("credit limit exhausted", str(ctx.exception))
+        self.assertIn("rejected the request for payment", str(ctx.exception))
         mock_sleep.assert_not_called()
 
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
-    def test_send_request_google_daily_limit_fails_immediately(self, mock_urlopen, mock_sleep):
-        """Invariant: Google's GenerateRequestsPerDay quota error halts immediately without sleeping."""
+    def test_send_request_waits_the_delay_the_server_asked_for(self, mock_urlopen, mock_sleep):
+        """Invariant: a throttled request waits exactly the Retry-After the server sent."""
         import urllib.error
-        google_daily_body = json.dumps([{
-            "error": {
-                "code": 429,
-                "message": "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20",
-                "details": [
-                    {
-                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
-                        "violations": [{
-                            "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
-                            "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
-                            "quotaValue": "20"
-                        }]
-                    }
-                ]
-            }
-        }]).encode("utf-8")
 
-        err = urllib.error.HTTPError(
-            url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            code=429,
-            msg="Too Many Requests",
-            hdrs=None,
-            fp=MagicMock(read=MagicMock(return_value=google_daily_body)),
-        )
-        mock_urlopen.side_effect = err
-
-        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini-3.8-flash")
-        with self.assertRaises(RateLimitError) as ctx:
-            m._send_request(payload={"model": "gemini-3.8-flash"}, headers={})
-
-        self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
-        mock_sleep.assert_not_called()
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_send_request_daily_limit_with_short_reset_retries(self, mock_urlopen, mock_sleep):
-        """Invariant: A daily limit 429 error providing an explicit short reset delay is retried instead of failing fast."""
-        import urllib.error
         err = urllib.error.HTTPError(
             url="https://api.example.com/chat/completions",
             code=429,
             msg="Too Many Requests",
-            hdrs=None,
-            fp=MagicMock(read=MagicMock(return_value=b'{"error":{"message":"Daily limit reached. Resets in 5 seconds."}}')),
+            hdrs={"Retry-After": "5"},
+            fp=MagicMock(read=MagicMock(return_value=b'{"error":{"message":"slow down"}}')),
         )
         success_resp = MagicMock()
-        success_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "recovered"}}]}).encode("utf-8")
+        success_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "recovered"}}]}
+        ).encode("utf-8")
         success_resp.__enter__.return_value = success_resp
-        success_resp.__exit__.return_value = None
 
         mock_urlopen.side_effect = [err, success_resp]
 
@@ -1165,39 +1073,8 @@ class TestModel(unittest.TestCase):
         result = m._send_request(payload={"prompt": "hi"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
-        # 5.0s extracted + 1.0s safety buffer = 6.0s
-        mock_sleep.assert_called_once_with(6.0)
-        self.assertEqual(m.total_rate_limit_wait_s, 6.0)
-
-    @patch("time.sleep")
-    @patch("urllib.request.urlopen")
-    def test_send_request_openai_canonical_quota_exhaustion_fails_fast(self, mock_urlopen, mock_sleep):
-        """Invariant: OpenAI canonical quota message fails fast without burning retries or sleeping."""
-        import urllib.error
-        openai_quota_body = json.dumps({
-            "error": {
-                "message": "You exceeded your current quota, please check your plan and billing details.",
-                "type": "insufficient_quota",
-                "param": None,
-                "code": "insufficient_quota"
-            }
-        }).encode("utf-8")
-
-        err = urllib.error.HTTPError(
-            url="https://api.openai.com/v1/chat/completions",
-            code=429,
-            msg="Too Many Requests",
-            hdrs=None,
-            fp=MagicMock(read=MagicMock(return_value=openai_quota_body)),
-        )
-        mock_urlopen.side_effect = err
-
-        m = HttpChatModel(base_url="https://api.openai.com/v1", model="gpt-4o")
-        with self.assertRaises(RateLimitError) as ctx:
-            m._send_request(payload={"prompt": "hi"}, headers={})
-
-        self.assertIn("daily quota or credit limit exhausted", str(ctx.exception))
-        mock_sleep.assert_not_called()
+        mock_sleep.assert_called_once_with(5.0)
+        self.assertEqual(m.total_rate_limit_wait_s, 5.0)
 
     def test_load_provider_registry_pure_read_only(self):
         """Invariant: load_provider_registry is strictly read-only and never writes to disk."""
@@ -1229,37 +1106,6 @@ class TestModel(unittest.TestCase):
         self.assertEqual(data["nested"]["escaped"], 'Quote "with # and //"')
         self.assertEqual(data["nested"]["comment_at_end"], 123)
 
-    def test_extract_retry_delay_reset_header_and_metadata(self):
-        """Invariant: extract_retry_delay parses X-RateLimit-Reset headers (seconds and millis) and JSON metadata."""
-        import time
-        now = time.time()
-        # Reset in 45 seconds (epoch seconds)
-        reset_s = str(now + 45.0)
-        delay = extract_retry_delay("{}", reset_header=reset_s)
-        self.assertIsNotNone(delay)
-        self.assertAlmostEqual(delay, 45.0, delta=1.5)
-
-        # Reset in 50 seconds (epoch millis, e.g. OpenRouter)
-        reset_ms = str((now + 50.0) * 1000.0)
-        delay = extract_retry_delay("{}", reset_header=reset_ms)
-        self.assertIsNotNone(delay)
-        self.assertAlmostEqual(delay, 50.0, delta=1.5)
-
-        # JSON metadata headers (OpenRouter shape)
-        body = json.dumps({
-            "error": {
-                "message": "Provider rate limit exceeded",
-                "metadata": {
-                    "headers": {
-                        "x-ratelimit-reset": str((now + 30.0) * 1000.0)
-                    }
-                }
-            }
-        })
-        delay = extract_retry_delay(body)
-        self.assertIsNotNone(delay)
-        self.assertAlmostEqual(delay, 30.0, delta=1.5)
-
     def test_in_flight_timeout_bounds_model_request(self):
         """Invariant: HttpChatModel bounds socket requests against deadline and raises TimeoutError when expired."""
         import time
@@ -1271,17 +1117,6 @@ class TestModel(unittest.TestCase):
         model.set_deadline(time.time() - 1.0)
         with self.assertRaises(TimeoutError):
             model._send_request({"prompt": "hi"}, {})
-
-    def test_format_delay(self):
-        """Invariant: _format_delay formats small and unbounded/bogus delays into human-readable strings."""
-        self.assertEqual(_format_delay(5.0), "5.0s")
-        self.assertEqual(_format_delay(120.0), "120.0s")
-        self.assertEqual(_format_delay(3599.0), "3599.0s")
-        self.assertEqual(_format_delay(3600.0), "1.0 hours")
-        self.assertEqual(_format_delay(7200.0), "2.0 hours")
-        self.assertEqual(_format_delay(86400.0), "1.0d (24.0 hours)")
-        self.assertEqual(_format_delay(3600000.0), "~1.0k hours")
-        self.assertEqual(_format_delay(9820956445.2), "~2.7M hours")
 
     @patch("urllib.request.urlopen")
     def test_send_request_clamps_socket_timeout_to_remaining_deadline(self, mock_urlopen):

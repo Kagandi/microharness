@@ -316,65 +316,94 @@ def _as_tools(val: Any) -> list[Tool]:
     return [t for t in candidates if _is_tool_like(t)]
 
 
+def _accepts_env(target: Any) -> bool:
+    """Whether a plugin hook or class can be handed the environment.
+
+    Read from the signature rather than discovered by catching ``TypeError``: a
+    ``TypeError`` raised inside a plugin's own ``__init__`` would otherwise be
+    misread as "wrong signature" and silently retried with fewer arguments.
+    """
+    try:
+        parameters = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    env_param = parameters.get("env")
+    if env_param is not None and env_param.kind is not inspect.Parameter.POSITIONAL_ONLY:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
+def _call_plugin_hook(target: Any, env: Environment | None) -> Any:
+    """Invokes a plugin hook, passing the environment only when it accepts one."""
+    if env is not None and _accepts_env(target):
+        return target(env=env)
+    return target()
+
+
+def _tools_from_classes(module: Any, env: Environment | None) -> list[Tool]:
+    """Instantiates every Tool-protocol class the plugin module defines."""
+    tools: list[Tool] = []
+    for _, cls in inspect.getmembers(module, inspect.isclass):
+        if cls.__module__ != module.__name__ or not hasattr(cls, "execute"):
+            continue
+        try:
+            instance = _call_plugin_hook(cls, env)
+        except Exception as exc:
+            print(
+                f"⚠️ Warning: tool plugin class '{cls.__name__}' failed to construct: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        if _is_tool_like(instance):
+            tools.append(instance)
+    return tools
+
+
 def load_tool_plugin(plugin_path: Path | str, env: Environment | None = None) -> list[Tool]:
     """Dynamically loads tools from a standalone Python plugin file.
 
-    Supported plugin conventions:
-    1. Factory function: `get_tools(env)` or `get_tools()`
-    2. Module attribute: `tools` or `TOOLS = [MyTool()]`
-    3. Direct classes: Any class defined in the file conforming to Tool protocol
+    Supported plugin conventions, in the order they are tried:
+    1. Factory function: ``get_tools(env)`` or ``get_tools()``
+    2. Module attribute: ``tools`` or ``TOOLS = [MyTool()]``
+    3. Direct classes: any class defined in the file conforming to Tool protocol
     """
     path = Path(plugin_path).resolve()
     if not path.is_file() or path.suffix != ".py":
         return []
 
+    module = _import_plugin_module(path)
+    if module is None:
+        return []
+
+    factory = getattr(module, "get_tools", None)
+    if callable(factory):
+        try:
+            return _as_tools(_call_plugin_hook(factory, env))
+        except Exception as exc:
+            print(f"⚠️ Warning: get_tools() in '{path}' failed: {exc}", file=sys.stderr)
+            return []
+
+    for attr in ("tools", "TOOLS"):
+        if tools := _as_tools(getattr(module, attr, None)):
+            return tools
+
+    return _tools_from_classes(module, env)
+
+
+def _import_plugin_module(path: Path) -> Any | None:
+    """Executes a plugin file as a module, or reports why it could not be loaded."""
     try:
         spec = importlib.util.spec_from_file_location(
             f"_mh_tool_{path.stem}_{abs(hash(str(path)))}", path
         )
         if not spec or not spec.loader:
-            return []
+            return None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        return module
     except Exception as exc:
         print(f"⚠️ Warning: Failed to load tool plugin '{path}': {exc}", file=sys.stderr)
-        return []
-
-    # 1. Factory function: get_tools(env) or get_tools()
-    if callable(getattr(module, "get_tools", None)):
-        try:
-            return _as_tools(module.get_tools(env) if env is not None else module.get_tools())
-        except TypeError:
-            return _as_tools(module.get_tools())
-
-    # 2. Module attributes: tools or TOOLS
-    for attr in ("tools", "TOOLS"):
-        if hasattr(module, attr):
-            tools = _as_tools(getattr(module, attr))
-            if tools:
-                return tools
-
-    # 3. Direct Tool classes defined in the plugin module
-    tools: list[Tool] = []
-    for _, cls in inspect.getmembers(module, inspect.isclass):
-        if cls.__module__ == module.__name__ and hasattr(cls, "execute"):
-            calls = (
-                [lambda c=cls: c(env=env), lambda c=cls: c(env), lambda c=cls: c()]
-                if env is not None
-                else [lambda c=cls: c()]
-            )
-            for call in calls:
-                try:
-                    inst = call()
-                    if _is_tool_like(inst):
-                        tools.append(inst)
-                    break
-                except TypeError:
-                    continue
-                except Exception:
-                    break
-
-    return tools
+        return None
 
 
 def discover_tool_plugins(
