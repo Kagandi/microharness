@@ -1,6 +1,8 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from core.environment import Environment
 from core.tools import (
@@ -260,6 +262,68 @@ tools = [ToolOne(), ToolTwo()]
         self.assertEqual(len(tools), 2)
         names = [t.name for t in tools]
         self.assertEqual(names, ["tool_one", "tool_two"])
+
+    def test_load_tool_plugin_reports_a_failing_constructor(self):
+        """Invariant: a TypeError from inside a plugin's __init__ is reported, not swallowed.
+
+        Arity is decided by inspecting the signature, so an internal TypeError can
+        no longer be mistaken for "this hook takes no arguments" and silently
+        retried until the class is dropped without a word.
+        """
+        plugin_file = Path(self.temp_dir) / "broken_init_plugin.py"
+        plugin_file.write_text(
+            """
+class BadTool:
+    name = "bad"
+    description = "raises while constructing"
+    parameters = {}
+    def __init__(self, env=None):
+        raise TypeError("internal bug in __init__")
+    def execute(self):
+        return 0, "unreachable"
+""",
+            encoding="utf-8",
+        )
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            tools = load_tool_plugin(plugin_file, env=self.env)
+
+        self.assertEqual(tools, [])
+        self.assertIn("BadTool", stderr.getvalue())
+        self.assertIn("internal bug in __init__", stderr.getvalue())
+
+    def test_load_tool_plugin_passes_env_only_when_accepted(self):
+        """Invariant: a plugin that cannot receive the environment is still loaded."""
+        takes_env = Path(self.temp_dir) / "takes_env.py"
+        takes_env.write_text(
+            """
+class EnvTool:
+    name = "envtool"
+    description = "receives the environment"
+    parameters = {}
+    def __init__(self, env=None):
+        self.env = env
+    def execute(self):
+        return 0, str(self.env)
+""",
+            encoding="utf-8",
+        )
+        no_env = Path(self.temp_dir) / "no_env.py"
+        no_env.write_text(
+            """
+class PlainTool:
+    name = "plain"
+    description = "takes no environment"
+    parameters = {}
+    def execute(self):
+        return 0, "plain"
+""",
+            encoding="utf-8",
+        )
+
+        self.assertEqual([t.name for t in load_tool_plugin(takes_env, env="ENV")], ["envtool"])
+        self.assertEqual([t.name for t in load_tool_plugin(no_env, env="ENV")], ["plain"])
 
     def test_load_tool_plugin_negative_cases(self):
         """Invariant: load_tool_plugin gracefully returns empty list on invalid files or syntax errors."""

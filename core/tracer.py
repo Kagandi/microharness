@@ -7,7 +7,23 @@ import warnings
 from pathlib import Path
 from typing import Any, Callable
 
+from core.session import (
+    find_recent_sessions,
+    load_session_messages,
+    reconstruct_messages_from_steps,
+)
 from core.types import EvalResult, StepTrace, Task
+from core.usage import summarize_run_usage
+
+__all__ = [
+    "ActionFormatter",
+    "Tracer",
+    "find_recent_sessions",
+    "load_session_messages",
+    "reconstruct_messages_from_steps",
+    "register_action_formatter",
+    "unregister_action_formatter",
+]
 
 
 def _supports_color() -> bool:
@@ -26,9 +42,6 @@ def _bold(text: str) -> str:
 
 def _red(text: str) -> str:
     return f"\033[31m{text}\033[0m" if _supports_color() else text
-
-
-ActionFormatter = Callable[[Any], str]
 
 
 def _format_bash_action(args: Any) -> str:
@@ -66,13 +79,13 @@ def _format_edit_file_action(args: Any) -> str:
 
 
 ActionFormatter = Callable[[Any], str]
-_DEFAULT_ACTION_FORMATTERS: dict[str, ActionFormatter] = {
+# The global registry of tool summaries, mutable via register/unregister.
+_ACTION_FORMATTERS: dict[str, ActionFormatter] = {
     "bash": _format_bash_action,
     "read_file": _format_read_file_action,
     "write_file": _format_write_file_action,
     "edit_file": _format_edit_file_action,
 }
-_ACTION_FORMATTERS: dict[str, ActionFormatter] = dict(_DEFAULT_ACTION_FORMATTERS)
 
 
 def register_action_formatter(tool_name: str, formatter: ActionFormatter) -> None:
@@ -113,6 +126,59 @@ def _format_action_summary(
             text = f"● {name}({args})"
 
     return _bold(text) if color else text
+
+
+PREVIEW_MAX_CHARS = 90
+ERROR_MAX_CHARS = 70
+MAX_PREVIEW_LINES = 15
+
+
+def _preview(text: str, limit: int = PREVIEW_MAX_CHARS) -> str:
+    """Truncates text to a single line of at most ``limit`` characters."""
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    return f"{line[:limit]}..." if len(line) > limit else line
+
+
+def _error_excerpt(result: dict[str, Any] | None, limit: int = ERROR_MAX_CHARS) -> str:
+    """First line of a failed tool's output, bounded for display."""
+    lines = str((result or {}).get("output", "")).strip().splitlines()
+    return _preview(lines[0] if lines else "Failed", limit)
+
+
+def _format_call(
+    call: dict[str, Any] | None,
+    formatters: dict[str, ActionFormatter] | None = None,
+    color: bool = True,
+) -> str:
+    """Formats a tool call, tolerating a missing call (an unpaired result)."""
+    call = call or {}
+    return _format_action_summary(
+        call.get("name", ""), call.get("arguments", {}), color=color, formatters=formatters
+    )
+
+
+def _token_suffix(usage: dict[str, Any], bracketed: bool = False) -> str:
+    """Trailing token counts for a step header, empty when nothing was reported.
+
+    The console divider parenthesizes the cache figures while the Markdown report
+    brackets them, so ``bracketed`` selects the delimiter.
+    """
+    if not usage:
+        return ""
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    if prompt <= 0 and completion <= 0:
+        return ""
+    cached = int(usage.get("cached_tokens") or 0)
+    if cached <= 0:
+        return f" · {prompt:,} in, {completion:,} out"
+
+    rate = float(usage.get("cache_hit_rate_pct") or 0.0)
+    open_delim, close_delim = ("[", "]") if bracketed else ("(", ")")
+    return (
+        f" · {prompt:,} in {open_delim}{cached:,} cached - {rate:.1f}%{close_delim}, "
+        f"{completion:,} out"
+    )
 
 
 def _pair_calls_with_results(
@@ -221,80 +287,57 @@ class Tracer:
                 pass
 
     def record_step(self, step: StepTrace) -> None:
+        """Persists a completed step, then renders it when verbose output is on."""
         self.steps.append(step)
         self._append_jsonl(step)
 
         if not self.verbose:
             return
+        if self.compact:
+            self._render_compact_step(step)
+        else:
+            self._render_verbose_step(step)
 
-        model_text = step.model_response.get("content") or ""
+    def _render_compact_step(self, step: StepTrace) -> None:
+        """One clean line per action, so an interactive session stays readable."""
+        text = step.model_response.get("content") or ""
         tool_calls = step.model_response.get("tool_calls") or []
 
-        if self.compact:
-            # Modern compact UX: collapse intermediate step details into clean 1-liners
-            if tool_calls:
-                # 1. If model emitted intermediate reasoning/thought before calling tools, show 1 dimmed line
-                if model_text.strip():
-                    first_line = model_text.strip().splitlines()[0]
-                    preview = (first_line[:90] + "...") if len(first_line) > 90 else first_line
-                    print(_dim(f"● Thinking: {preview}"))
-
-                # 2. For each tool call, show a single clean action line
-                for tc, tr in _pair_calls_with_results(tool_calls, step.tool_results):
-                    name = tc.get("name", "") if tc else ""
-                    args = tc.get("arguments", {}) if tc else {}
-                    action_summary = _format_action_summary(
-                        name, args, color=True, formatters=self.formatters
-                    )
-                    exit_code = tr.get("exit_code", 0) if tr else 0
-                    if exit_code == 0:
-                        print(f"{action_summary} " + _dim(f"({step.duration_s:.1f}s)"))
-                    else:
-                        out_lines = tr.get("output", "").strip().splitlines() if tr else []
-                        err_snip = out_lines[0] if out_lines else "Failed"
-                        err_snip = (err_snip[:70] + "...") if len(err_snip) > 70 else err_snip
-                        print(f"{action_summary} " + _red(f"❌ (exit {exit_code}: {err_snip})"))
-
-                if step.compaction_applied:
-                    print(_dim("🧹 [Context compacted to conserve budget]"))
-            else:
-                # Final response (no tool calls): print full response text cleanly
-                if model_text.strip():
-                    print(f"\n{model_text.strip()}\n")
+        if not tool_calls:
+            if text.strip():
+                print(f"\n{text.strip()}\n")
             return
 
-        token_str = ""
-        if step.usage:
-            p_tok = int(step.usage.get("prompt_tokens") or 0)
-            c_tok = int(step.usage.get("completion_tokens") or 0)
-            cached_tok = int(step.usage.get("cached_tokens") or 0)
-            hit_pct = float(step.usage.get("cache_hit_rate_pct") or 0.0)
-            if p_tok > 0 or c_tok > 0:
-                if cached_tok > 0:
-                    token_str = f" · {p_tok:,} in ({cached_tok:,} cached - {hit_pct:.1f}%), {c_tok:,} out"
-                else:
-                    token_str = f" · {p_tok:,} in, {c_tok:,} out"
+        if text.strip():
+            print(_dim(f"● Thinking: {_preview(text)}"))
+        for call, result in _pair_calls_with_results(tool_calls, step.tool_results):
+            summary = _format_call(call, self.formatters)
+            exit_code = (result or {}).get("exit_code", 0)
+            if exit_code == 0:
+                print(f"{summary} " + _dim(f"({step.duration_s:.1f}s)"))
+            else:
+                print(f"{summary} " + _red(f"❌ (exit {exit_code}: {_preview(_error_excerpt(result))})"))
+        if step.compaction_applied:
+            print(_dim("🧹 [Context compacted to conserve budget]"))
 
-        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s{token_str} " + "─" * 25)
+    def _render_verbose_step(self, step: StepTrace) -> None:
+        """Full step detail: divider, token counts, model text, and raw tool output."""
+        text = step.model_response.get("content") or ""
+        tool_calls = step.model_response.get("tool_calls") or []
+
+        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s{_token_suffix(step.usage)} " + "─" * 25)
         print(f"\n{divider}")
 
-        if model_text:
-            print(f"{model_text.strip()}\n")
-
+        if text:
+            print(f"{text.strip()}\n")
         if step.compaction_applied:
             print(_dim("🧹 [Memory Compaction]: Pruned older observations to preserve context.\n"))
 
-        for tc, tr in _pair_calls_with_results(tool_calls, step.tool_results):
-            if tc:
-                name = tc.get("name", "")
-                args = tc.get("arguments", {})
-                action_text = _format_action_summary(
-                    name, args, color=True, formatters=self.formatters
-                )
-                print(action_text)
-
-            if tr:
-                self._print_tool_output(tr)
+        for call, result in _pair_calls_with_results(tool_calls, step.tool_results):
+            if call:
+                print(_format_call(call, self.formatters))
+            if result:
+                self._print_tool_output(result)
 
     def _print_tool_output(self, tr: dict[str, Any]) -> None:
         exit_code = tr.get("exit_code", 0)
@@ -306,36 +349,19 @@ class Tracer:
             return
 
         lines = output.splitlines()
-        max_preview_lines = 15
-        for line in lines[:max_preview_lines]:
+        for line in lines[:MAX_PREVIEW_LINES]:
             print(f"  {line}")
-        if len(lines) > max_preview_lines:
-            remaining = len(lines) - max_preview_lines
-            print(_dim(f"  ... ({remaining} more lines)"))
+        if len(lines) > MAX_PREVIEW_LINES:
+            print(_dim(f"  ... ({len(lines) - MAX_PREVIEW_LINES} more lines)"))
 
     def _compute_telemetry(self) -> dict[str, Any]:
-        p_tok = sum(
-            int(s.usage.get("prompt_tokens", 0) or 0)
-            for s in self.steps
-            if isinstance(s.usage, dict) and isinstance(s.usage.get("prompt_tokens"), (int, float))
-        )
-        c_tok = sum(
-            int(s.usage.get("completion_tokens", 0) or 0)
-            for s in self.steps
-            if isinstance(s.usage, dict)
-            and isinstance(s.usage.get("completion_tokens"), (int, float))
-        )
-        cached_tok = sum(
-            int(s.usage.get("cached_tokens", 0) or 0)
-            for s in self.steps
-            if isinstance(s.usage, dict) and isinstance(s.usage.get("cached_tokens"), (int, float))
-        )
-        hit_pct = round((cached_tok / p_tok * 100), 1) if p_tok > 0 else 0.0
+        """Derives run totals from step usage, reusing the shared token normalizer."""
+        usage = summarize_run_usage((s.usage for s in self.steps))
         return {
-            "total_prompt_tokens": p_tok,
-            "total_completion_tokens": c_tok,
-            "total_cached_tokens": cached_tok,
-            "cache_hit_rate_pct": hit_pct,
+            "total_prompt_tokens": usage.prompt_tokens,
+            "total_completion_tokens": usage.completion_tokens,
+            "total_cached_tokens": usage.cached_tokens,
+            "cache_hit_rate_pct": usage.cache_hit_rate_pct,
         }
 
     def finalize(
@@ -405,348 +431,87 @@ class Tracer:
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
     def _export_markdown(self, path: Path) -> None:
+        """Writes the human-readable trace report."""
+        sections = [
+            self._markdown_header(),
+            self._markdown_task(),
+            self._markdown_steps(),
+            self._markdown_patch(),
+        ]
+        path.write_text("\n".join(section for section in sections if section), encoding="utf-8")
+
+    def _markdown_header(self) -> str:
+        """Run summary: status, step count, tokens, and evaluation verdict."""
         lines = [
             f"# Run Trace: Task {self.task.id}",
             f"- **Status**: `{self.finish_reason}`",
             f"- **Total Steps**: {len(self.steps)}",
         ]
-        if self.telemetry:
-            p_tok = self.telemetry.get("total_prompt_tokens", 0)
-            c_tok = self.telemetry.get("total_completion_tokens", 0)
-            cached_tok = self.telemetry.get("total_cached_tokens", 0)
-            hit_pct = self.telemetry.get("cache_hit_rate_pct", 0.0)
-            if p_tok or c_tok:
-                cached_tag = (
-                    f" ({cached_tok:,} cached - {hit_pct:.1f}% hit rate)" if cached_tok else ""
-                )
-                lines.append(f"- **Tokens**: {p_tok:,} in{cached_tag}, {c_tok:,} out")
+        prompt = int(self.telemetry.get("total_prompt_tokens") or 0)
+        completion = int(self.telemetry.get("total_completion_tokens") or 0)
+        cached = int(self.telemetry.get("total_cached_tokens") or 0)
+        if self.telemetry and (prompt or completion):
+            cached_tag = (
+                f" ({cached:,} cached - {self.telemetry.get('cache_hit_rate_pct', 0.0)}% hit rate)"
+                if cached
+                else ""
+            )
+            lines.append(f"- **Tokens**: {prompt:,} in{cached_tag}, {completion:,} out")
 
         if self.eval_result:
-            status_tag = "PASSED" if self.eval_result.passed else "FAILED"
-            lines.extend(
-                [
-                    f"- **Evaluation**: `{status_tag}` (Score: {self.eval_result.score})",
-                    f"- **Feedback**: {self.eval_result.feedback}",
-                ]
-            )
+            verdict = "PASSED" if self.eval_result.passed else "FAILED"
+            lines.append(f"- **Evaluation**: `{verdict}` (Score: {self.eval_result.score})")
+            lines.append(f"- **Feedback**: {self.eval_result.feedback}")
+        return "\n".join(lines)
 
-        lines.extend(
-            [
-                "",
-                "## Task Instruction",
-                f"```\n{self.task.instruction}\n```",
-                "",
-                "## Execution Steps",
-            ]
+    def _markdown_task(self) -> str:
+        """The instruction the run was given."""
+        return f"## Task Instruction\n```\n{self.task.instruction}\n```\n"
+
+    def _markdown_steps(self) -> str:
+        """One section per step: header, compaction note, actions, and outputs."""
+        sections = ["## Execution Steps"]
+        sections += [self._markdown_step(step) for step in self.steps]
+        return "\n".join(section for section in sections if section)
+
+    def _markdown_step(self, step: StepTrace) -> str:
+        header = (
+            f"### Step {step.step_index} "
+            f"({step.duration_s:.2f}s{_token_suffix(step.usage, bracketed=True)})"
         )
+        parts = [header]
+        if step.compaction_applied:
+            parts.append("> ℹ️ *Context Compaction was applied during this step.*")
+        if content := step.model_response.get("content"):
+            parts.append(content.strip())
 
-        for s in self.steps:
-            step_header = f"### Step {s.step_index} ({s.duration_s:.2f}s"
-            if s.usage:
-                p = s.usage.get("prompt_tokens", 0)
-                c = s.usage.get("completion_tokens", 0)
-                ca = s.usage.get("cached_tokens", 0)
-                h = s.usage.get("cache_hit_rate_pct", 0.0)
-                if p or c:
-                    ca_str = f" [{ca:,} cached - {h:.1f}%]" if ca else ""
-                    step_header += f" · {p:,} in{ca_str}, {c:,} out"
-            step_header += ")"
-            lines.extend(
-                [
-                    step_header,
-                    "",
-                ]
-            )
-            if s.compaction_applied:
-                lines.append("> ℹ️ *Context Compaction was applied during this step.*")
+        tool_calls = step.model_response.get("tool_calls") or []
+        for call, result in _pair_calls_with_results(tool_calls, step.tool_results):
+            if call:
+                parts.append(self._markdown_action(call))
+            if result:
+                parts.append(self._markdown_output(result))
+        return "\n\n".join(parts)
 
-            content = s.model_response.get("content")
-            if content:
-                lines.extend([content.strip(), ""])
+    def _markdown_action(self, call: dict[str, Any]) -> str:
+        """Renders a tool call, giving bash its own fenced block and others a summary line."""
+        name = call.get("name", "")
+        args = call.get("arguments", {})
+        if name == "bash":
+            command = args.get("command", "").strip() if isinstance(args, dict) else str(args)
+            return f"**Command** (`bash`):\n```bash\n{command}\n```"
+        if name in _ACTION_FORMATTERS:
+            return f"**Action** (`{name}`): `{_format_action_summary(name, args, color=False)}`"
+        return f"**Action**: `{name}`\n```json\n{json.dumps(args, indent=2, default=str)}\n```"
 
-            tool_calls = s.model_response.get("tool_calls") or []
-            for tc, tr in _pair_calls_with_results(tool_calls, s.tool_results):
-                if tc:
-                    name = tc.get("name", "")
-                    args = tc.get("arguments", {})
-                    if name == "bash":
-                        cmd = (
-                            args.get("command", "").strip() if isinstance(args, dict) else str(args)
-                        )
-                        lines.extend(["**Command** (`bash`):", f"```bash\n{cmd}\n```"])
-                    elif name in _ACTION_FORMATTERS:
-                        action_summary = _format_action_summary(name, args, color=False)
-                        lines.append(f"**Action** (`{name}`): `{action_summary}`")
-                    else:
-                        lines.extend(
-                            [
-                                f"**Action**: `{name}`",
-                                f"```json\n{json.dumps(args, indent=2, default=str)}\n```",
-                            ]
-                        )
+    def _markdown_output(self, result: dict[str, Any]) -> str:
+        truncated = " (Truncated)" if result.get("was_truncated") else ""
+        exit_code = result.get("exit_code", 0)
+        output = str(result.get("output", "") or "").strip()
+        return f"**Output** (exit={exit_code}){truncated}:\n```\n{output}\n```"
 
-                if tr:
-                    trunc = " (Truncated)" if tr.get("was_truncated") else ""
-                    exit_code = tr.get("exit_code", 0)
-                    out_str = str(tr.get("output", "") or "").strip()
-                    lines.extend(
-                        [
-                            f"**Output** (exit={exit_code}){trunc}:",
-                            f"```\n{out_str}\n```",
-                            "",
-                        ]
-                    )
-
-        if self.patch_diff:
-            lines.extend(
-                [
-                    "## Git Patch Diff",
-                    f"```diff\n{self.patch_diff}\n```",
-                    "",
-                ]
-            )
-
-        path.write_text("\n".join(lines), encoding="utf-8")
-
-
-def _select_reconstruction_step(steps: list[dict[str, Any]]) -> dict[str, Any]:
-    """Returns the most recent step that actually recorded conversation state.
-
-    When a step cannot be serialized, ``_append_jsonl`` writes a placeholder
-    carrying ``serialization_error`` and an empty ``prompt_messages``. Because
-    reconstruction is driven by a single step's prompt snapshot, picking such a
-    placeholder would silently discard the entire conversation on resume. We
-    therefore walk backwards to the last step that recorded a real prompt.
-    """
-    for step in reversed(steps):
-        if step.get("serialization_error"):
-            continue
-        if step.get("prompt_messages"):
-            return step
-    return steps[-1]
-
-
-def reconstruct_messages_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reconstructs full conversation message history from a list of step trace dictionaries."""
-    if not steps:
-        return []
-    last_step = _select_reconstruction_step(steps)
-    msgs: list[dict[str, Any]] = [dict(m) for m in (last_step.get("prompt_messages") or [])]
-    resp = last_step.get("model_response") or {}
-    content = resp.get("content") or ""
-    tool_calls = resp.get("tool_calls") or []
-    if content or tool_calls:
-        assistant_msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": content,
-        }
-        if tool_calls:
-            formatted_calls: list[dict[str, Any]] = []
-            for tc in tool_calls:
-                if isinstance(tc, dict):
-                    cid = tc.get("id", "")
-                    fn = tc.get("function") or {}
-                    name = fn.get("name") or tc.get("name", "")
-                    args = fn.get("arguments") or tc.get("arguments") or {}
-                    if isinstance(args, str):
-                        raw_args = args
-                    else:
-                        raw_args = json.dumps(args, default=str) if isinstance(args, dict) else str(args)
-                    call_dict = {
-                        "id": cid,
-                        "type": "function",
-                        "function": {"name": name, "arguments": raw_args},
-                    }
-                    if tc.get("extra_content"):
-                        call_dict["extra_content"] = tc.get("extra_content")
-                    formatted_calls.append(call_dict)
-            if formatted_calls:
-                assistant_msg["tool_calls"] = formatted_calls
-        msgs.append(assistant_msg)
-
-    for tr in last_step.get("tool_results") or []:
-        if isinstance(tr, dict) and "call_id" in tr:
-            msgs.append(
-                {
-                    "role": "tool",
-                    "content": tr.get("output", ""),
-                    "tool_call_id": tr.get("call_id"),
-                    "raw_log_path": tr.get("raw_log_path"),
-                }
-            )
-    return msgs
-
-
-def load_session_messages(run_dir: Path | str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Loads reconstructed messages and metadata from a session directory."""
-    dir_path = Path(run_dir)
-    trace_file = dir_path / "trace.json"
-    jsonl_file = dir_path / "trajectory.jsonl"
-    metadata: dict[str, Any] = {
-        "run_id": dir_path.name,
-        "run_dir": str(dir_path),
-        "total_steps": 0,
-        "workspace": None,
-        "finish_reason": "unknown",
-    }
-
-    # 1. Try trace.json
-    if trace_file.is_file():
-        try:
-            data = json.loads(trace_file.read_text(encoding="utf-8"))
-            metadata["total_steps"] = int(data.get("total_steps") or 0)
-            metadata["workspace"] = data.get("workspace")
-            metadata["finish_reason"] = data.get("finish_reason", "unknown")
-            metadata["task"] = data.get("task", {})
-            if "messages" in data and isinstance(data["messages"], list) and data["messages"]:
-                return data["messages"], metadata
-            steps = data.get("steps") or []
-            if steps:
-                msgs = reconstruct_messages_from_steps(steps)
-                return msgs, metadata
-        except Exception:
-            pass
-
-    # 2. Try trajectory.jsonl (if trace.json was absent or corrupted after sudden crash)
-    if jsonl_file.is_file():
-        try:
-            steps = []
-            for line in jsonl_file.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    steps.append(json.loads(line))
-            if steps:
-                metadata["total_steps"] = len(steps)
-                msgs = reconstruct_messages_from_steps(steps)
-                return msgs, metadata
-        except Exception:
-            pass
-
-    return [], metadata
-
-
-def find_recent_sessions(
-    runs_dir: Path | str,
-    workspace: Path | str | None = None,
-    limit: int = 10,
-) -> list[dict[str, Any]]:
-    """Discovers previous sessions from runs_dir, sorted by recency and workspace affinity."""
-    base = Path(runs_dir)
-    if not base.is_dir():
-        return []
-
-    target_ws = str(Path(workspace).resolve()) if workspace else None
-
-    # Step 1: Stat and sort candidates by mtime descending first
-    candidates: list[tuple[float, Path]] = []
-    for entry in base.iterdir():
-        if not entry.is_dir():
-            continue
-        try:
-            mtime = entry.stat().st_mtime
-        except Exception:
-            mtime = 0.0
-        candidates.append((mtime, entry))
-
-    candidates.sort(key=lambda c: c[0], reverse=True)
-
-    matching_sessions: list[dict[str, Any]] = []
-    other_sessions: list[dict[str, Any]] = []
-
-    def _describe(entry: Path, mtime: float) -> dict[str, Any] | None:
-        """Reads a session directory into a summary record, or None if it is not a session."""
-        trace_json = entry / "trace.json"
-        traj_jsonl = entry / "trajectory.jsonl"
-        if not (trace_json.is_file() or traj_jsonl.is_file()):
-            return None
-
-        total_steps = 0
-        preview = ""
-        sess_ws = None
-        finish_reason = ""
-        task_id = entry.name
-
-        if trace_json.is_file():
-            try:
-                data = json.loads(trace_json.read_text(encoding="utf-8"))
-                total_steps = int(data.get("total_steps") or 0)
-                sess_ws = data.get("workspace")
-                finish_reason = data.get("finish_reason", "")
-                task_info = data.get("task") or {}
-                task_id = task_info.get("id") or entry.name
-                preview = (task_info.get("instruction") or "").strip()
-                if not preview and data.get("messages"):
-                    for m in data["messages"]:
-                        if m.get("role") == "user" and m.get("content"):
-                            preview = m["content"].strip()
-                            break
-                elif not preview and data.get("steps"):
-                    last_step = data["steps"][-1]
-                    for m in (last_step.get("prompt_messages") or []):
-                        if m.get("role") == "user" and m.get("content"):
-                            preview = m["content"].strip()
-                            break
-            except Exception:
-                pass
-
-        if not preview and traj_jsonl.is_file():
-            try:
-                lines = [
-                    line
-                    for line in traj_jsonl.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-                total_steps = max(total_steps, len(lines))
-                if lines:
-                    last_step = json.loads(lines[-1])
-                    for m in (last_step.get("prompt_messages") or []):
-                        if m.get("role") == "user" and m.get("content"):
-                            preview = m["content"].strip()
-                            break
-            except Exception:
-                pass
-
-        if len(preview) > 60:
-            preview = preview[:57] + "..."
-
-        is_match = bool(target_ws is not None and sess_ws is not None and target_ws == sess_ws)
-
-        return {
-            "run_id": entry.name,
-            "run_dir": str(entry),
-            "task_id": task_id,
-            "total_steps": total_steps,
-            "preview": preview or "(no user prompt)",
-            "workspace": sess_ws,
-            "mtime": mtime,
-            "finish_reason": finish_reason,
-            "matches_workspace": is_match,
-        }
-
-    # Pass 1 scans only the newest candidates, which keeps the common case (this
-    # repo has recent sessions) cheap. Pass 2 runs only when that cheap scan found
-    # no match, so an older session for the same repo stays reachable instead of
-    # being silently hidden by the scan ceiling.
-    pass1_ceiling = max(limit * 5, 50) if target_ws else limit
-
-    for ceiling, matches_only in ((pass1_ceiling, False), (len(candidates), True)):
-        for index, (mtime, entry) in enumerate(candidates):
-            if index >= ceiling:
-                break
-            if matches_only and index < pass1_ceiling:
-                continue
-            record = _describe(entry, mtime)
-            if record is None:
-                continue
-            if record["matches_workspace"]:
-                if len(matching_sessions) >= limit:
-                    break
-                matching_sessions.append(record)
-            elif not matches_only:
-                other_sessions.append(record)
-        if matching_sessions or not target_ws:
-            break
-
-    # Sort: matching workspace first, then newest mtime
-    combined = matching_sessions + other_sessions
-    combined.sort(key=lambda s: (1 if s["matches_workspace"] else 0, s["mtime"]), reverse=True)
-    return combined[:limit]
+    def _markdown_patch(self) -> str:
+        """The unified diff of everything the run changed, when there is one."""
+        if not self.patch_diff:
+            return ""
+        return f"## Git Patch Diff\n```diff\n{self.patch_diff}\n```\n"
