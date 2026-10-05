@@ -6,7 +6,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 💡 The Core Mental Model: Harness vs. Loop
+## The Core Mental Model: Harness vs. Loop
 
 | Component | Responsibility | Location in `microharness` |
 | :--- | :--- | :--- |
@@ -15,7 +15,7 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 ---
 
-## 🧭 Configuration, Steering, Skills, Commands & Tool Plugins
+## Configuration, Steering, Skills, Commands & Tool Plugins
 
 `microharness` supports cascading configuration at two distinct scopes:
 1. **Global User Baseline** (`~/.microharness/` or `--global-dir`)
@@ -143,7 +143,7 @@ tools = [ToolOne(), ToolTwo()]
 
 ---
 
-## 🛠️ Working on Existing Projects
+## Working on Existing Projects
 
 By default, the agent runs directly in your **current working directory** (like Claude Code or Aider). It sees all your existing files, respects git, and resumes right where you left off:
 
@@ -160,7 +160,7 @@ If you ever want an isolated disposable scratchpad (e.g. for testing without tou
 uv run microharness --sandbox "Experiment with writing a new scraper"
 ```
 
-### 🐳 Docker Sandboxing (via OrbStack or Docker Desktop)
+### Docker Sandboxing (via OrbStack or Docker Desktop)
 For 100% containerized process, operating system, and filesystem isolation (e.g. running untrusted code, heavy test suites, or SWE benchmarks), pass `--docker`:
 ```bash
 # Run educational demo inside an isolated Linux Docker container
@@ -183,13 +183,13 @@ uv run microharness "Run pytest and fix any failures" --batch
 
 ---
 
-## 💬 Continuous Interactive Chat & Meta-Commands
+## Continuous Interactive Chat & Meta-Commands
 
 When you chat with the agent, the harness maintains persistent memory and renders a clean **context budget status line** before every turn:
 
 ```text
-─── 📊 Context: 1.4k / 8k (17.8%) ───
-👤 You: 
+─── Context: 1.4k / 8k (17.8%) ───
+You: 
 ```
 
 ### Slash Commands (No Model Call)
@@ -209,13 +209,13 @@ You can inspect or control the harness runtime directly:
 The two cancel keys are **not** equivalent, and the status bar says so while a turn runs:
 
 * **`Ctrl+C`** aborts the active step immediately, including a request that is already in flight. The incomplete tool turn is dropped and the session stays usable.
-* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a rate-limit backoff). The moment it is seen the UI prints `⚠️ Cancelling… aborting the pending model request` and abandons the wait.
+* **`Esc`** is a cooperative cancel. It takes effect at the next step boundary and while the model waits between retries (for example during a rate-limit backoff). The moment it is seen the UI prints `Cancelling… aborting the pending model request` and abandons the wait.
 
 `Esc` cannot abort a request that is currently waiting on the provider, because the HTTP timeout covers time-to-first-byte and shortening it would break slow models. Use `Ctrl+C` for that. See SPEC.md §5.2 for the planned work to unify the two.
 
 ---
 
-## ⚡ Quickstart with `uv`
+## Quickstart with `uv`
 
 ### 1. Install & Sync Environment
 ```bash
@@ -257,7 +257,7 @@ uv run microharness --demo greeting
 
 ---
 
-## 🏆 Mini-SWE Benchmark Suite (Sanity & Smoke Testing)
+## Mini-SWE Benchmark Suite (Sanity & Smoke Testing)
 
 `microharness` includes **Mini-SWE**, a fast, lightweight, pure-Python benchmark designed primarily for **rapid sanity testing, local iteration, and CI smoke testing**:
 
@@ -274,7 +274,7 @@ uv run microharness --demo greeting
 
 ---
 
-## 🌐 DeepSWE-mini Benchmark Suite (Harbor Format & Docker)
+## DeepSWE-mini Benchmark Suite (Harbor Format & Docker)
 
 `microharness` natively supports **DeepSWE-mini** (curated from [Datacurve-AI DeepSWE](https://github.com/datacurve-ai/deep-swe) and [`LocalLLaMA/deepswe-mini`](https://huggingface.co/datasets/LocalLLaMA/deepswe-mini)):
 
@@ -299,7 +299,7 @@ uvx --from datacurve-pier pier run -p datasets/deep-swe/tasks/aiomonitor-task-sn
 
 ---
 
-## 🔑 True Pluggability (Zero Code Modifications)
+## True Pluggability (Zero Code Modifications)
 
 Because components follow minimal Python `Protocols`, you can plug in any Model, Tool, or Evaluator from the outside without touching a single line of harness code:
 
@@ -318,7 +318,7 @@ harness.run_interactive("Help me refactor the database layer")
 
 ---
 
-## 🔑 Key Educational Paradigms Demonstrated
+## Key Educational Paradigms Demonstrated
 
 1. **In-Place Project Operation vs. Sandboxing (`core/environment.py`)**
    - By default, operates directly on existing project files with zero root directory pollution.
@@ -360,7 +360,7 @@ harness.run_interactive("Help me refactor the database layer")
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 microharness/
