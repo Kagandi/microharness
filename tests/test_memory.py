@@ -1,6 +1,6 @@
 import unittest
 
-from core.memory import Memory
+from core.memory import Memory, format_compact_num
 from core.types import Message, ToolCall, ToolResult
 
 
@@ -449,6 +449,35 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(msgs_prepended[0].role, "system")
         self.assertEqual(msgs_prepended[0].content, "PREPENDED_SYSTEM")
         self.assertEqual(msgs_prepended[1].content, "Direct prompt")
+
+
+class TestFormatCompactNum(unittest.TestCase):
+    def test_small_numbers(self):
+        """Invariant: numbers below 1000 format as exact integers."""
+        self.assertEqual(format_compact_num(0), "0")
+        self.assertEqual(format_compact_num(1), "1")
+        self.assertEqual(format_compact_num(500), "500")
+        self.assertEqual(format_compact_num(999), "999")
+
+    def test_thousands_k_suffix(self):
+        """Invariant: numbers >= 1000 use 'k' suffix with single decimal when non-round."""
+        self.assertEqual(format_compact_num(1000), "1k")
+        self.assertEqual(format_compact_num(1420), "1.4k")
+        self.assertEqual(format_compact_num(8000), "8k")
+        self.assertEqual(format_compact_num(8500), "8.5k")
+        self.assertEqual(format_compact_num(128000), "128k")
+        self.assertEqual(format_compact_num(999900), "999.9k")
+
+    def test_millions_m_suffix(self):
+        """Invariant: numbers >= 1,000,000 use 'M' suffix."""
+        self.assertEqual(format_compact_num(1000000), "1M")
+        self.assertEqual(format_compact_num(1500000), "1.5M")
+        self.assertEqual(format_compact_num(2000000), "2M")
+
+    def test_edge_cases_and_non_numbers(self):
+        """Invariant: None or invalid values degrade safely without exceptions."""
+        self.assertEqual(format_compact_num(None), "0")
+        self.assertEqual(format_compact_num("non-numeric"), "non-numeric")
 
 
 if __name__ == "__main__":

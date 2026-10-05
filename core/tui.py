@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.memory import format_compact_num
+
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
     "\x1b[27;2;13~",
@@ -938,12 +940,11 @@ class CursesTUI:
         if self.state.reasoning:
             parts.append(f"reasoning: {self.state.reasoning}")
 
-        parts.append(
-            f"context: {self.state.status_tokens:,} / {self.state.max_tokens:,} tokens ({self.state.usage_pct:.1f}%)"
-        )
+        used_tok = format_compact_num(self.state.status_tokens)
+        max_tok = format_compact_num(self.state.max_tokens)
+        parts.append(f"context: {used_tok} / {max_tok} ({self.state.usage_pct:.1f}%)")
         if self.state.cache_hit_pct > 0:
             parts.append(f"cache hit: {self.state.cache_hit_pct:.1f}%")
-        parts.append(f"msgs: {self.state.messages_count}")
 
         if self.state.scroll_offset > 0:
             parts.append(f"[scrolled +{self.state.scroll_offset}]")

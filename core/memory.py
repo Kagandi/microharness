@@ -226,3 +226,32 @@ class Memory:
 
     def get_messages(self) -> list[Message]:
         return list(self.messages)
+
+
+def format_compact_num(n: int | float | None) -> str:
+    """Formats an integer or float count concisely using 'k' and 'M' suffixes.
+
+    Examples:
+        0 -> '0'
+        500 -> '500'
+        1000 -> '1k'
+        1420 -> '1.4k'
+        8000 -> '8k'
+        128000 -> '128k'
+        1000000 -> '1M'
+        1500000 -> '1.5M'
+    """
+    if n is None:
+        return "0"
+    try:
+        val = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if abs(val) >= 999_950:
+        scaled = round(val / 1_000_000, 1)
+        return f"{scaled:g}M"
+    if abs(val) >= 999.5:
+        scaled = round(val / 1_000, 1)
+        return f"{scaled:g}k"
+    return str(int(val)) if isinstance(n, int) or val.is_integer() else f"{val:.1f}"
+

@@ -16,7 +16,7 @@ from core.discovery import (
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.loop import AgentLoop
-from core.memory import Memory
+from core.memory import Memory, format_compact_num
 from core.model import (
     CacheAwareModel,
     CancellableModel,
@@ -1291,6 +1291,13 @@ class Harness:
         memory.add_user(effective_prompt)
         return "turn"
 
+    def _print_context_footer(self, memory: Memory) -> None:
+        """Prints the compact context usage footer shown before each prompt."""
+        stats = memory.stats()
+        used = format_compact_num(stats["estimated_tokens"])
+        total = format_compact_num(stats["max_estimated_tokens"])
+        print(_dim(f"─── 📊 Context: {used} / {total} ({stats['usage_pct']}%) ───"))
+
     def run_interactive(
         self,
         initial_instruction: str | None = None,
@@ -1379,13 +1386,7 @@ class Harness:
                     has_pending_turn = False
 
                 # Render minimal context usage footer in pure tokens
-                stats = memory.stats()
-                print(
-                    _dim(
-                        f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} tokens "
-                        f"({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
-                    )
-                )
+                self._print_context_footer(memory)
 
                 try:
                     user_input = input("👤 You: ").strip()

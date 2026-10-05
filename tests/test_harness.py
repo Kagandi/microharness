@@ -2446,6 +2446,25 @@ class ProjectWeather:
             # Invariant: step_idx strictly pinned to total_steps + 1 (3 + 1 = 4)
             self.assertEqual(step_holder[0], 4)
 
+    def test_print_context_footer_compact_format(self):
+        """Invariant: Context footer uses compact k/M formatting without message count."""
+        from unittest.mock import patch
+
+        from core.memory import Memory
+
+        harness = Harness(model=MockModel([("Done", [])]), verbose=False)
+        memory = Memory(system_prompt="sys", user_prompt="user", max_context_chars=32000)
+        # 1420 tokens in an 8000 token window (32000 chars // 4 = 8000 tokens)
+        memory.total_chars = lambda: 1420 * 4
+
+        with patch("builtins.print") as mock_print:
+            harness._print_context_footer(memory)
+            mock_print.assert_called_once()
+            output = mock_print.call_args[0][0]
+            self.assertIn("Context: 1.4k / 8k (17.8%)", output)
+            self.assertNotIn("Messages:", output)
+            self.assertNotIn("chars", output)
+
 
 if __name__ == "__main__":
     unittest.main()

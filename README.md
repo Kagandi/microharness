@@ -188,7 +188,7 @@ uv run microharness "Run pytest and fix any failures" --batch
 When you chat with the agent, the harness maintains persistent memory and renders a clean **context budget status line** before every turn:
 
 ```text
-─── 📊 Context: 1,420 / 8,000 chars (17.8%) | Messages: 6 ───
+─── 📊 Context: 1.4k / 8k (17.8%) ───
 👤 You: 
 ```
 
