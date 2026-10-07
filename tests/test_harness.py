@@ -748,7 +748,7 @@ class TestHarnessIntegration(unittest.TestCase):
                 {
                     "endpoint": "https://api.openai.com/v1",
                     "model": "gpt-4o",
-                    "max_context_chars": 24000,
+                    "max_context_tokens": 24000,
                     "trigger_ratio": 0.85,
                     "sandbox": True,
                 }
@@ -758,7 +758,7 @@ class TestHarnessIntegration(unittest.TestCase):
         loaded = load_global_config(global_dir)
         self.assertEqual(loaded["model"], "gpt-4o")
         self.assertEqual(loaded["endpoint"], "https://api.openai.com/v1")
-        self.assertEqual(loaded["max_context_chars"], 24000)
+        self.assertEqual(loaded["max_context_tokens"], 24000)
         self.assertEqual(loaded["trigger_ratio"], 0.85)
         self.assertTrue(loaded["sandbox"])
 
@@ -772,9 +772,9 @@ class TestHarnessIntegration(unittest.TestCase):
         cfg_path.write_text(
             json.dumps(
                 {
-                    "max_context_chars": 16000,
+                    "max_context_tokens": 16000,
                     "trigger_ratio": 0.75,
-                    "max_tool_chars": 1500,
+                    "max_tool_tokens": 1500,
                     "sandbox": True,
                 }
             ),
@@ -788,22 +788,22 @@ class TestHarnessIntegration(unittest.TestCase):
             runs_dir=self.runs_dir,
             verbose=False,
         )
-        self.assertEqual(h1.max_context_chars, 16000)
+        self.assertEqual(h1.max_context_tokens, 16000)
         self.assertEqual(h1.trigger_ratio, 0.75)
-        self.assertEqual(h1.max_tool_chars, 1500)
+        self.assertEqual(h1.max_tool_tokens, 1500)
         self.assertTrue(h1.sandbox)
 
         # Harness with explicit overrides taking precedence over config.json
         h2 = Harness(
             model=MockModel([]),
             global_dir=global_dir,
-            max_context_chars=32000,
+            max_context_tokens=32000,
             trigger_ratio=0.90,
             sandbox=False,
             runs_dir=self.runs_dir,
             verbose=False,
         )
-        self.assertEqual(h2.max_context_chars, 32000)
+        self.assertEqual(h2.max_context_tokens, 32000)
         self.assertEqual(h2.trigger_ratio, 0.90)
         self.assertFalse(h2.sandbox)
 
@@ -826,7 +826,7 @@ class TestHarnessIntegration(unittest.TestCase):
         memory = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_chars=120,
+            max_context_tokens=30,
             keep_recent_turns=1,
         )
         script = [
@@ -902,11 +902,11 @@ class TestHarnessIntegration(unittest.TestCase):
 
         # 1. Project config (.microharness/config.json)
         (dot_mh / "config.json").write_text(
-            json.dumps({"max_context_chars": 12345, "trigger_ratio": 0.75, "sandbox": False}),
+            json.dumps({"max_context_tokens": 12345, "trigger_ratio": 0.75, "sandbox": False}),
             encoding="utf-8",
         )
         loaded_cfg = load_project_config(project_dir)
-        self.assertEqual(loaded_cfg["max_context_chars"], 12345)
+        self.assertEqual(loaded_cfg["max_context_tokens"], 12345)
         self.assertEqual(loaded_cfg["trigger_ratio"], 0.75)
 
         # 2. Project instructions (.microharness/AGENTS.md)
@@ -952,7 +952,7 @@ class TestHarnessIntegration(unittest.TestCase):
         )
 
         # Verify harness merged config
-        self.assertEqual(harness.max_context_chars, 12345)
+        self.assertEqual(harness.max_context_tokens, 12345)
         self.assertEqual(harness.trigger_ratio, 0.75)
 
         # Run task
@@ -2507,8 +2507,8 @@ class ProjectWeather:
         from core.memory import Memory
 
         harness = Harness(model=MockModel([("Done", [])]), verbose=False)
-        memory = Memory(system_prompt="sys", user_prompt="user", max_context_chars=32000)
-        # 1420 tokens in an 8000 token window (32000 chars // 4 = 8000 tokens)
+        memory = Memory(system_prompt="sys", user_prompt="user", max_context_tokens=8000)
+        # 1420 tokens in an 8000 token window (8000 tokens)
         memory.total_chars = lambda: 1420 * 4
 
         with patch("builtins.print") as mock_print:

@@ -37,7 +37,8 @@ Repository = "https://github.com/dimakagan/mini-harness"
 Issues = "https://github.com/dimakagan/mini-harness/issues"
 
 [project.scripts]
-microharness = "core.cli:main"
+microharness = "main:main"
+mini-harness = "main:main"
 
 [dependency-groups]
 dev = [

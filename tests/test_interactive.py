@@ -205,7 +205,7 @@ class TestRouterDispatch(RouterTestCase):
         new_model = MagicMock()
         new_model.provider = "openrouter"
         self.harness.switch_model.return_value = (True, "Switched model to claude", new_model)
-        self.harness.active_model_name.return_value = "claude-3.7-sonnet"
+        self.harness.active_model_name.return_value = "claude-5.5-sonnet"
 
         mock_state = MagicMock()
         self.ui.state = mock_state
@@ -213,7 +213,7 @@ class TestRouterDispatch(RouterTestCase):
         self.router.ctx.runner = mock_runner
 
         self.router.dispatch("/model smart")
-        self.assertEqual(mock_state.model_name, "claude-3.7-sonnet")
+        self.assertEqual(mock_state.model_name, "claude-5.5-sonnet")
         self.assertEqual(mock_state.provider_name, "openrouter")
         self.assertEqual(mock_runner.model, new_model)
 

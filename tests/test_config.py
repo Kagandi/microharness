@@ -68,15 +68,15 @@ class TestConfigLayers(unittest.TestCase):
             (global_dir).mkdir()
             (workspace / ".microharness").mkdir(parents=True)
             (global_dir / "config.json").write_text(
-                json.dumps({"sandbox": True, "max_context_chars": 100}), encoding="utf-8"
+                json.dumps({"sandbox": True, "max_context_tokens": 100}), encoding="utf-8"
             )
             (workspace / ".microharness" / "config.json").write_text(
-                json.dumps({"max_context_chars": 200}), encoding="utf-8"
+                json.dumps({"max_context_tokens": 200}), encoding="utf-8"
             )
 
             layers = ConfigLayers.load(global_dir, workspace)
             self.assertEqual(layers.global_config["sandbox"], True)
-            self.assertEqual(layers.merged["max_context_chars"], 200)
+            self.assertEqual(layers.merged["max_context_tokens"], 200)
             self.assertEqual(layers.merged["sandbox"], True)
 
     def test_load_helpers_return_empty_for_absent_files(self):
@@ -91,9 +91,9 @@ class TestConfigLayers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
             (path / "config.json").write_text(
-                '{\n  // tuned for laptops\n  "max_tool_chars": 500\n}', encoding="utf-8"
+                '{\n  // tuned for laptops\n  "max_tool_tokens": 500\n}', encoding="utf-8"
             )
-            self.assertEqual(load_global_config(path), {"max_tool_chars": 500})
+            self.assertEqual(load_global_config(path), {"max_tool_tokens": 500})
 
 
 class TestHarnessConfigCascade(unittest.TestCase):
@@ -121,8 +121,8 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.auto_discover_tools, True)
         self.assertEqual(cfg.disable_default_tools, False)
         self.assertEqual(cfg.runs_dir, None)
-        self.assertEqual(cfg.max_tool_chars, 32000)
-        self.assertEqual(cfg.max_context_chars, 256000)
+        self.assertEqual(cfg.max_tool_tokens, 8000)
+        self.assertEqual(cfg.max_context_tokens, 64000)
         self.assertEqual(cfg.trigger_ratio, 0.80)
         self.assertEqual(cfg.cache_ttl, "5m")
         self.assertEqual(cfg.reasoning_effort, None)
@@ -132,20 +132,20 @@ class TestHarnessConfigCascade(unittest.TestCase):
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
         cfg = self._resolve(
-            HarnessConfig(max_context_chars=999),
-            global_cfg={"max_context_chars": 111},
-            project_cfg={"max_context_chars": 222},
+            HarnessConfig(max_context_tokens=999),
+            global_cfg={"max_context_tokens": 111},
+            project_cfg={"max_context_tokens": 222},
         )
-        self.assertEqual(cfg.max_context_chars, 999)
+        self.assertEqual(cfg.max_context_tokens, 999)
 
     def test_project_beats_global(self):
         """Invariant: project config shadows the global default."""
         cfg = self._resolve(
             HarnessConfig(),
-            global_cfg={"max_context_chars": 111},
-            project_cfg={"max_context_chars": 222},
+            global_cfg={"max_context_tokens": 111},
+            project_cfg={"max_context_tokens": 222},
         )
-        self.assertEqual(cfg.max_context_chars, 222)
+        self.assertEqual(cfg.max_context_tokens, 222)
 
     def test_falsy_runs_dir_falls_back_to_default(self):
         """Invariant: an empty explicit value means 'unspecified' and yields the built-in default.
@@ -183,11 +183,11 @@ class TestHarnessConfigCascade(unittest.TestCase):
             self._resolve(HarnessConfig(cache_ttl="17m"))
         self.assertIn("Unsupported cache TTL", str(ctx.exception))
 
-    def test_token_configs_convert_to_chars(self):
-        """Invariant: token limits are converted to character limits at 4 chars per token."""
-        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_tokens": 1000, "max_context_tokens": 10000})
-        self.assertEqual(cfg.max_tool_chars, 4000)
-        self.assertEqual(cfg.max_context_chars, 40000)
+    def test_legacy_char_configs_convert_to_tokens(self):
+        """Invariant: legacy character limits in config files convert to tokens at 4 chars per token."""
+        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000, "max_context_chars": 40000})
+        self.assertEqual(cfg.max_tool_tokens, 1000)
+        self.assertEqual(cfg.max_context_tokens, 10000)
 
 
 class TestProjectToolTrust(unittest.TestCase):

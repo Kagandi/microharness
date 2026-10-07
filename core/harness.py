@@ -137,8 +137,6 @@ class Harness:
         trust_project_tools: bool | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
-        max_tool_chars: int | None = None,
-        max_context_chars: int | None = None,
         max_tool_tokens: int | None = None,
         max_context_tokens: int | None = None,
         trigger_ratio: float | None = None,
@@ -166,8 +164,6 @@ class Harness:
             auto_discover_tools=auto_discover_tools,
             disable_default_tools=disable_default_tools,
             runs_dir=runs_dir,
-            max_tool_chars=max_tool_chars,
-            max_context_chars=max_context_chars,
             max_tool_tokens=max_tool_tokens,
             max_context_tokens=max_context_tokens,
             trigger_ratio=trigger_ratio,
@@ -183,8 +179,8 @@ class Harness:
         self.auto_discover_tools = cfg.auto_discover_tools
         self.disable_default_tools = cfg.disable_default_tools
         self.runs_dir = cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
-        self.max_tool_chars = cfg.max_tool_chars
-        self.max_context_chars = cfg.max_context_chars
+        self.max_tool_tokens = cfg.max_tool_tokens
+        self.max_context_tokens = cfg.max_context_tokens
         self.trigger_ratio = cfg.trigger_ratio
         self.cache_ttl = cfg.cache_ttl
         self.reasoning_effort = cfg.reasoning_effort
@@ -402,7 +398,7 @@ class Harness:
         return env
 
     def _init_tools(self, env: Environment) -> ToolRegistry:
-        registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
+        registry = ToolRegistry(env=env, max_tool_tokens=self.max_tool_tokens)
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
@@ -504,7 +500,7 @@ class Harness:
         memory = Memory(
             system_prompt=active_system_prompt,
             user_prompt=effective_instruction,
-            max_context_chars=self.max_context_chars,
+            max_context_tokens=self.max_context_tokens,
             trigger_ratio=self.trigger_ratio,
         )
         task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)

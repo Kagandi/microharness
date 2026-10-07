@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from core.tools import DEFAULT_MAX_TOOL_CHARS
+from core.tools import DEFAULT_MAX_TOOL_TOKENS
 
 GLOBAL_CONFIG_FILENAME = "config.json"
 PROJECT_CONFIG_RELPATH = ".microharness/config.json"
@@ -203,8 +203,6 @@ class HarnessConfig:
     auto_discover_tools: bool | None = None
     disable_default_tools: bool | None = None
     runs_dir: str | Path | None = None
-    max_tool_chars: int | None = None
-    max_context_chars: int | None = None
     max_tool_tokens: int | None = None
     max_context_tokens: int | None = None
     trigger_ratio: float | None = None
@@ -220,26 +218,18 @@ class HarnessConfig:
         reasoning = c.pick("reasoning_effort", self.reasoning_effort, str, None)
 
         tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, None)
-        tool_chars = c.pick("max_tool_chars", self.max_tool_chars, int, None)
-        if tool_tok is not None:
-            resolved_tool_chars = tool_tok * 4
-        elif tool_chars is not None:
-            resolved_tool_chars = tool_chars
-        else:
-            resolved_tool_chars = DEFAULT_MAX_TOOL_CHARS
+        if tool_tok is None:
+            legacy_tool_chars = c.pick("max_tool_chars", None, int, None)
+            tool_tok = legacy_tool_chars // 4 if legacy_tool_chars else DEFAULT_MAX_TOOL_TOKENS
 
         context_tok = (
             c.pick("max_context_tokens", self.max_context_tokens, int, None)
             or c.pick("max_tokens", None, int, None)
             or c.pick("context_tokens", None, int, None)
         )
-        context_chars = c.pick("max_context_chars", self.max_context_chars, int, None)
-        if context_tok is not None:
-            resolved_context_chars = context_tok * 4
-        elif context_chars is not None:
-            resolved_context_chars = context_chars
-        else:
-            resolved_context_chars = 256000
+        if context_tok is None:
+            legacy_context_chars = c.pick("max_context_chars", None, int, None)
+            context_tok = legacy_context_chars // 4 if legacy_context_chars else 64000
 
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, bool, False),
@@ -252,8 +242,8 @@ class HarnessConfig:
                 "disable_default_tools", self.disable_default_tools, bool, False
             ),
             runs_dir=c.pick("runs_dir", self.runs_dir, Path, None, require_truthy=True),
-            max_tool_chars=resolved_tool_chars,
-            max_context_chars=resolved_context_chars,
+            max_tool_tokens=tool_tok,
+            max_context_tokens=context_tok,
             trigger_ratio=c.pick("trigger_ratio", self.trigger_ratio, float, 0.80),
             cache_ttl=normalize_cache_ttl(cache_ttl),
             reasoning_effort=normalize_reasoning_effort(reasoning),
@@ -272,21 +262,13 @@ class ResolvedConfig:
     auto_discover_tools: bool
     disable_default_tools: bool
     runs_dir: Path | None
-    max_tool_chars: int
-    max_context_chars: int
+    max_tool_tokens: int
+    max_context_tokens: int
     trigger_ratio: float
     cache_ttl: str | None
     reasoning_effort: str | None
     max_step_retries: int
     step_retry_delay: float
-
-    @property
-    def max_tool_tokens(self) -> int:
-        return self.max_tool_chars // 4
-
-    @property
-    def max_context_tokens(self) -> int:
-        return self.max_context_chars // 4
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:

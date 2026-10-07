@@ -38,7 +38,7 @@ FALLBACK_ENV_KEYS: tuple[str, ...] = (
 )
 
 # Used only when no profile and no config supply a model at all.
-LAST_RESORT_MODEL = "anthropic/claude-3.7-sonnet"
+LAST_RESORT_MODEL = "cohere/north-mini-code:free"
 
 
 def get_builtin_providers_path() -> Path:

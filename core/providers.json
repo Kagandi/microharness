@@ -8,7 +8,7 @@
   },
   "openrouter": {
     "endpoint": "https://openrouter.ai/api/v1",
-    "default_model": "anthropic/claude-3.7-sonnet",
+    "default_model": "anthropic/claude-5.5-sonnet",
     "env_keys": ["OPENROUTER_API_KEY"],
     "headers": {
       "HTTP-Referer": "https://github.com/microharness",
@@ -26,7 +26,7 @@
   },
   "anthropic": {
     "endpoint": "https://api.anthropic.com/v1",
-    "default_model": "claude-3-7-sonnet",
+    "default_model": "claude-5.5-sonnet",
     "env_keys": ["ANTHROPIC_API_KEY"],
     "headers": {
       "anthropic-version": "2023-06-01"

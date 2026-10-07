@@ -2,16 +2,16 @@
 
 ## Summary of Changes
 
-This PR modernizes the interactive developer experience and configuration architecture across `microharness`:
+This PR modernizes the interactive developer experience, provider registry, and context limits across `microharness`:
 
 1. **TUI as Default Interactive Interface**:
-   - `Harness.run_interactive()` now launches the full-screen Curses TUI by default.
+   - `Harness.run_interactive()` launches the full-screen Curses TUI by default.
    - Removed legacy `ConsoleUI`; interactive mode is now 100% full-screen TUI.
    - Headless execution is strictly handled via `--batch` (or `Harness.run(task)` in code). If an interactive run is attempted without a TTY, the CLI provides helpful guidance to use `--batch`.
-   - Extracted clean CLI parsing and dispatch into [`core/cli.py`](file:///Users/dimakagan/Projects/mini-harness/core/cli.py).
+   - Single entrypoint in `main.py` without introducing extra CLI modules into `core/`.
 
 2. **Non-Blocking Curses Execution & Thread-Safe Redraw**:
-   - Agent turns now run asynchronously on a background worker thread (`worker_thread`), with non-blocking key polling (`stdscr.timeout(50)`).
+   - Agent turns run asynchronously on a background worker thread (`worker_thread`), with non-blocking key polling (`stdscr.timeout(50)`).
    - Thread-safe drawing synchronization using `_draw_lock` prevents curses race conditions and display corruption.
    - Status spinner and UI remain responsive while model/tool execution takes place.
 
@@ -28,16 +28,17 @@ This PR modernizes the interactive developer experience and configuration archit
 5. **First-Class Local Provider Presets & Scoped Endpoints**:
    - Added built-in presets for local inference engines in [`core/providers.json`](file:///Users/dimakagan/Projects/mini-harness/core/providers.json): `lmstudio` (`http://localhost:1234/v1`), `vllm` (`http://localhost:8000/v1`), `llamacpp` (`http://localhost:8080/v1`), `ollama` (`http://localhost:11434/v1`), and generic `local`.
    - Added provider aliases (`lm-studio`, `llama-cpp`, `llama.cpp`).
-   - Refreshed frontier defaults to Claude 3.7 Sonnet, Gemini 2.5 Flash, and GPT-4o.
+   - Preserved `LAST_RESORT_MODEL = "cohere/north-mini-code:free"` and configured `anthropic/claude-5.5-sonnet` / `claude-5.5-sonnet` frontier models.
    - Fixed endpoint scoping: models defined under `models: { ... }` in config retain their provider-specific endpoints without being overwritten by top-level defaults.
 
 6. **Unified Model Naming (`default_model` / `defaultModel`)**:
    - Supports `default_model` and `defaultModel` keys with precedence over legacy `model` in configuration.
    - Clean documentation and schema examples throughout README.
 
-7. **Token-First Context and Tool Limits**:
-   - Replaced char-centric limits with token controls: `max_context_tokens` (default 64,000 tokens ≈ 256k chars) and `max_tool_tokens` (default 8,000 tokens ≈ 32,000 chars).
-   - Backward-compatible cascade handles both `*_tokens` and `*_chars` transparently.
+7. **Token-Only Context and Tool Limits**:
+   - Fully replaced `max_context_chars` and `max_tool_chars` with `max_context_tokens` (default 64,000 tokens ≈ 256k chars) and `max_tool_tokens` (default 8,000 tokens ≈ 32k chars).
+   - `HarnessConfig`, `ResolvedConfig`, `Harness`, `Memory`, and `ToolRegistry` expose only token limits.
+   - Legacy character settings from old config files are automatically converted to tokens during resolution.
    - Head (10k chars) + Tail (22k chars) preservation for tool outputs with disk log spillover.
 
 8. **Fixed Live Model Switching**:
@@ -53,6 +54,8 @@ This PR modernizes the interactive developer experience and configuration archit
   - `tests/test_config.py` (token limits, cascade priority, reasoning choices)
   - `tests/test_harness.py` (TUI defaults, headless NullUI, session handling)
   - `tests/test_interactive.py` (model switching runner synchronization, reasoning status update)
+  - `tests/test_memory.py` (token limits, high-water mark compaction)
   - `tests/test_providers.py` (local provider presets, scoped endpoints)
+  - `tests/test_tools.py` (token limits and spillover)
   - `tests/test_tui.py` (Esc key safety, reasoning subcommand menus, non-blocking threading)
 - **Lint & Style**: Passed `uv run ruff check` with 0 warnings.

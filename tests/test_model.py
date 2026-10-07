@@ -223,7 +223,7 @@ class TestModel(unittest.TestCase):
 
         m = HttpChatModel(
             base_url="https://openrouter.ai/api/v1",
-            model="anthropic/claude-3.7-sonnet",
+            model="anthropic/claude-5.5-sonnet",
             cache_ttl="1h",
         )
 

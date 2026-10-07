@@ -13,18 +13,12 @@ class Memory:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_context_chars: int | None = None,
-        max_context_tokens: int | None = None,
+        max_context_tokens: int = 64000,
         trigger_ratio: float = 0.80,
         keep_recent_turns: int = 4,
     ):
         self.system_prompt = system_prompt
-        if max_context_tokens is not None:
-            self.max_context_chars = max_context_tokens * 4
-        elif max_context_chars is not None:
-            self.max_context_chars = max_context_chars
-        else:
-            self.max_context_chars = 256000
+        self.max_context_tokens = max_context_tokens
         self.trigger_ratio = trigger_ratio
         self.keep_recent_turns = keep_recent_turns
         self.messages: list[Message] = []
@@ -83,19 +77,16 @@ class Memory:
 
     def stats(self) -> dict[str, Any]:
         """Returns diagnostic metrics on memory and context budget."""
-        chars = self.total_chars()
-        pct = round((chars / self.max_context_chars) * 100, 1) if self.max_context_chars else 0.0
-        trigger_threshold = int(self.max_context_chars * self.trigger_ratio)
+        tokens = self.total_chars() // 4
+        pct = round((tokens / self.max_context_tokens) * 100, 1) if self.max_context_tokens else 0.0
+        trigger_threshold = int(self.max_context_tokens * self.trigger_ratio)
         return {
             "total_messages": len(self.messages),
-            "total_chars": chars,
-            "estimated_tokens": chars // 4,
-            "max_context_chars": self.max_context_chars,
-            "max_context_tokens": self.max_context_chars // 4,
-            "max_estimated_tokens": self.max_context_chars // 4,
+            "estimated_tokens": tokens,
+            "max_context_tokens": self.max_context_tokens,
+            "max_estimated_tokens": self.max_context_tokens,
             "trigger_ratio": self.trigger_ratio,
-            "trigger_threshold_chars": trigger_threshold,
-            "trigger_threshold_tokens": trigger_threshold // 4,
+            "trigger_threshold_tokens": trigger_threshold,
             "usage_pct": pct,
             "modified_files": sorted(self.modified_files),
             "by_role": {
@@ -173,8 +164,8 @@ class Memory:
         Returns:
             True if any messages were compacted, False otherwise.
         """
-        threshold = int(self.max_context_chars * self.trigger_ratio)
-        if not force and self.total_chars() <= threshold:
+        threshold_tokens = int(self.max_context_tokens * self.trigger_ratio)
+        if not force and (self.total_chars() // 4) <= threshold_tokens:
             return False
 
         safe_prefix_count = sum(1 for m in self.messages[:2] if m.role in ("system", "user"))

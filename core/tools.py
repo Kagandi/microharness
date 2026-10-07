@@ -25,7 +25,6 @@ class Tool(Protocol):
 
 
 DEFAULT_MAX_TOOL_TOKENS = 8000
-DEFAULT_MAX_TOOL_CHARS = DEFAULT_MAX_TOOL_TOKENS * 4  # 32,000 chars (~8,000 tokens)
 
 
 def format_tool_output(
@@ -34,13 +33,14 @@ def format_tool_output(
     tool_name: str,
     step_index: int,
     logs_dir: Path,
-    max_chars: int = DEFAULT_MAX_TOOL_CHARS,
+    max_tokens: int = DEFAULT_MAX_TOOL_TOKENS,
 ) -> tuple[str, bool, str | None]:
     """Applies head + tail truncation and spills full raw output to disk if too long.
 
     Returns:
         tuple[formatted_output, was_truncated, raw_log_path]
     """
+    max_chars = max_tokens * 4
     if len(output) <= max_chars:
         return output, False, None
 
@@ -204,9 +204,9 @@ class EditFileTool:
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
-    def __init__(self, env: Environment, max_tool_chars: int = DEFAULT_MAX_TOOL_CHARS):
+    def __init__(self, env: Environment, max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS):
         self.env = env
-        self.max_tool_chars = max_tool_chars
+        self.max_tool_tokens = max_tool_tokens
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -282,11 +282,12 @@ class ToolRegistry:
                 tool_name=tool_call.name,
                 step_index=step_index,
                 logs_dir=self.env.logs_dir,
-                max_chars=self.max_tool_chars,
+                max_tokens=self.max_tool_tokens,
             )
         except Exception:
-            formatted_output = raw_output_str[: self.max_tool_chars]
-            was_truncated = len(raw_output_str) > self.max_tool_chars
+            max_chars = self.max_tool_tokens * 4
+            formatted_output = raw_output_str[:max_chars]
+            was_truncated = len(raw_output_str) > max_chars
             raw_log_path = None
 
         return ToolResult(
