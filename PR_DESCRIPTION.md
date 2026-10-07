@@ -43,7 +43,7 @@ This PR modernizes the interactive developer experience, provider registry, and 
 
 8. **Robust TUI Thread Safety & Cancellation UX**:
    - `TUIState` protects transcript mutations and line slices under `threading.RLock()`.
-   - Curses rendering calls are kept strictly on the main thread via `request_redraw()`.
+   - Curses rendering calls are kept strictly on the main thread via `request_redraw()` across both `TuiUI` and `TuiTurnRunner.refresh()`, eliminating background thread curses calls.
    - Submitting Enter while a turn is running gives immediate feedback (`⏳ Turn is running (press Esc or Ctrl+C to cancel)`).
    - `Harness.run_tui(task_id="interactive_session")` standardizes run-directory naming, with `allow_bare_words=True` enabled for interactive shell commands.
 
@@ -56,13 +56,13 @@ This PR modernizes the interactive developer experience, provider registry, and 
     - Maps `xhigh` and `max` to `"high"` on standard OpenAI endpoints to prevent API validation 400 errors, while preserving full values on OpenRouter endpoints.
 
 11. **Offline Interactive Guidance**:
-    - Interactive TUI launch verifies endpoint and credentials for non-local providers and fails fast with setup instructions, while headless batch and benchmark runs continue using `MockModel` when offline.
+    - Interactive TUI launch verifies endpoint and credentials via `Connection.missing_credentials` (handling local vs cloud providers uniformly) and fails fast with setup instructions, while headless batch and benchmark runs continue using `MockModel` when offline.
 
 ## Verification & Testing
 
 - **Zero Runtime Dependencies**: Standard library only (`pyproject.toml` dependencies remain empty).
 - **Correct Repository URLs**: Pointing to `https://github.com/Kagandi/microharness`.
-- **Unit Test Suite**: 556 passing tests (`uv run pytest`):
+- **Unit Test Suite**: 557 passing tests (`uv run pytest`):
   - `tests/test_config.py` (token limits, legacy char migration, global dir fallback, cascade priority, reasoning choices)
   - `tests/test_harness.py` (TUI defaults, headless NullUI, session handling)
   - `tests/test_interactive.py` (model switching runner synchronization, reasoning status update)
@@ -71,4 +71,5 @@ This PR modernizes the interactive developer experience, provider registry, and 
   - `tests/test_providers.py` (local provider presets, scoped endpoints)
   - `tests/test_tools.py` (token limits and spillover)
   - `tests/test_tui.py` (Esc key safety, reasoning subcommand menus, non-blocking threading)
+  - `tests/test_tui_session.py` (turn runner lifecycle, request_redraw dispatching, Esc cancellation)
 - **Lint & Style**: Passed `uv run ruff check` with 0 warnings.

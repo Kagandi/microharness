@@ -54,6 +54,9 @@ class FakeTui:
     def draw(self, _stdscr):
         self.draws += 1
 
+    def request_redraw(self):
+        self.draws += 1
+
     def check_cancel_requested(self):
         if self.cancel_after is None:
             return False
@@ -226,6 +229,14 @@ class TestCancellation(TuiSessionTestCase):
         runner = self._runner([RuntimeError("boom")])
         runner.run_turn()
         self.assertFalse(self.state.turn_active)
+
+    def test_refresh_schedules_redraw_via_request_redraw(self):
+        """Invariant: refresh calls request_redraw rather than executing curses draw on the turn thread."""
+        mock_tui = MagicMock()
+        runner = self._runner([], tui=mock_tui)
+        runner.refresh()
+        mock_tui.request_redraw.assert_called_once()
+        mock_tui.draw.assert_not_called()
 
 
 class TestAbortTurn(TuiSessionTestCase):

@@ -30,6 +30,7 @@ from core.model import (
     seed_user_providers,
 )
 from core.providers import (
+    Connection,
     build_model_from_spec,
     get_available_models_from_config,
     load_provider_registry,
@@ -689,18 +690,20 @@ def main(argv: list[str] | None = None) -> None:
 
     from core.model import HttpChatModel, MockModel
 
-    is_local_endpoint = (
-        isinstance(context.model, HttpChatModel)
-        and any(h in (context.model.endpoint or "").lower() for h in ("localhost", "127.0.0.1", "::1"))
+    conn = (
+        Connection(
+            endpoint=context.model.endpoint,
+            api_key=context.model.api_key,
+            model=getattr(context.model, "model", "unknown"),
+        )
+        if isinstance(context.model, HttpChatModel)
+        else Connection()
     )
-    if isinstance(context.model, MockModel) or (
-        isinstance(context.model, HttpChatModel)
-        and not context.model.api_key
-        and not is_local_endpoint
-    ):
+
+    if isinstance(context.model, MockModel) or conn.missing_credentials:
         reason = (
-            f"No API key configured for model '{getattr(context.model, 'model', 'unknown')}'."
-            if isinstance(context.model, HttpChatModel) and not context.model.api_key
+            f"No API key configured for model '{conn.model}'."
+            if conn.missing_credentials
             else "No API key or model endpoint configured."
         )
         print(
