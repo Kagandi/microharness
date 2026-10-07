@@ -63,15 +63,27 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 5. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
 
 #### Amazon Bedrock
-`bedrock` is a built-in provider that targets Bedrock's official OpenAI-compatible endpoint:
+`bedrock` is a built-in provider that targets Bedrock's official OpenAI-compatible endpoint.
+On a machine with active AWS SSO (`aws sso login`) it works with zero config:
 
 ```bash
-export BEDROCK_API_KEY=...          # A Bedrock bearer token
-export AWS_REGION=us-west-2         # Or "region" in config.json (config wins over env)
-uv run microharness --model "bedrock/anthropic.claude-sonnet-5-5" "Refactor auth.py"
+uv run microharness --model "bedrock/us.openai.gpt-5.6-sol" "Refactor auth.py"
 ```
 
-The registry endpoint `https://bedrock-runtime.{region}.amazonaws.com/openai/v1` is a regional template. The region resolves from `config.json` `"region"`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`. Without a region the Bedrock spec falls back to `MockModel` and says what is missing. The harness never shells out to the AWS CLI; the token is set by you.
+Credentials resolve from the standard chain (environment, `~/.aws/credentials`, SSO
+cache), and requests are SigV4-signed with the standard library; the harness never
+shells out to the AWS CLI. The region resolves from `config.json` `"region"`, then
+`AWS_REGION`, then `AWS_DEFAULT_REGION`, then the `~/.aws/config` profile region
+(profile from `config.json` `"aws_profile"` or `AWS_PROFILE`, default `default`).
+Without credentials or region the spec falls back to `MockModel` with a hint
+(`aws sso login`). A `BEDROCK_API_KEY` bearer token still overrides SSO when set.
+Only models whose Bedrock model card lists Chat Completions are served on this
+endpoint (Claude/Nova IDs return `model_not_found`); the registry default is
+`us.openai.gpt-5.6-sol`.
+
+Auth schemes are pluggable: built-ins are `none`, `bearer`, `header`, and `sigv4`
+(see `core/auth.py`), and extra single-file plugins can be installed as
+`~/.microharness/auth/<scheme>.py` (global dir only, never project-local).
 
 The shim exposes no prompt-cache or reasoning parameters, so the Bedrock profile runs with `cache_strategy: "none"` and `reasoning_format: "none"`.
 
