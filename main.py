@@ -695,6 +695,8 @@ def main(argv: list[str] | None = None) -> None:
             endpoint=context.model.endpoint,
             api_key=context.model.api_key,
             model=getattr(context.model, "model", "unknown"),
+            auth_scheme=getattr(context.model, "auth_scheme", "bearer") or "bearer",
+            auth_options=dict(getattr(context.model, "auth_options", None) or {}),
         )
         if isinstance(context.model, HttpChatModel)
         else Connection()

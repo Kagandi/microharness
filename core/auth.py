@@ -1,7 +1,8 @@
 """Pluggable request-signing auth schemes.
 
-Wave 1 ships the ``RequestSigner`` protocol, the scheme registry, and the
-Tier 1 built-ins (``none``/``bearer``/``header``). A signer is pure: it takes
+The ``RequestSigner`` protocol, the scheme registry, and the Tier 1 built-ins
+(``none``/``bearer``/``header`` plus the ``sigv4`` reference implementation in
+``core.auth_sigv4``). A signer is pure: it takes
 (method, url, headers, body, options, secrets) and returns a NEW headers
 dict, never mutating its inputs.
 
@@ -15,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from core.auth_sigv4 import SigV4Signer
 
 
 @runtime_checkable
@@ -114,12 +117,13 @@ class _HeaderSigner:
         return new_headers
 
 
-_BUILTIN_NAMES = frozenset({"none", "bearer", "header"})
+_BUILTIN_NAMES = frozenset({"none", "bearer", "header", "sigv4"})
 
 _REGISTRY: dict[str, RequestSigner] = {
     "none": _NoneSigner(),
     "bearer": _BearerSigner(),
     "header": _HeaderSigner(),
+    "sigv4": SigV4Signer(),
 }
 
 

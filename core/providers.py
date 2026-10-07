@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.auth import resolve_auth
+from core.auth_sigv4 import resolve_aws_credentials, resolve_aws_region
 from core.config import read_jsonc
 from core.protocols import Model
 
@@ -40,10 +43,6 @@ FALLBACK_ENV_KEYS: tuple[str, ...] = (
 
 # Used only when no profile and no config supply a model at all.
 LAST_RESORT_MODEL = "cohere/north-mini-code:free"
-
-# Consulted, in order, when a regional endpoint template (e.g. Bedrock) has no
-# config-supplied region.
-AWS_REGION_ENV_KEYS: tuple[str, ...] = ("AWS_REGION", "AWS_DEFAULT_REGION")
 
 
 def get_builtin_providers_path() -> Path:
@@ -103,6 +102,7 @@ def load_provider_registry(
     4. Inline Config: ``config.json`` ``providers`` dictionary
     """
     registry = load_builtin_providers()
+    builtin_defaults = {name: dict(profile) for name, profile in registry.items()}
 
     if global_dir:
         _merge_profiles(registry, read_jsonc(Path(global_dir) / "providers.json"))
@@ -116,6 +116,14 @@ def load_provider_registry(
 
     if isinstance(inline_providers, dict):
         _merge_profiles(registry, inline_providers)
+
+    # Migration backfill: a user copy predating a new built-in key (e.g. the
+    # bedrock ``auth`` block) gains the ABSENT keys. User-set keys always win.
+    for name, builtin_profile in builtin_defaults.items():
+        merged = registry.get(name)
+        if isinstance(merged, dict):
+            for key, value in builtin_profile.items():
+                merged.setdefault(key, value)
 
     return registry
 
@@ -163,15 +171,16 @@ def find_provider_by_endpoint(
 
 
 def resolve_region(config: dict[str, Any] | None = None) -> str | None:
-    """Resolves the AWS region: config ``region`` first, then the AWS environment."""
+    """Resolves the AWS region: config ``region``, the AWS environment, then the shared file."""
+    return resolve_aws_region(config)
+
+
+def _aws_profile_name(config: dict[str, Any] | None = None) -> str:
+    """Names the AWS profile for shared-file/SSO lookups (config, then environment)."""
     cfg = config or {}
-    region = cfg.get("region")
-    if not region:
-        for env_key in AWS_REGION_ENV_KEYS:
-            if region := os.getenv(env_key):
-                break
-    region = str(region).strip() if region else None
-    return region or None
+    if cfg.get("aws_profile"):
+        return str(cfg["aws_profile"])
+    return os.getenv("AWS_PROFILE") or "default"
 
 
 def _apply_region(
@@ -358,6 +367,9 @@ class Connection:
     headers: dict[str, Any] = field(default_factory=dict)
     reasoning_format: str = "standard"
     cache_strategy: str = "implicit"
+    auth_scheme: str = "bearer"
+    auth_options: dict = field(default_factory=dict)
+    auth_error: str | None = None
 
     @property
     def is_offline(self) -> bool:
@@ -374,8 +386,15 @@ class Connection:
 
     @property
     def missing_credentials(self) -> bool:
-        """True when the connection requires an API key but none is configured."""
+        """True when the connection's auth scheme has no usable credentials."""
         if self.is_offline or self.is_local:
+            return False
+        if self.auth_scheme == "sigv4":
+            try:
+                return resolve_aws_credentials() is None
+            except Exception:
+                return True
+        if self.auth_scheme != "bearer":
             return False
         return not bool(self.api_key)
 
@@ -414,6 +433,31 @@ def resolve_connection(
     headers = {**(profile.get("headers") or {}), **(cfg.get("headers") or {})}
     headers.update(request.headers)
 
+    # Auth precedence: spec-dict auth > config auth > profile auth.
+    spec_auth = spec.get("auth") if isinstance(spec, dict) else None
+    if spec_auth is not None:
+        auth_scheme, auth_options = resolve_auth({"auth": spec_auth})
+    elif cfg.get("auth") is not None:
+        auth_scheme, auth_options = resolve_auth({"auth": cfg.get("auth")})
+    else:
+        auth_scheme, auth_options = resolve_auth(profile)
+
+    auth_error: str | None = None
+    if auth_scheme == "sigv4":
+        aws_profile = _aws_profile_name(cfg)
+        aws_region = resolve_aws_region(cfg)
+        print(
+            f"SigV4 auth: AWS profile '{aws_profile}', region '{aws_region or 'unset'}'",
+            file=sys.stderr,
+        )
+        if resolve_aws_credentials(aws_profile) is None:
+            auth_error = (
+                f"missing AWS credentials for SigV4 auth (provider "
+                f"'{provider_name or profile.get('name') or 'unknown'}'): no environment, "
+                f"shared-file, or SSO credentials found for profile '{aws_profile}'. "
+                f"Run `aws sso login` (or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)."
+            )
+
     return Connection(
         model=(
             request.model
@@ -429,6 +473,9 @@ def resolve_connection(
         headers=headers,
         reasoning_format=profile.get("reasoning_format", "standard"),
         cache_strategy=profile.get("cache_strategy", "implicit"),
+        auth_scheme=auth_scheme,
+        auth_options=auth_options,
+        auth_error=auth_error,
     )
 
 
@@ -456,6 +503,18 @@ def build_model_from_spec(
         if "{region}" in str(profile.get("endpoint") or ""):
             message += ": a Bedrock endpoint needs a region (set AWS_REGION or 'region' in config)"
         return MockModel([(message, [])])
+    if connection.auth_error:
+        return MockModel([(connection.auth_error, [])])
+
+    if connection.auth_scheme == "sigv4":
+        auth_secrets = resolve_aws_credentials(
+            _aws_profile_name(config or {})
+        ) or {}
+        auth_secrets["region"] = resolve_aws_region(config or {})
+    elif connection.api_key:
+        auth_secrets = {"api_key": connection.api_key}
+    else:
+        auth_secrets = {}
 
     return HttpChatModel(
         base_url=connection.endpoint,
@@ -467,6 +526,9 @@ def build_model_from_spec(
         reasoning_format=connection.reasoning_format,
         cache_strategy=connection.cache_strategy,
         provider=connection.provider,
+        auth_scheme=connection.auth_scheme,
+        auth_options=connection.auth_options,
+        auth_secrets=auth_secrets,
     )
 
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from core import config
+from core.auth import get_signer
 from core.protocols import (
     CacheAwareModel,
     CancellableModel,
@@ -160,6 +161,9 @@ class HttpChatModel(UsageTelemetry):
         deadline: float | None = None,
         provider: str | None = None,
         retry: RetryPolicy | None = None,
+        auth_scheme: str = "bearer",
+        auth_options: dict[str, Any] | None = None,
+        auth_secrets: dict[str, Any] | None = None,
     ):
         clean_url = base_url.rstrip("/")
         # Automatically handle both base URL and full /chat/completions URL
@@ -177,6 +181,9 @@ class HttpChatModel(UsageTelemetry):
         self.provider = provider or prov_name
         self.model = model
         self.api_key = api_key
+        self.auth_scheme = (auth_scheme or "bearer").lower()
+        self.auth_options = dict(auth_options or {})
+        self.auth_secrets = dict(auth_secrets or {})
         # Merge declarative profile headers with explicitly passed headers (explicit wins)
         self.extra_headers = {**default_headers, **(headers or {})}
         self.timeout = timeout
@@ -250,7 +257,7 @@ class HttpChatModel(UsageTelemetry):
             "Content-Type": "application/json",
             **self.extra_headers,
         }
-        if self.api_key:
+        if self.auth_scheme == "bearer" and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if self.cache_ttl:
             if self.cache_strategy == "anthropic_block":
@@ -315,21 +322,46 @@ class HttpChatModel(UsageTelemetry):
             payload["tool_choice"] = "auto"
         return payload
 
+    def _secrets_for_attempt(self) -> dict[str, Any]:
+        """Merges stored auth secrets with the legacy api_key, without provider branches."""
+        secrets = dict(self.auth_secrets)
+        if "api_key" not in secrets and self.api_key:
+            secrets["api_key"] = self.api_key
+        return secrets
+
     def _send_request(self, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         """Posts the payload, retrying transient failures under :attr:`retry`.
 
         Each failure class gets its own handler; a handler either schedules the
-        next attempt (and returns) or raises a terminal error.
+        next attempt (and returns) or raises a terminal error. Headers are
+        rebuilt and re-signed on every attempt so timestamped schemes stay
+        fresh across retries.
         """
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
+        body_bytes = json.dumps(payload).encode("utf-8")
         for attempt in range(self.retry.max_attempts):
             # Honour a pending cancel before spending another request on it.
             self._raise_if_cancelled("before retry attempt")
+            base_headers = self._build_headers()
+            if headers:
+                base_headers.update(headers)
+            secrets = self._secrets_for_attempt()
+            if self.auth_scheme == "bearer" and not secrets.get("api_key"):
+                signed_headers = base_headers
+            else:
+                signed_headers = get_signer(self.auth_scheme).sign(
+                    method="POST",
+                    url=self.endpoint,
+                    headers=base_headers,
+                    body=body_bytes,
+                    options=self.auth_options,
+                    secrets=secrets,
+                )
+            request = urllib.request.Request(
+                self.endpoint,
+                data=body_bytes,
+                headers=signed_headers,
+                method="POST",
+            )
             try:
                 with urllib.request.urlopen(request, timeout=self._request_timeout(attempt)) as resp:
                     return json.loads(resp.read().decode("utf-8"))

@@ -36,10 +36,11 @@
   },
   "bedrock": {
     "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
-    "default_model": "anthropic.claude-sonnet-5-5",
+    "default_model": "us.openai.gpt-5.6-sol",
     "env_keys": ["BEDROCK_API_KEY"],
     "reasoning_format": "none",
-    "cache_strategy": "none"
+    "cache_strategy": "none",
+    "auth": {"scheme": "sigv4", "service": "bedrock"}
   },
   "deepseek": {
     "endpoint": "https://api.deepseek.com/v1",
