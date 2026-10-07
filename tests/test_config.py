@@ -121,8 +121,8 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.auto_discover_tools, True)
         self.assertEqual(cfg.disable_default_tools, False)
         self.assertEqual(cfg.runs_dir, None)
-        self.assertEqual(cfg.max_tool_chars, 2000)
-        self.assertEqual(cfg.max_context_chars, 8000)
+        self.assertEqual(cfg.max_tool_chars, 32000)
+        self.assertEqual(cfg.max_context_chars, 256000)
         self.assertEqual(cfg.trigger_ratio, 0.80)
         self.assertEqual(cfg.cache_ttl, "5m")
         self.assertEqual(cfg.reasoning_effort, None)
@@ -183,6 +183,12 @@ class TestHarnessConfigCascade(unittest.TestCase):
             self._resolve(HarnessConfig(cache_ttl="17m"))
         self.assertIn("Unsupported cache TTL", str(ctx.exception))
 
+    def test_token_configs_convert_to_chars(self):
+        """Invariant: token limits are converted to character limits at 4 chars per token."""
+        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_tokens": 1000, "max_context_tokens": 10000})
+        self.assertEqual(cfg.max_tool_chars, 4000)
+        self.assertEqual(cfg.max_context_chars, 40000)
+
 
 class TestProjectToolTrust(unittest.TestCase):
     def _layers(self, global_cfg=None, project_cfg=None):
@@ -240,6 +246,8 @@ class TestNormalizers(unittest.TestCase):
         self.assertEqual(normalize_reasoning_effort("LOW"), "low")
         self.assertEqual(normalize_reasoning_effort("Medium"), "medium")
         self.assertEqual(normalize_reasoning_effort("high"), "high")
+        self.assertEqual(normalize_reasoning_effort("xhigh"), "xhigh")
+        self.assertEqual(normalize_reasoning_effort("max"), "max")
         self.assertEqual(normalize_reasoning_effort("2048"), "2048")
 
     def test_reasoning_disabled_values(self):
@@ -259,7 +267,7 @@ class TestGlobalDir(unittest.TestCase):
         resolved = get_default_global_dir()
         self.assertIsInstance(resolved, Path)
         self.assertEqual(resolved.parent, Path.home())
-        self.assertIn(resolved.name, (".microharness", ".mini-harness"))
+        self.assertEqual(resolved.name, ".microharness")
 
 
 if __name__ == "__main__":

@@ -5,14 +5,15 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.memory import format_compact_num
 from core.interactive import command_catalog, format_model_desc, format_session_desc
+from core.memory import format_compact_num
 
 # Commands that open a value menu instead of the command catalog: their
 # spellings, the menu title, and the hint shown before a value is typed.
@@ -20,6 +21,7 @@ SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "skill": (("/skill", "/skills"), " Available Skills ", "Load or inspect a custom skill prompt"),
     "model": (("/model", "/models"), " Available Models ", "Switch active model or show models from config"),
     "resume": (("/resume", "/resumes"), " Previous Sessions ", "Show previous sessions or resume with /resume <id>"),
+    "reasoning": (("/reasoning",), " Reasoning / Thinking Effort ", "Switch reasoning effort level"),
 }
 
 
@@ -30,6 +32,7 @@ MENU_COLUMN_BOUNDS: dict[str, tuple[int, int]] = {
     "skill": (22, 22),
     "model": (20, 36),
     "resume": (26, 38),
+    "reasoning": (12, 16),
 }
 FILE_MENU_COLUMN_BOUNDS = (24, 42)
 
@@ -592,6 +595,20 @@ class TUIState:
 
     def _subcommand_values(self, kind: str, sub: str) -> list[tuple[str, str]]:
         """The ``(name, description)`` values a value menu can offer."""
+        if kind == "reasoning":
+            levels = [
+                ("off", "Disable model reasoning/thinking"),
+                ("low", "Low reasoning effort"),
+                ("medium", "Medium reasoning effort"),
+                ("high", "High reasoning effort"),
+                ("xhigh", "Extra high reasoning effort"),
+                ("max", "Maximum reasoning effort"),
+            ]
+            return [
+                (val, desc)
+                for val, desc in levels
+                if not sub or val.lower().startswith(sub.lower())
+            ]
         if kind == "skill":
             return [
                 (name, f"[{getattr(info, 'scope', 'project')}] "
@@ -884,6 +901,9 @@ class CursesTUI:
         self.state = state
         self.stdscr: Any = None
         self.has_colors = False
+        self._cancel_requested = False
+        self._draw_lock = threading.Lock()
+        self.worker_thread: threading.Thread | None = None
 
     def _init_colors(self) -> None:
         try:
@@ -902,20 +922,23 @@ class CursesTUI:
 
     def draw(self, stdscr: Any) -> None:
         """Draws the complete TUI screen: Header, Transcript, Status, and Bottom Input."""
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        if h < 8 or w < 20:
-            stdscr.addstr(0, 0, "Terminal window too small! Please resize.")
-            stdscr.refresh()
+        if not stdscr:
             return
+        with self._draw_lock:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            if h < 8 or w < 20:
+                stdscr.addstr(0, 0, "Terminal window too small! Please resize.")
+                stdscr.refresh()
+                return
 
-        self._draw_header(stdscr, w)
-        layout = self._screen_layout(h)
-        self._draw_transcript(stdscr, w, layout)
-        self._draw_status(stdscr, w, layout)
-        self._draw_autocomplete(stdscr, w, layout)
-        self._draw_input(stdscr, w, layout)
-        stdscr.refresh()
+            self._draw_header(stdscr, w)
+            layout = self._screen_layout(h)
+            self._draw_transcript(stdscr, w, layout)
+            self._draw_status(stdscr, w, layout)
+            self._draw_autocomplete(stdscr, w, layout)
+            self._draw_input(stdscr, w, layout)
+            stdscr.refresh()
 
     def _draw_header(self, stdscr: Any, w: int) -> None:
         """Draws the title bar and the rule beneath it."""
@@ -1164,6 +1187,9 @@ class CursesTUI:
 
     def check_cancel_requested(self) -> bool:
         """Non-blocking check if Escape key was pressed by user during execution."""
+        if self._cancel_requested:
+            self._cancel_requested = False
+            return True
         if not self.stdscr:
             return False
         try:
@@ -1217,6 +1243,8 @@ class CursesTUI:
 
         # 2. Enter: Complete open autocomplete selection or submit
         if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
+            if self.state.turn_active:
+                return True
             if file_matches:
                 self.state.complete_selected_file_tag()
                 return True
@@ -1281,9 +1309,10 @@ class CursesTUI:
             return True
 
         # 7. Escape: cancel the running turn, else dismiss menu / clear tag query,
-        #    else (with an empty prompt) exit the session.
+        #    else clear input buffer. NEVER exit when prompt is empty.
         if ch in (27, "\x1b"):
             if self.state.turn_active:
+                self._cancel_requested = True
                 return True
             if file_matches:
                 tag_info = self.state.get_current_file_tag_query()
@@ -1298,7 +1327,7 @@ class CursesTUI:
             if self.state.input_buffer:
                 self.state.clear_input()
                 return True
-            return False
+            return True
 
         if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
             self.state.handle_backspace()
@@ -1322,27 +1351,46 @@ class CursesTUI:
         instead of running against an uninitialised screen.
         """
 
+        def _execute_submit(text: str) -> None:
+            if self.worker_thread and self.worker_thread.is_alive():
+                return
+            self.state.turn_active = True
+
+            def _worker() -> None:
+                try:
+                    on_user_submit(text)
+                finally:
+                    self.state.turn_active = False
+
+            self.worker_thread = threading.Thread(target=_worker, daemon=True)
+            self.worker_thread.start()
+
         def _main(stdscr: Any) -> None:
             self.stdscr = stdscr
             self._init_colors()
             curses.cbreak()
             stdscr.keypad(True)
             curses.curs_set(1)
+            if hasattr(stdscr, "timeout"):
+                stdscr.timeout(50)
 
             _reset_key_reporting()
 
             self.draw(stdscr)
 
             if initial_instruction and initial_instruction.strip():
-                on_user_submit(initial_instruction.strip())
-                self.draw(stdscr)
+                _execute_submit(initial_instruction.strip())
 
             while True:
                 try:
                     ch = stdscr.get_wch()
                 except (KeyboardInterrupt, EOFError):
+                    if self.state.turn_active:
+                        self._cancel_requested = True
+                        continue
                     break
                 except curses.error:
+                    self.draw(stdscr)
                     continue
 
                 if ch in (27, "\x1b"):
@@ -1352,9 +1400,13 @@ class CursesTUI:
                     if len(seq) > 1:
                         ch = seq
 
-                if not self.handle_key(ch, on_user_submit):
+                if not self.handle_key(ch, _execute_submit):
                     break
                 self.draw(stdscr)
+
+            if self.worker_thread and self.worker_thread.is_alive():
+                self._cancel_requested = True
+                self.worker_thread.join(timeout=0.5)
 
             _reset_key_reporting()
 

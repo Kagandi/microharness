@@ -207,9 +207,14 @@ class TestHarnessIntegration(unittest.TestCase):
         harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
 
         # Mock user typing slash commands, follow-up, and then 'exit'
-        user_inputs = iter(["/status", "/help", "/compact", "Now do step 2", "/status", "exit"])
-        with patch("builtins.input", lambda *args: next(user_inputs)):
-            harness.run_interactive(initial_instruction="Start step 1")
+        def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+            if initial_instruction:
+                on_user_submit(initial_instruction)
+            for user_input in ["/status", "/help", "/compact", "Now do step 2", "/status", "exit"]:
+                on_user_submit(user_input)
+
+        with patch("core.tui.CursesTUI.run", mock_tui_run):
+            harness.run_tui(initial_instruction="Start step 1")
 
         # Invariant: Files from both turns exist in the same workspace!
         latest_run = max(Path(self.runs_dir).glob("interactive_session_*"))
@@ -712,9 +717,14 @@ class TestHarnessIntegration(unittest.TestCase):
         )
 
         # Mock interactive inputs: /help, custom command /audit api.py, then exit
-        user_inputs = iter(["/help", "/audit api.py", "exit"])
-        with patch("builtins.input", lambda *args: next(user_inputs)):
-            harness.run_interactive(initial_instruction="Initial prompt")
+        def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+            if initial_instruction:
+                on_user_submit(initial_instruction)
+            for user_input in ["/help", "/audit api.py", "exit"]:
+                on_user_submit(user_input)
+
+        with patch("core.tui.CursesTUI.run", mock_tui_run):
+            harness.run_tui(initial_instruction="Initial prompt")
 
         # Turn 1: Initial prompt
         # Turn 2: /audit api.py expanded
@@ -1462,7 +1472,12 @@ class TestHarnessIntegration(unittest.TestCase):
         harness = Harness(model=MockModel([("Done", [])]), verbose=False)
 
         # Calling run_interactive with initial_instruction="/status" and input="/exit"
-        with patch("builtins.input", return_value="/exit"):
+        def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+            if initial_instruction:
+                on_user_submit(initial_instruction)
+            on_user_submit("/exit")
+
+        with patch("core.tui.CursesTUI.run", mock_tui_run):
             harness.run_interactive(initial_instruction="/status")
 
     def test_cache_aware_model_protocol_compliance(self):
@@ -1890,17 +1905,40 @@ def get_tools(env=None):
             self.assertEqual(len(memory.messages), 4)
 
             # 13. Interactive help text mentions direct /<name> invocation
-            from core.interactive import ConsoleUI, TurnState
+            from core.interactive import TurnState
+
+            records = []
+
+            class SimpleUI:
+                def status(self, text):
+                    records.append(text)
+
+                def info(self, text):
+                    records.append(text)
+
+                def success(self, text):
+                    records.append(text)
+
+                def error(self, text):
+                    records.append(text)
+
+                def echo(self, text):
+                    pass
+
+                def refresh(self):
+                    pass
+
+                def render_context(self, s, r, c):
+                    return []
 
             help_router = harness._make_router(
-                memory, {}, discovered, ConsoleUI(), None, None, TurnState()
+                memory, {}, discovered, SimpleUI(), None, None, TurnState()
             )
-            with patch("builtins.print") as mock_print:
-                help_router.dispatch("/help")
-                printed = " ".join(str(c) for c in mock_print.call_args_list)
-                self.assertIn("Available skills (run /<name> or /skill <name>):", printed)
-                self.assertIn("/deploy-tool", printed)
-                self.assertIn("/my-linter", printed)
+            help_router.dispatch("/help")
+            printed = " ".join(records)
+            self.assertIn("Available skills (run /<name> or /skill <name>):", printed)
+            self.assertIn("/deploy-tool", printed)
+            self.assertIn("/my-linter", printed)
 
             # 14. File tagging with @ in interactive input
             sample_file = ws_dir / "sample.py"

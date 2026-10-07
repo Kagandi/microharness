@@ -32,6 +32,9 @@ class TestRegistryLoading(unittest.TestCase):
         for name in ("google", "openrouter", "openai", "anthropic"):
             self.assertIn(name, registry)
             self.assertTrue(registry[name]["endpoint"].startswith("https://"))
+        for name in ("lmstudio", "vllm", "llamacpp", "ollama", "local"):
+            self.assertIn(name, registry)
+            self.assertTrue(registry[name]["endpoint"].startswith("http://localhost:"))
 
     def test_registry_layers_override_in_order(self):
         """Invariant: inline config wins over project, which wins over global, over built-in."""
@@ -412,6 +415,22 @@ class TestResolveConnection(unittest.TestCase):
         self.assertEqual(model.endpoint, f"{connection.endpoint}/chat/completions")
         self.assertEqual(model.provider, connection.provider)
         self.assertEqual(model.api_key, connection.api_key)
+
+    def test_model_under_models_scoped_endpoint_not_overridden_by_top_level_endpoint(self):
+        """Invariant: selecting a provider or model with its own endpoint does not get overridden by top-level endpoint."""
+        config = {
+            "endpoint": "https://openrouter.ai/api/v1",
+            "models": {
+                "smart": {"model": "gpt-4o", "provider": "openai"},
+                "local": {"model": "llama-3", "endpoint": "http://localhost:1234/v1"},
+            },
+        }
+        conn_smart = resolve_connection("smart", config=config, registry=self.REGISTRY)
+        self.assertEqual(conn_smart.endpoint, "https://openai/v1")
+        self.assertEqual(conn_smart.provider, "openai")
+
+        conn_local = resolve_connection("local", config=config, registry=self.REGISTRY)
+        self.assertEqual(conn_local.endpoint, "http://localhost:1234/v1")
 
 
 class TestResolveModelSpec(unittest.TestCase):

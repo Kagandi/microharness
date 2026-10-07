@@ -38,7 +38,7 @@ DISABLED_VALUES: frozenset[str] = frozenset(
     {"off", "none", "disable", "disabled", "false", "0", ""}
 )
 
-REASONING_CHOICES: frozenset[str] = frozenset({"low", "medium", "high"})
+REASONING_CHOICES: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 PROJECT_TRUST_NOTICE = (
     "Project config attempted to enable 'trust_project_tools'. "
@@ -49,10 +49,7 @@ PROJECT_TRUST_NOTICE = (
 
 def get_default_global_dir() -> Path:
     """Returns the default global directory, evaluating ``Path.home()`` at call time."""
-    home = Path.home()
-    if (home / ".microharness").exists() or not (home / ".mini-harness").exists():
-        return home / ".microharness"
-    return home / ".mini-harness"
+    return Path.home() / ".microharness"
 
 
 def strip_json_comments(text: str) -> str:
@@ -208,6 +205,8 @@ class HarnessConfig:
     runs_dir: str | Path | None = None
     max_tool_chars: int | None = None
     max_context_chars: int | None = None
+    max_tool_tokens: int | None = None
+    max_context_tokens: int | None = None
     trigger_ratio: float | None = None
     cache_ttl: str | None = None
     reasoning_effort: str | None = None
@@ -219,6 +218,29 @@ class HarnessConfig:
         c = _Cascade(layers.merged)
         cache_ttl = c.pick("cache_ttl", self.cache_ttl, str, "5m")
         reasoning = c.pick("reasoning_effort", self.reasoning_effort, str, None)
+
+        tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, None)
+        tool_chars = c.pick("max_tool_chars", self.max_tool_chars, int, None)
+        if tool_tok is not None:
+            resolved_tool_chars = tool_tok * 4
+        elif tool_chars is not None:
+            resolved_tool_chars = tool_chars
+        else:
+            resolved_tool_chars = DEFAULT_MAX_TOOL_CHARS
+
+        context_tok = (
+            c.pick("max_context_tokens", self.max_context_tokens, int, None)
+            or c.pick("max_tokens", None, int, None)
+            or c.pick("context_tokens", None, int, None)
+        )
+        context_chars = c.pick("max_context_chars", self.max_context_chars, int, None)
+        if context_tok is not None:
+            resolved_context_chars = context_tok * 4
+        elif context_chars is not None:
+            resolved_context_chars = context_chars
+        else:
+            resolved_context_chars = 256000
+
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, bool, False),
             docker=c.pick("docker", self.docker, bool, False),
@@ -230,8 +252,8 @@ class HarnessConfig:
                 "disable_default_tools", self.disable_default_tools, bool, False
             ),
             runs_dir=c.pick("runs_dir", self.runs_dir, Path, None, require_truthy=True),
-            max_tool_chars=c.pick("max_tool_chars", self.max_tool_chars, int, DEFAULT_MAX_TOOL_CHARS),
-            max_context_chars=c.pick("max_context_chars", self.max_context_chars, int, 8000),
+            max_tool_chars=resolved_tool_chars,
+            max_context_chars=resolved_context_chars,
             trigger_ratio=c.pick("trigger_ratio", self.trigger_ratio, float, 0.80),
             cache_ttl=normalize_cache_ttl(cache_ttl),
             reasoning_effort=normalize_reasoning_effort(reasoning),
@@ -258,6 +280,14 @@ class ResolvedConfig:
     max_step_retries: int
     step_retry_delay: float
 
+    @property
+    def max_tool_tokens(self) -> int:
+        return self.max_tool_chars // 4
+
+    @property
+    def max_context_tokens(self) -> int:
+        return self.max_context_chars // 4
+
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:
     """Normalizes a cache TTL setting to ``'5m'``, ``'1h'``, or ``None`` (disabled).
@@ -280,7 +310,7 @@ def normalize_cache_ttl(ttl: str | None) -> str | None:
 
 
 def normalize_reasoning_effort(effort: str | None) -> str | None:
-    """Normalizes a reasoning effort level to ``'low'``/``'medium'``/``'high'``, a token budget, or ``None``."""
+    """Normalizes a reasoning effort level to ``'low'``/``'medium'``/``'high'``/``'xhigh'``/``'max'``, a token budget, or ``None``."""
     if effort is None:
         return None
     val = str(effort).strip().lower()
@@ -289,5 +319,5 @@ def normalize_reasoning_effort(effort: str | None) -> str | None:
     if val in REASONING_CHOICES or val.isdigit():
         return val
     raise ValueError(
-        f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', numeric token budget, or 'off'."
+        f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', 'xhigh', 'max', numeric token budget, or 'off'."
     )

@@ -30,12 +30,10 @@ from core.discovery import discover_workspace_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.interactive import (
-    EXIT,
-    SKIP,
     TURN,
     CommandContext,
     CommandRouter,
-    ConsoleUI,
+    NullUI,
     SessionUI,
     TuiUI,
     TurnState,
@@ -56,7 +54,6 @@ from core.providers import (
     resolve_model_spec,
 )
 from core.session import (
-    MAX_STEPS_EXCEEDED,
     find_recent_sessions,
     load_session,
     rate_limit_wait,
@@ -142,6 +139,8 @@ class Harness:
         runs_dir: Path | str | None = None,
         max_tool_chars: int | None = None,
         max_context_chars: int | None = None,
+        max_tool_tokens: int | None = None,
+        max_context_tokens: int | None = None,
         trigger_ratio: float | None = None,
         cache_ttl: str | None = None,
         reasoning_effort: str | None = None,
@@ -169,6 +168,8 @@ class Harness:
             runs_dir=runs_dir,
             max_tool_chars=max_tool_chars,
             max_context_chars=max_context_chars,
+            max_tool_tokens=max_tool_tokens,
+            max_context_tokens=max_context_tokens,
             trigger_ratio=trigger_ratio,
             cache_ttl=cache_ttl,
             reasoning_effort=reasoning_effort,
@@ -675,7 +676,7 @@ class Harness:
         """
         turns = TurnState(step_index=step_holder[0] if step_holder else 1)
         router = self._make_router(
-            memory, custom_commands, skills or {}, ConsoleUI(), workspace_dir, tracer, turns
+            memory, custom_commands, skills or {}, NullUI(), workspace_dir, tracer, turns
         )
         action = router.dispatch(user_input)
         if step_holder is not None:
@@ -698,44 +699,6 @@ class Harness:
         )
         return step_index
 
-    def _print_session_banner(self, env: Environment) -> None:
-        """Prints the session header: workspace, model, and the command reminder."""
-        print("\n🚀 Interactive Session Started")
-        print(f"📁 Project Workspace: {env.workspace_dir}")
-        if self.docker:
-            print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
-        provider = getattr(self.model, "provider", "") or ""
-        suffix = f" [{provider}]" if provider else ""
-        print(f"🤖 Active Model: {self.active_model_name()}{suffix}")
-        print(f"⚡ Prompt Caching: {self.cache_ttl.upper() if self.cache_ttl else 'OFF'}")
-        reasoning = self.get_reasoning_effort()
-        print(f"🧠 Reasoning Effort: {reasoning.upper() if reasoning else 'OFF'}")
-        print(
-            "💡 Commands: /model | /resume | /reasoning | /cache | /compact | /status | "
-            "/new | /skill | /help | /exit\n"
-        )
-
-    def _print_context_footer(self, memory: Memory) -> None:
-        """Prints the single-line context usage footer shown before each prompt."""
-        stats = memory.stats()
-        print(
-            _dim(
-                f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} "
-                f"tokens ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
-            )
-        )
-
-    def _finalize_session(self, env: Environment, tracer: Tracer, run_dir: Path) -> None:
-        """Writes the patch and trace for an interactive session that has ended."""
-        patch_diff = env.get_git_patch()
-        self._write_patch(patch_diff, run_dir)
-        _, md_path = tracer.finalize(
-            finish_reason="session_ended",
-            patch_diff=patch_diff,
-            telemetry=self.get_cache_stats(),
-        )
-        print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
-
     def _print_context_footer(self, memory: Memory) -> None:
         """Prints the compact context usage footer shown before each prompt."""
         stats = memory.stats()
@@ -749,85 +712,13 @@ class Harness:
         task_id: str = "interactive_session",
         resume: bool | str | Path | None = None,
     ) -> None:
-        """Interactive multi-turn session with slash commands and context usage tracking."""
-        env, _, memory, tracer, loop, run_dir = self._setup_run(
-            task_id=task_id,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            initial_instruction="",
-            initial_files={},
-        )
-
-        turns = TurnState(step_index=self._restore_session(memory, resume))
-        commands = discover_commands(env.workspace_dir, self.global_dir)
-        skills = discover_skills(env.workspace_dir, self.global_dir)
-        router = self._make_router(
-            memory, commands, skills, ConsoleUI(), env.workspace_dir, tracer, turns
-        )
-        tracer.compact = True
-
-        self._print_session_banner(env)
-        max_steps_per_turn = 30
-        pending_turn = self._submit(router, initial_instruction)
-        if pending_turn == EXIT:
-            env.teardown()
-            return
-
-        try:
-            while True:
-                if pending_turn == TURN:
-                    pending_turn = self._run_pending_turn(
-                        loop, tracer, turns, max_steps_per_turn
-                    )
-
-                self._print_context_footer(memory)
-                try:
-                    user_input = input("👤 You: ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    print("\nSession interrupted.")
-                    break
-
-                if not user_input:
-                    continue
-                pending_turn = self._submit(router, user_input)
-                if pending_turn == EXIT:
-                    break
-
-            self._finalize_session(env, tracer, run_dir)
-        finally:
-            env.teardown()
-
-    def _submit(self, router: CommandRouter, user_input: str | None) -> str:
-        """Dispatches one line of input; returns the resulting action."""
-        if not user_input or not user_input.strip():
-            return SKIP
-        return router.dispatch(user_input)
-
-    def _run_pending_turn(
-        self,
-        loop: AgentLoop,
-        tracer: Tracer,
-        turns: TurnState,
-        max_steps: int,
-    ) -> str:
-        """Executes the queued agent turn and returns the action to take next."""
-        outcome = run_steps(
-            self.model,
-            loop,
-            tracer,
-            turns.step_index,
-            max_steps,
-            max_retries=self.max_step_retries,
-            retry_delay=self.step_retry_delay,
-        )
-        turns.step_index = outcome.next_step
-        if not outcome.finished and outcome.reason == MAX_STEPS_EXCEEDED:
-            print(f"\n⚠️ Reached safety limit of {max_steps} steps for this turn. Returning to prompt.\n")
-        return SKIP
+        """Interactive multi-turn session (launches full-screen TUI)."""
+        self.run_tui(initial_instruction=initial_instruction, task_id=task_id, resume=resume)
 
     def run_tui(
         self,
         initial_instruction: str | None = None,
-        task_id: str = "tui_session",
+        task_id: str = "interactive_session",
         resume: bool | str | Path | None = None,
     ) -> None:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
@@ -850,7 +741,7 @@ class Harness:
         tui = CursesTUI(state)
         ui = TuiUI(state, redraw=lambda: tui.draw(tui.stdscr) if tui.stdscr else None)
         router = self._make_router(
-            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=False
+            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=True
         )
         runner = TuiTurnRunner(
             model=self.model,
@@ -862,6 +753,7 @@ class Harness:
             cache_stats=self.get_cache_stats,
             step_index=turns.step_index,
         )
+        router.ctx.runner = runner
 
         def on_user_submit(user_text: str) -> None:
             """Handles one submitted line, running a turn when a prompt was queued."""

@@ -293,7 +293,7 @@ class HttpChatModel(UsageTelemetry):
         }
         if self.reasoning_effort and self.reasoning_format != "none":
             effort = self.reasoning_effort.lower()
-            if effort in ("low", "medium", "high"):
+            if effort in ("low", "medium", "high", "xhigh", "max"):
                 payload["reasoning_effort"] = effort
                 if self.reasoning_format == "openrouter":
                     payload["reasoning"] = {"effort": effort}

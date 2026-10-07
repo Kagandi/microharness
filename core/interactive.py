@@ -68,26 +68,26 @@ class SessionUI(Protocol):
         """Renders the context report in this frontend's preferred shape."""
 
 
-class ConsoleUI:
-    """Print-based sink for the plain-text session."""
+class NullUI:
+    """Headless no-op sink for headless dispatching."""
 
     def info(self, text: str) -> None:
-        print(f"\n{text}\n")
+        pass
 
     def success(self, text: str) -> None:
-        print(f"\n✅ {text}\n")
+        pass
 
     def error(self, text: str) -> None:
-        print(f"\n❌ {text}\n")
+        pass
 
     def status(self, text: str) -> None:
-        print(text)
+        pass
 
     def echo(self, text: str) -> None:
-        """A terminal already echoes typed input."""
+        pass
 
     def refresh(self) -> None:
-        """Nothing to refresh on a plain-text console."""
+        pass
 
     def render_context(
         self, stats: dict[str, Any], reasoning: str | None, cache: dict[str, Any]
@@ -145,6 +145,7 @@ class CommandContext:
     skills: dict[str, Skill] = field(default_factory=dict)
     tracer: Tracer | None = None
     turns: TurnState = field(default_factory=TurnState)
+    runner: Any = None
 
 
 @dataclass(frozen=True)
@@ -510,8 +511,18 @@ class CommandRouter:
             self.ctx.ui.status("Tip: Type /model <name|number> to switch active model.")
             return SKIP
 
-        ok, message, _ = self.ctx.harness.switch_model(arg)
-        (self.ctx.ui.success if ok else self.ctx.ui.error)(message)
+        ok, message, new_model = self.ctx.harness.switch_model(arg)
+        if ok:
+            self.ctx.ui.success(message)
+            state = getattr(self.ctx.ui, "state", None)
+            if state is not None:
+                state.model_name = self.ctx.harness.active_model_name()
+                state.provider_name = getattr(new_model, "provider", "") or ""
+            runner = getattr(self.ctx, "runner", None)
+            if runner is not None:
+                runner.model = new_model
+        else:
+            self.ctx.ui.error(message)
         self.ctx.ui.refresh()
         return SKIP
 
@@ -577,6 +588,9 @@ class CommandRouter:
             )
         else:
             self.ctx.ui.success("🧠 Reasoning effort disabled (off) for subsequent turns.")
+        state = getattr(self.ctx.ui, "state", None)
+        if state is not None:
+            state.reasoning = effort.upper() if effort else ""
         self.ctx.ui.refresh()
         return SKIP
 
@@ -600,6 +614,9 @@ class CommandRouter:
             )
         else:
             self.ctx.ui.success("⚡ Prompt caching disabled for subsequent turns.")
+        state = getattr(self.ctx.ui, "state", None)
+        if state is not None:
+            state.cache_ttl = ttl.upper() if ttl else ""
         self.ctx.ui.refresh()
         return SKIP
 

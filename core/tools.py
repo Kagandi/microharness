@@ -24,7 +24,8 @@ class Tool(Protocol):
         ...
 
 
-DEFAULT_MAX_TOOL_CHARS = 2000
+DEFAULT_MAX_TOOL_TOKENS = 8000
+DEFAULT_MAX_TOOL_CHARS = DEFAULT_MAX_TOOL_TOKENS * 4  # 32,000 chars (~8,000 tokens)
 
 
 def format_tool_output(

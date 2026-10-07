@@ -829,13 +829,13 @@ class TestTUI(unittest.TestCase):
         ret = tui.handle_key("\n", dummy_submit)
         self.assertFalse(ret)
 
-    def test_escape_exits_only_on_empty_prompt(self):
-        """Invariant: Esc exits on an empty prompt, but never eats typed text or a menu."""
+    def test_escape_never_exits_on_empty_prompt(self):
+        """Invariant: Esc never terminates the session on an empty prompt; it clears input or dismisses menus."""
         state = TUIState(title="t")
         tui = CursesTUI(state)
-        self.assertFalse(
+        self.assertTrue(
             tui.handle_key(27, lambda _t: None),
-            "Esc on an empty prompt should terminate the session",
+            "Esc on an empty prompt must keep the session alive",
         )
 
         state = TUIState(title="t")
@@ -949,6 +949,28 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(len(m), 1)
         self.assertEqual(m[0][0], "/deploy-tool")
         self.assertEqual(m[0][1], "Custom command [workspace]")
+
+    def test_reasoning_subcommand_autocomplete_and_draw(self):
+        """Invariant: /reasoning offers levels popup menu and draws title."""
+        state = TUIState()
+        state.input_buffer = "/reasoning "
+        matches = state.get_matching_commands()
+        self.assertGreaterEqual(len(matches), 5)
+        names = [cmd for cmd, _ in matches]
+        self.assertIn("/reasoning off", names)
+        self.assertIn("/reasoning low", names)
+        self.assertIn("/reasoning medium", names)
+        self.assertIn("/reasoning high", names)
+        self.assertIn("/reasoning xhigh", names)
+        self.assertIn("/reasoning max", names)
+
+        # Curses drawing renders 'Reasoning / Thinking Effort' header
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+        header_calls = [c for c in mock_stdscr.addstr.call_args_list if "Reasoning / Thinking Effort" in str(c)]
+        self.assertGreaterEqual(len(header_calls), 1)
 
     def test_inline_markdown_parsing_and_styling(self):
         """Invariant: parse_inline_segments correctly classifies bold, italic, code, and preserves snake_case."""

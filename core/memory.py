@@ -13,12 +13,18 @@ class Memory:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_context_chars: int = 15000,
+        max_context_chars: int | None = None,
+        max_context_tokens: int | None = None,
         trigger_ratio: float = 0.80,
         keep_recent_turns: int = 4,
     ):
         self.system_prompt = system_prompt
-        self.max_context_chars = max_context_chars
+        if max_context_tokens is not None:
+            self.max_context_chars = max_context_tokens * 4
+        elif max_context_chars is not None:
+            self.max_context_chars = max_context_chars
+        else:
+            self.max_context_chars = 256000
         self.trigger_ratio = trigger_ratio
         self.keep_recent_turns = keep_recent_turns
         self.messages: list[Message] = []
@@ -85,9 +91,11 @@ class Memory:
             "total_chars": chars,
             "estimated_tokens": chars // 4,
             "max_context_chars": self.max_context_chars,
+            "max_context_tokens": self.max_context_chars // 4,
             "max_estimated_tokens": self.max_context_chars // 4,
             "trigger_ratio": self.trigger_ratio,
             "trigger_threshold_chars": trigger_threshold,
+            "trigger_threshold_tokens": trigger_threshold // 4,
             "usage_pct": pct,
             "modified_files": sorted(self.modified_files),
             "by_role": {
