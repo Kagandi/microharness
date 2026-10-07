@@ -1,12 +1,9 @@
-"""Interactive command routing shared by the CLI session and the TUI.
+"""Interactive command routing for microharness.
 
-Both frontends answer the same questions (``/model``, ``/resume``, ``/compact``,
-``/skill``, ...) and differ only in how they render. A handler therefore does
-the work and reports through a :class:`SessionUI` sink, and the router returns
-one of three actions for the caller to act on.
-
-This is what keeps the two frontends from drifting: adding a command means one
-handler, not two.
+Handlers process slash commands (``/model``, ``/resume``, ``/compact``,
+``/skill``, ...) and report through a :class:`SessionUI` sink, returning
+one of three actions for the caller to act on (:data:`EXIT`, :data:`TURN`, or
+:data:`SKIP`).
 """
 
 from __future__ import annotations
@@ -30,11 +27,9 @@ EXIT = "exit"
 TURN = "turn"
 SKIP = "skip"
 
-CHARS_PER_TOKEN = 4
-
 REASONING_USAGE = (
     "  • Usage: /reasoning low | /reasoning medium | /reasoning high | "
-    "/reasoning off | /reasoning <tokens>"
+    "/reasoning xhigh | /reasoning max | /reasoning off | /reasoning <tokens>"
 )
 CACHE_USAGE = "  • Usage: /cache 5m | /cache 1h | /cache off"
 
@@ -385,7 +380,7 @@ def render_context_breakdown(
     reasoning: str | None,
     cache: dict[str, Any],
 ) -> list[str]:
-    """Renders the multi-line context report used by the plain-text session."""
+    """Renders the detailed multi-line context report."""
     roles = stats["by_role"]
     lines = [
         "📊 Context Breakdown:",
@@ -482,9 +477,9 @@ class CommandRouter:
 
     def _cmd_compact(self, _arg: str) -> str:
         memory = self.ctx.memory
-        before = memory.total_chars() // CHARS_PER_TOKEN
+        before = memory.estimated_tokens()
         compacted = memory.compact_if_needed(force=True)
-        after = memory.total_chars() // CHARS_PER_TOKEN
+        after = memory.estimated_tokens()
 
         if compacted:
             self.ctx.ui.info(

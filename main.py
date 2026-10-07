@@ -247,7 +247,7 @@ def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reasoning",
         default=None,
-        help="Reasoning/thinking effort level: 'low', 'medium', 'high', numeric token budget, or 'off' (env: REASONING_EFFORT or config.json)",
+        help="Reasoning/thinking effort level: 'low', 'medium', 'high', 'xhigh', 'max', numeric token budget, or 'off' (env: REASONING_EFFORT or config.json)",
     )
 
 

@@ -170,7 +170,7 @@ class TestRouterDispatch(RouterTestCase):
     def test_compact_reports_freed_tokens(self):
         """Invariant: a compaction that did work reports how much context it freed."""
         with patch.object(Memory, "compact_if_needed", return_value=True), patch.object(
-            Memory, "total_chars", side_effect=[8000, 4000]
+            Memory, "estimated_tokens", side_effect=[2000, 1000]
         ):
             self.assertEqual(self.router.dispatch("/compact"), SKIP)
         self.assertIn("freed ~1,000 tokens", self.ui.all_text)

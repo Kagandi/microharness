@@ -217,19 +217,14 @@ class HarnessConfig:
         cache_ttl = c.pick("cache_ttl", self.cache_ttl, str, "5m")
         reasoning = c.pick("reasoning_effort", self.reasoning_effort, str, None)
 
-        tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, None)
-        if tool_tok is None:
-            legacy_tool_chars = c.pick("max_tool_chars", None, int, None)
-            tool_tok = legacy_tool_chars // 4 if legacy_tool_chars else DEFAULT_MAX_TOOL_TOKENS
+        tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, DEFAULT_MAX_TOOL_TOKENS)
 
         context_tok = (
             c.pick("max_context_tokens", self.max_context_tokens, int, None)
             or c.pick("max_tokens", None, int, None)
             or c.pick("context_tokens", None, int, None)
+            or 64000
         )
-        if context_tok is None:
-            legacy_context_chars = c.pick("max_context_chars", None, int, None)
-            context_tok = legacy_context_chars // 4 if legacy_context_chars else 64000
 
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, bool, False),

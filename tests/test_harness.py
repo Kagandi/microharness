@@ -6,13 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from core.commands import Command
+from core.commands import Command, discover_commands, expand_command
 from core.environment import Environment
 from core.evaluator import FileContentEvaluator
 from core.harness import (
     Harness,
-    _discover_commands,
-    _expand_command,
     load_global_config,
     load_project_config,
 )
@@ -624,7 +622,7 @@ class TestHarnessIntegration(unittest.TestCase):
             "# Run All Tests\nExecute full test suite", encoding="utf-8"
         )
 
-        cmds = _discover_commands(workspace=project_dir, global_dir=global_dir)
+        cmds = discover_commands(workspace=project_dir, global_dir=global_dir)
 
         # Invariant 1: explain is discovered from global scope
         self.assertIn("explain", cmds)
@@ -646,23 +644,23 @@ class TestHarnessIntegration(unittest.TestCase):
     def test_expand_command_placeholders(self):
         # 1. $ARGUMENTS substitution
         t1 = "Review changes in $ARGUMENTS carefully."
-        self.assertEqual(_expand_command(t1, "auth.py"), "Review changes in auth.py carefully.")
+        self.assertEqual(expand_command(t1, "auth.py"), "Review changes in auth.py carefully.")
 
         # 2. {args} substitution
         t2 = "Run test suite on {args}."
         self.assertEqual(
-            _expand_command(t2, "tests/test_harness.py"), "Run test suite on tests/test_harness.py."
+            expand_command(t2, "tests/test_harness.py"), "Run test suite on tests/test_harness.py."
         )
 
         # 3. Trailing append when no placeholder is present
         t3 = "Run all benchmarks."
         self.assertEqual(
-            _expand_command(t3, "--quick"),
+            expand_command(t3, "--quick"),
             "Run all benchmarks.\n\nAdditional Arguments / Target:\n--quick",
         )
 
         # 4. Empty arguments returns trimmed template
-        self.assertEqual(_expand_command(t3, "   "), "Run all benchmarks.")
+        self.assertEqual(expand_command(t3, "   "), "Run all benchmarks.")
 
     def test_custom_command_execution_in_batch_mode(self):
         project_dir = Path(tempfile.mkdtemp(prefix="batch_cmd_")).resolve()
@@ -975,7 +973,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertIn("Run ruff and check all types.", skill_content)
 
         # Verify commands discovery includes .microharness/commands
-        cmds = _discover_commands(workspace=project_dir)
+        cmds = discover_commands(workspace=project_dir)
         self.assertIn("test", cmds)
         self.assertEqual(cmds["test"].description, "Run Tests Fast")
         self.assertEqual(cmds["test"].scope, "project")
@@ -1089,7 +1087,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(result.score, 1.0)
 
     def test_skills_frontmatter_description_summary(self):
-        from core.harness import _discover_skills_index, discover_skills
+        from core.skills import discover_skills, render_skills_index
 
         workspace = Path(tempfile.mkdtemp(prefix="ws_frontmatter_"))
         skill_dir = workspace / ".microharness" / "skills" / "my-linter"
@@ -1099,7 +1097,7 @@ class TestHarnessIntegration(unittest.TestCase):
             encoding="utf-8",
         )
 
-        index = _discover_skills_index(discover_skills(workspace, global_dir=None))
+        index = render_skills_index(discover_skills(workspace, global_dir=None))
         self.assertIn("Comprehensive code style checks", index)
         self.assertNotIn(": --- (read", index)
 
@@ -1190,7 +1188,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(step0_calls[0]["name"], "bash")
 
     def test_skills_frontmatter_block_scalar_summary(self):
-        from core.harness import _extract_skill_summary
+        from core.skills import extract_skill_summary
 
         # Test folded scalar (>)
         content_folded = (
@@ -1203,7 +1201,7 @@ class TestHarnessIntegration(unittest.TestCase):
             "---\n"
             "# My Skill\n"
         )
-        summary_folded = _extract_skill_summary(content_folded, default="fallback")
+        summary_folded = extract_skill_summary(content_folded, default="fallback")
         self.assertEqual(
             summary_folded,
             "This is a multiline description folded into one line summary.",
@@ -1219,14 +1217,14 @@ class TestHarnessIntegration(unittest.TestCase):
             "---\n"
             "# My Skill 2\n"
         )
-        summary_literal = _extract_skill_summary(content_literal, default="fallback")
+        summary_literal = extract_skill_summary(content_literal, default="fallback")
         self.assertEqual(
             summary_literal,
             "First line of description. Second line of description.",
         )
 
     def test_skills_frontmatter_leading_blank_lines(self):
-        from core.harness import _extract_skill_summary
+        from core.skills import extract_skill_summary
 
         content_leading_blank = (
             "\n"
@@ -1237,7 +1235,7 @@ class TestHarnessIntegration(unittest.TestCase):
             "---\n"
             "# Heading\n"
         )
-        summary = _extract_skill_summary(content_leading_blank, default="fallback")
+        summary = extract_skill_summary(content_leading_blank, default="fallback")
         self.assertEqual(summary, "Summary should be extracted despite leading blanks")
         self.assertNotIn("description:", summary)
         self.assertNotIn("---", summary)
@@ -1765,7 +1763,7 @@ def get_tools(env=None):
 
     def test_skill_command_discovery_and_activation(self):
         """Invariant: /skill discovers available skills, lists them, and activates them into conversation context."""
-        from core.harness import _discover_skills, _resolve_skill_command
+        from core.skills import discover_skills, resolve_skill_command
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -1795,7 +1793,7 @@ def get_tools(env=None):
             (g_skill2 / "SKILL.md").write_text("# Global Deploy\nGlobal instructions.\n", encoding="utf-8")
 
             # 3. Discovery with shadowing
-            discovered = _discover_skills(ws_dir, g_dir)
+            discovered = discover_skills(ws_dir, g_dir)
             self.assertEqual(len(discovered), 2)
             self.assertIn("deploy-tool", discovered)
             self.assertIn("my-linter", discovered)
@@ -1812,8 +1810,8 @@ def get_tools(env=None):
             self.assertEqual(global_skill.summary, "Linter")
             self.assertIn("Run ruff", global_skill.content)
 
-            # 4. _resolve_skill_command: listing mode
-            outcome = _resolve_skill_command("/skill", discovered)
+            # 4. resolve_skill_command: listing mode
+            outcome = resolve_skill_command("/skill", discovered)
             self.assertEqual(outcome.action, "skip")
             self.assertFalse(outcome.is_error)
             self.assertIsNone(outcome.prompt)
@@ -1822,8 +1820,8 @@ def get_tools(env=None):
             self.assertIn("[project]", outcome.message)
             self.assertIn("[global]", outcome.message)
 
-            # 5. _resolve_skill_command: activation by name without instruction
-            outcome = _resolve_skill_command("/skill deploy-tool", discovered)
+            # 5. resolve_skill_command: activation by name without instruction
+            outcome = resolve_skill_command("/skill deploy-tool", discovered)
             self.assertEqual(outcome.action, "turn")
             self.assertFalse(outcome.is_error)
             self.assertEqual(outcome.message, "Activated skill: deploy-tool [project]")
@@ -1834,25 +1832,25 @@ def get_tools(env=None):
                 outcome.prompt,
             )
 
-            # 6. _resolve_skill_command: activation with task instruction
-            outcome = _resolve_skill_command("/skill deploy-tool deploy to staging", discovered)
+            # 6. resolve_skill_command: activation with task instruction
+            outcome = resolve_skill_command("/skill deploy-tool deploy to staging", discovered)
             self.assertEqual(outcome.action, "turn")
             self.assertIn("Task:\ndeploy to staging", outcome.prompt)
 
-            # 7. _resolve_skill_command: activation by number
+            # 7. resolve_skill_command: activation by number
             sorted_keys = sorted(discovered.keys())
             first_skill = sorted_keys[0]
-            outcome = _resolve_skill_command("/skill 1 run task", discovered)
+            outcome = resolve_skill_command("/skill 1 run task", discovered)
             self.assertEqual(outcome.action, "turn")
             self.assertIn(f"[Active Skill: {first_skill}]", outcome.prompt)
 
-            # 8. _resolve_skill_command: error cases
-            outcome = _resolve_skill_command("/skill nonexistent", discovered)
+            # 8. resolve_skill_command: error cases
+            outcome = resolve_skill_command("/skill nonexistent", discovered)
             self.assertEqual(outcome.action, "skip")
             self.assertTrue(outcome.is_error)
             self.assertIn("Skill 'nonexistent' not found", outcome.message)
 
-            outcome = _resolve_skill_command("/skill 99", discovered)
+            outcome = resolve_skill_command("/skill 99", discovered)
             self.assertEqual(outcome.action, "skip")
             self.assertTrue(outcome.is_error)
             self.assertIn("Invalid skill number 99", outcome.message)
@@ -2500,30 +2498,6 @@ class ProjectWeather:
             # Invariant: step_idx strictly pinned to total_steps + 1 (3 + 1 = 4)
             self.assertEqual(step_holder[0], 4)
 
-    def test_print_context_footer_compact_format(self):
-        """Invariant: Context footer uses compact k/M formatting without message count."""
-        from unittest.mock import patch
-
-        from core.memory import Memory
-
-        harness = Harness(model=MockModel([("Done", [])]), verbose=False)
-        memory = Memory(system_prompt="sys", user_prompt="user", max_context_tokens=8000)
-        # 1420 tokens in an 8000 token window (8000 tokens)
-        memory.total_chars = lambda: 1420 * 4
-
-        with patch("builtins.print") as mock_print:
-            harness._print_context_footer(memory)
-            mock_print.assert_called_once()
-            output = mock_print.call_args[0][0]
-            self.assertIn("Context: 1.4k / 8k (17.8%)", output)
-            self.assertNotIn("Messages:", output)
-            self.assertNotIn("chars", output)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCliContext(unittest.TestCase):
     """main.py's resolved-context plumbing."""
 
@@ -2610,3 +2584,7 @@ class TestCliContext(unittest.TestCase):
 
         context = self._context(args=argparse.Namespace(benchmark=None, demo=None))
         self.assertFalse(_dispatch_benchmark(context))
+
+
+if __name__ == "__main__":
+    unittest.main()

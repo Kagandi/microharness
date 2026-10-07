@@ -320,11 +320,11 @@ while not done:
   * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, reconstructed messages, and patch diff.
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
-* **One Command Table, Two Frontends**: the plain-text session and the full-screen TUI answer the
-  same `/`-commands and differ only in presentation. `core/interactive.py` holds the command table
-  and the handlers; each frontend supplies a `SessionUI` sink (`ConsoleUI` prints, `TuiUI` writes to
-  `TUIState`). Handlers perform the work and report through the sink, then return one of `exit`,
-  `turn`, or `skip`. A command is added once, not once per frontend.
+* **Unified Command Dispatch & TUI Sink**: interactive mode runs in a full-screen curses TUI (`core/tui.py`).
+  `core/interactive.py` holds the command table and handlers decoupled from terminal rendering via a
+  `SessionUI` sink (`TuiUI` writes to `TUIState`). Handlers perform the work and report through the sink,
+  then return one of `exit`, `turn`, or `skip`. A command is added once and automatically integrates with
+  autocomplete, routing, and `/help`.
   * A `CommandSpec` is the single source of truth for a command: its `names` drive routing, its
     `usage` and `description` drive `/help`, and `core/tui.py` derives its autocomplete catalog
     from the same specs. The menu therefore cannot offer fewer commands than the router executes.

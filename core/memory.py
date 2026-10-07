@@ -72,12 +72,16 @@ class Memory:
         """Records a file path modified during this session."""
         self.modified_files.add(path)
 
+    def estimated_tokens(self) -> int:
+        """Estimates total tokens currently held in memory (~4 chars per token)."""
+        return sum(len(m.content) for m in self.messages) // 4
+
     def total_chars(self) -> int:
         return sum(len(m.content) for m in self.messages)
 
     def stats(self) -> dict[str, Any]:
         """Returns diagnostic metrics on memory and context budget."""
-        tokens = self.total_chars() // 4
+        tokens = self.estimated_tokens()
         pct = round((tokens / self.max_context_tokens) * 100, 1) if self.max_context_tokens else 0.0
         trigger_threshold = int(self.max_context_tokens * self.trigger_ratio)
         return {
@@ -165,7 +169,7 @@ class Memory:
             True if any messages were compacted, False otherwise.
         """
         threshold_tokens = int(self.max_context_tokens * self.trigger_ratio)
-        if not force and (self.total_chars() // 4) <= threshold_tokens:
+        if not force and self.estimated_tokens() <= threshold_tokens:
             return False
 
         safe_prefix_count = sum(1 for m in self.messages[:2] if m.role in ("system", "user"))

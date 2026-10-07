@@ -183,11 +183,6 @@ class TestHarnessConfigCascade(unittest.TestCase):
             self._resolve(HarnessConfig(cache_ttl="17m"))
         self.assertIn("Unsupported cache TTL", str(ctx.exception))
 
-    def test_legacy_char_configs_convert_to_tokens(self):
-        """Invariant: legacy character limits in config files convert to tokens at 4 chars per token."""
-        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000, "max_context_chars": 40000})
-        self.assertEqual(cfg.max_tool_tokens, 1000)
-        self.assertEqual(cfg.max_context_tokens, 10000)
 
 
 class TestProjectToolTrust(unittest.TestCase):

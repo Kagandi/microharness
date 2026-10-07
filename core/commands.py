@@ -4,8 +4,7 @@ A command is a Markdown file whose body is a prompt template. ``$ARGUMENTS`` /
 ``{args}`` are substituted, otherwise trailing input is appended as context.
 
 :func:`resolve_slash_input` is the single place that turns a leading-slash user
-input into a prompt, shared by batch runs, the CLI session, and the TUI so the
-three frontends cannot drift apart.
+input into a prompt, shared across batch runs and interactive sessions.
 """
 
 from __future__ import annotations

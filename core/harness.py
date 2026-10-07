@@ -39,7 +39,7 @@ from core.interactive import (
     TurnState,
 )
 from core.loop import AgentLoop
-from core.memory import Memory, format_compact_num
+from core.memory import Memory
 from core.model import (
     CacheAwareModel,
     DeadlineAwareModel,
@@ -64,7 +64,6 @@ from core.skills import (
     SkillCommandResult,
     compose_skill_prompt,
     discover_skills,
-    extract_skill_summary,
     render_skills_index,
     resolve_skill_command,
 )
@@ -77,13 +76,12 @@ from core.tools import (
     WriteFileTool,
     discover_tool_plugins,
 )
-from core.tracer import ActionFormatter, Tracer, _dim
+from core.tracer import ActionFormatter, Tracer
 from core.tui_session import TuiTurnRunner, replay_messages
 from core.types import EvalResult, Message, RunResult, Task
 from core.usage import summarize_run_usage
 
 __all__ = [
-    "DEFAULT_GLOBAL_DIR",
     "Command",
     "Harness",
     "Skill",
@@ -103,19 +101,7 @@ __all__ = [
 ]
 
 
-DEFAULT_GLOBAL_DIR = get_default_global_dir()
-
-
 EMPTY_SPEC_ERROR = "Model specification cannot be empty."
-
-# Skill and command discovery moved to core/skills.py and core/commands.py. These
-# aliases keep the historical import paths working for the CLI and tests.
-_discover_skills = discover_skills
-_discover_skills_index = render_skills_index
-_extract_skill_summary = extract_skill_summary
-_discover_commands = discover_commands
-_expand_command = expand_command
-_resolve_skill_command = resolve_skill_command
 
 
 class Harness:
@@ -678,29 +664,6 @@ class Harness:
         if step_holder is not None:
             step_holder[0] = turns.step_index
         return action
-
-    def _restore_session(self, memory: Memory, resume: bool | str | Path | None) -> int:
-        """Restores a previous session into memory, returning the step index to resume at."""
-        if not resume:
-            return 1
-        messages, meta = self.load_session(None if resume is True else resume)
-        if not messages:
-            print(f"\n⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh session.\n")
-            return 1
-        memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
-        step_index = meta.get("total_steps", 0) + 1
-        print(
-            f"\n🔄 Resumed session '{meta.get('run_id')}' "
-            f"({len(messages)} messages loaded, continuing at step {step_index}).\n"
-        )
-        return step_index
-
-    def _print_context_footer(self, memory: Memory) -> None:
-        """Prints the compact context usage footer shown before each prompt."""
-        stats = memory.stats()
-        used = format_compact_num(stats["estimated_tokens"])
-        total = format_compact_num(stats["max_estimated_tokens"])
-        print(_dim(f"─── 📊 Context: {used} / {total} ({stats['usage_pct']}%) ───"))
 
     def run_interactive(
         self,

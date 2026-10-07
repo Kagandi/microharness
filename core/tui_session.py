@@ -1,8 +1,8 @@
 """Running an agent turn inside the full-screen TUI.
 
-The plain-text session delegates to :func:`core.session.run_steps`; the TUI
-cannot, because it must stay responsive and redraw between steps. This module
-holds that TUI-specific loop: step rendering, the cooperative cancel probe, and
+The TUI maintains its own turn loop because it must stay responsive, probe
+for cooperative cancellation, and redraw between individual steps. This module
+holds that TUI-specific runner: step rendering, cancellation probes, and
 turn abort handling.
 """
 
