@@ -11,6 +11,7 @@ Settings resolve through a single precedence chain (highest first):
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -172,6 +173,17 @@ def resolve_project_tool_trust(
     return trusted, claimed
 
 
+def _warn_legacy_char_keys(merged: Mapping[str, Any]) -> None:
+    """Emits a one-line stderr warning for removed char-based keys."""
+    phrases = []
+    if "max_tool_chars" in merged:
+        phrases.append("uses legacy max_tool_chars which is removed; set max_tool_tokens")
+    if "max_context_chars" in merged:
+        phrases.append("uses legacy max_context_chars which is removed; set max_context_tokens")
+    if phrases:
+        print(f"Warning: config {'; '.join(phrases)}.", file=sys.stderr)
+
+
 class _Cascade:
     """Resolves individual settings through explicit > merged config > default."""
 
@@ -222,13 +234,13 @@ class HarnessConfig:
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
         c = _Cascade(layers.merged)
+        _warn_legacy_char_keys(layers.merged)
         cache_ttl = c.pick("cache_ttl", self.cache_ttl, str, "5m")
         reasoning = c.pick("reasoning_effort", self.reasoning_effort, str, None)
 
         tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, None)
         if tool_tok is None:
-            legacy_tool_chars = c.pick("max_tool_chars", None, int, None)
-            tool_tok = legacy_tool_chars // 4 if legacy_tool_chars else DEFAULT_MAX_TOOL_TOKENS
+            tool_tok = DEFAULT_MAX_TOOL_TOKENS
 
         context_tok = (
             c.pick("max_context_tokens", self.max_context_tokens, int, None)
@@ -236,8 +248,7 @@ class HarnessConfig:
             or c.pick("context_tokens", None, int, None)
         )
         if context_tok is None:
-            legacy_context_chars = c.pick("max_context_chars", None, int, None)
-            context_tok = legacy_context_chars // 4 if legacy_context_chars else 64000
+            context_tok = 64000
 
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, bool, False),
