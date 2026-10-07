@@ -527,16 +527,14 @@ class TestTUI(unittest.TestCase):
         self.assertIn("openrouter/deepseek", status_str)
         self.assertIn("reasoning: MEDIUM", status_str)
 
-    def test_cli_tui_flag_parsing(self):
-        """Invariant: --tui flag is parsed properly in main CLI argument parser."""
+    def test_cli_defaults_to_interactive(self):
+        """Invariant: default CLI arguments parse without requiring flags."""
         from main import _build_arg_parser
 
         parser = _build_arg_parser()
-        args_with_tui = parser.parse_args(["--tui"])
-        self.assertTrue(args_with_tui.tui)
-
-        args_default = parser.parse_args([])
-        self.assertFalse(args_default.tui)
+        args = parser.parse_args([])
+        self.assertFalse(args.batch)
+        self.assertIsNone(args.instruction)
 
     def test_harness_run_tui_headless_flow(self):
         """Invariant: Harness.run_tui initializes TUIState, runs user callbacks, and teardown succeeds."""

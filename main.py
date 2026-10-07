@@ -196,11 +196,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Run single one-shot task and exit immediately without entering interactive chat",
     )
     parser.add_argument(
-        "--tui",
-        action="store_true",
-        help="Launch interactive mode in full-screen TUI (default)",
-    )
-    parser.add_argument(
         "--resume",
         nargs="?",
         const=True,

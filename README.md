@@ -243,9 +243,8 @@ uv run pytest
 
 ### 3. Interactive and TUI Sessions
 ```bash
-# Launch interactive mode (or full-screen TUI with --tui):
+# Launch interactive mode (full-screen TUI):
 uv run microharness
-uv run microharness --tui
 
 # Resume previous interactive session:
 uv run microharness --resume
