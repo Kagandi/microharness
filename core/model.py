@@ -357,7 +357,17 @@ class HttpChatModel(UsageTelemetry):
             if headers:
                 base_headers.update(headers)
             secrets = self._secrets_for_attempt()
-            if self.auth_scheme == "bearer" and not secrets.get("api_key"):
+            # Fail closed: every non-local request is signed, so a bearer
+            # client without a key raises instead of sending an unsigned
+            # request. Local endpoints (the Connection.is_local substrings)
+            # keep their legacy keyless behavior.
+            endpoint_lower = (self.endpoint or "").lower()
+            is_local = (
+                "localhost" in endpoint_lower
+                or "127.0.0.1" in endpoint_lower
+                or "::1" in endpoint_lower
+            )
+            if is_local:
                 signed_headers = base_headers
             else:
                 signed_headers = get_signer(self.auth_scheme).sign(

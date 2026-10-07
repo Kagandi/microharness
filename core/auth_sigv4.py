@@ -88,7 +88,12 @@ def sigv4_headers(
     canonical_uri = urllib.parse.quote(parts.path or "/", safe="/-_.~")
     canonical_query = _canonical_query_string(parts.query)
 
-    signed = {str(k).lower(): str(v).strip() for k, v in dict(headers).items()}
+    # Reserved stamp keys are dropped case-insensitively first, so a stale
+    # "Host"/"X-Amz-Date"/"X-Amz-Security-Token" (any casing) can neither
+    # duplicate the stamped headers nor leak into the signature.
+    reserved = ("host", "x-amz-date", "x-amz-security-token")
+    clean = {k: v for k, v in dict(headers).items() if str(k).lower() not in reserved}
+    signed = {str(k).lower(): str(v).strip() for k, v in clean.items()}
     signed.setdefault("host", host)
     signed["x-amz-date"] = amz_date
     if session_token:
@@ -119,7 +124,7 @@ def sigv4_headers(
     ).hexdigest()
 
     return {
-        **dict(headers),
+        **clean,
         "host": signed["host"],
         "x-amz-date": amz_date,
         **({"x-amz-security-token": session_token} if session_token else {}),
@@ -323,7 +328,7 @@ def _credentials_from_sso(profile: str) -> dict | None:
             with urllib.request.urlopen(request, timeout=_SSO_TIMEOUT_S) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except Exception:
-            return None
+            continue
         try:
             role = payload["roleCredentials"]
             return {
@@ -332,7 +337,7 @@ def _credentials_from_sso(profile: str) -> dict | None:
                 "session_token": role.get("sessionToken"),
             }
         except (KeyError, TypeError):
-            return None
+            continue
     return None
 
 

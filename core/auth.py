@@ -133,11 +133,19 @@ def _normalize(name: str) -> str:
     return name.lower()
 
 
-def register_scheme(name: str, signer: RequestSigner) -> None:
-    """Registers a signer under ``name`` (case-insensitive)."""
+def register_scheme(name: str, signer: RequestSigner, force: bool = False) -> None:
+    """Registers a signer under ``name`` (case-insensitive).
+
+    Built-in names (``none``/``bearer``/``header``/``sigv4``) are refused
+    unless ``force=True``, so a third-party call cannot silently replace a
+    Tier 1 scheme. The plugin loader never passes ``force``: it warns and
+    skips collisions instead.
+    """
     key = _normalize(name)
     if not hasattr(signer, "sign") or not callable(signer.sign):
         raise TypeError("signer must provide a callable sign() method")
+    if key in _BUILTIN_NAMES and not force:
+        raise ValueError(f"cannot override built-in auth scheme {key!r} without force=True")
     _REGISTRY[key] = signer
 
 

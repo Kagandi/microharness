@@ -697,6 +697,7 @@ def main(argv: list[str] | None = None) -> None:
             model=getattr(context.model, "model", "unknown"),
             auth_scheme=getattr(context.model, "auth_scheme", "bearer") or "bearer",
             auth_options=dict(getattr(context.model, "auth_options", None) or {}),
+            auth_error=getattr(context.model, "auth_error", None),
         )
         if isinstance(context.model, HttpChatModel)
         else Connection()

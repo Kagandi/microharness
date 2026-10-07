@@ -9,6 +9,7 @@ mapping — against those layers and instantiates the client.
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import os
 import sys
@@ -16,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.auth import resolve_auth
+from core.auth import get_signer, resolve_auth
 from core.auth_sigv4 import resolve_aws_credentials, resolve_aws_region
 from core.config import read_jsonc
 from core.protocols import Model
@@ -119,11 +120,13 @@ def load_provider_registry(
 
     # Migration backfill: a user copy predating a new built-in key (e.g. the
     # bedrock ``auth`` block) gains the ABSENT keys. User-set keys always win.
+    # Values are deep-copied so mutating the returned registry (e.g. a nested
+    # ``auth`` dict) can never alias the built-in defaults.
     for name, builtin_profile in builtin_defaults.items():
         merged = registry.get(name)
         if isinstance(merged, dict):
             for key, value in builtin_profile.items():
-                merged.setdefault(key, value)
+                merged.setdefault(key, copy.deepcopy(value))
 
     return registry
 
@@ -389,13 +392,27 @@ class Connection:
         """True when the connection's auth scheme has no usable credentials."""
         if self.is_offline or self.is_local:
             return False
+        if self.auth_scheme == "none":
+            return False
         if self.auth_scheme == "sigv4":
             try:
-                return resolve_aws_credentials() is None
+                profile = None
+                if isinstance(self.auth_options, dict):
+                    profile = self.auth_options.get("aws_profile") or self.auth_options.get(
+                        "profile"
+                    )
+                return resolve_aws_credentials(profile) is None
             except Exception:
                 return True
-        if self.auth_scheme != "bearer":
+        if self.auth_scheme == "header":
+            source = None
+            if isinstance(self.auth_options, dict):
+                source = self.auth_options.get("value_source")
+            if isinstance(source, str) and source.startswith("env:"):
+                return not bool(os.getenv(source[len("env:") :]))
             return False
+        if self.auth_scheme != "bearer":
+            return True
         return not bool(self.api_key)
 
 
@@ -433,8 +450,11 @@ def resolve_connection(
     headers = {**(profile.get("headers") or {}), **(cfg.get("headers") or {})}
     headers.update(request.headers)
 
-    # Auth precedence: spec-dict auth > config auth > profile auth.
-    spec_auth = spec.get("auth") if isinstance(spec, dict) else None
+    # Auth precedence: spec-dict auth > config auth > profile auth. A string
+    # spec may name a config alias whose definition is a dict carrying auth;
+    # the alias-resolved spec is what counts (a raw dict spec is unchanged).
+    resolved_spec = _follow_config_alias(spec, cfg)
+    spec_auth = resolved_spec.get("auth") if isinstance(resolved_spec, dict) else None
     if spec_auth is not None:
         auth_scheme, auth_options = resolve_auth({"auth": spec_auth})
     elif cfg.get("auth") is not None:
@@ -445,6 +465,7 @@ def resolve_connection(
     auth_error: str | None = None
     if auth_scheme == "sigv4":
         aws_profile = _aws_profile_name(cfg)
+        auth_options = {**auth_options, "aws_profile": aws_profile}
         aws_region = resolve_aws_region(cfg)
         print(
             f"SigV4 auth: AWS profile '{aws_profile}', region '{aws_region or 'unset'}'",
@@ -503,13 +524,27 @@ def build_model_from_spec(
         if "{region}" in str(profile.get("endpoint") or ""):
             message += ": a Bedrock endpoint needs a region (set AWS_REGION or 'region' in config)"
         return MockModel([(message, [])])
-    if connection.auth_error:
-        return MockModel([(connection.auth_error, [])])
+    effective_scheme = connection.auth_scheme
+    auth_error = connection.auth_error
+    if connection.auth_scheme == "sigv4" and connection.api_key:
+        print(
+            "SigV4 auth: BEDROCK_API_KEY present, using bearer auth override",
+            file=sys.stderr,
+        )
+        effective_scheme = "bearer"
+        auth_error = None
+    try:
+        get_signer(effective_scheme)
+    except KeyError:
+        raise ValueError(f"unknown auth scheme: {effective_scheme!r}") from None
+    if auth_error:
+        return MockModel([(auth_error, [])])
 
-    if connection.auth_scheme == "sigv4":
-        auth_secrets = resolve_aws_credentials(
-            _aws_profile_name(config or {})
-        ) or {}
+    if effective_scheme == "sigv4":
+        aws_profile = connection.auth_options.get("aws_profile") or _aws_profile_name(
+            config or {}
+        )
+        auth_secrets: dict[str, Any] = resolve_aws_credentials(aws_profile) or {}
         auth_secrets["region"] = resolve_aws_region(config or {})
     elif connection.api_key:
         auth_secrets = {"api_key": connection.api_key}
@@ -526,7 +561,7 @@ def build_model_from_spec(
         reasoning_format=connection.reasoning_format,
         cache_strategy=connection.cache_strategy,
         provider=connection.provider,
-        auth_scheme=connection.auth_scheme,
+        auth_scheme=effective_scheme,
         auth_options=connection.auth_options,
         auth_secrets=auth_secrets,
     )
