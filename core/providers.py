@@ -9,6 +9,7 @@ mapping — against those layers and instantiates the client.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,10 @@ FALLBACK_ENV_KEYS: tuple[str, ...] = (
 
 # Used only when no profile and no config supply a model at all.
 LAST_RESORT_MODEL = "cohere/north-mini-code:free"
+
+# Consulted, in order, when a regional endpoint template (e.g. Bedrock) has no
+# config-supplied region.
+AWS_REGION_ENV_KEYS: tuple[str, ...] = ("AWS_REGION", "AWS_DEFAULT_REGION")
 
 
 def get_builtin_providers_path() -> Path:
@@ -136,15 +141,53 @@ def find_provider_by_endpoint(
     registry: dict[str, dict[str, Any]],
     endpoint: str | None,
 ) -> tuple[str | None, dict[str, Any]]:
-    """Finds the provider profile whose endpoint URL prefixes ``endpoint``."""
+    """Finds the provider profile whose endpoint URL prefixes ``endpoint``.
+
+    A ``{region}`` placeholder in the profile endpoint (Bedrock) matches any
+    concrete region host, so a regional URL is attributed back to the profile.
+    """
     if not endpoint:
         return None, {}
     clean_ep = endpoint.rstrip("/").lower()
     for name, profile in registry.items():
         profile_ep = (profile.get("endpoint") or "").rstrip("/").lower()
-        if profile_ep and (clean_ep == profile_ep or clean_ep.startswith(profile_ep)):
+        if not profile_ep:
+            continue
+        if "{region}" in profile_ep:
+            if fnmatch.fnmatch(clean_ep, profile_ep.replace("{region}", "*")):
+                return name, dict(profile)
+            continue
+        if clean_ep == profile_ep or clean_ep.startswith(profile_ep):
             return name, dict(profile)
     return None, {}
+
+
+def resolve_region(config: dict[str, Any] | None = None) -> str | None:
+    """Resolves the AWS region: config ``region`` first, then the AWS environment."""
+    cfg = config or {}
+    region = cfg.get("region")
+    if not region:
+        for env_key in AWS_REGION_ENV_KEYS:
+            if region := os.getenv(env_key):
+                break
+    region = str(region).strip() if region else None
+    return region or None
+
+
+def _apply_region(
+    endpoint: str | None, config: dict[str, Any] | None = None
+) -> str | None:
+    """Substitutes ``{region}`` in a regional endpoint template.
+
+    Returns ``None`` (offline) when the template cannot be filled, so no caller
+    ever receives a literal ``{region}`` URL.
+    """
+    if not endpoint or "{region}" not in endpoint:
+        return endpoint
+    region = resolve_region(config)
+    if not region:
+        return None
+    return endpoint.replace("{region}", region)
 
 
 def _provider_prefix(model: str) -> str | None:
@@ -380,7 +423,7 @@ def resolve_connection(
             or os.getenv("MODEL_NAME")
             or profile.get("default_model", LAST_RESORT_MODEL)
         ),
-        endpoint=endpoint,
+        endpoint=_apply_region(endpoint, cfg),
         provider=provider_name or profile.get("name"),
         api_key=resolve_api_key(request, profile, cfg),
         headers=headers,
@@ -408,7 +451,11 @@ def build_model_from_spec(
 
     connection = resolve_connection(spec, config, registry)
     if connection.is_offline:
-        return MockModel([("Mock response (offline mode)", [])])
+        message = "Mock response (offline mode)"
+        profile = resolve_provider(registry or load_builtin_providers(), connection.provider)[1]
+        if "{region}" in str(profile.get("endpoint") or ""):
+            message += ": a Bedrock endpoint needs a region (set AWS_REGION or 'region' in config)"
+        return MockModel([(message, [])])
 
     return HttpChatModel(
         base_url=connection.endpoint,

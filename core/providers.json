@@ -34,6 +34,13 @@
     "reasoning_format": "standard",
     "cache_strategy": "anthropic_block"
   },
+  "bedrock": {
+    "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+    "default_model": "anthropic.claude-sonnet-5-5",
+    "env_keys": ["BEDROCK_API_KEY"],
+    "reasoning_format": "none",
+    "cache_strategy": "none"
+  },
   "deepseek": {
     "endpoint": "https://api.deepseek.com/v1",
     "default_model": "deepseek-chat",

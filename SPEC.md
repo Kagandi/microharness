@@ -244,6 +244,7 @@ Adding a new provider capability therefore means adding one protocol, never edit
   * Normalizes both base URLs (`https://openrouter.ai/api/v1`) and full endpoints (`.../chat/completions`).
   * Automatically sets OpenRouter-recommended headers (`HTTP-Referer`, `X-Title`).
   * Works out of the box with OpenRouter, local Ollama, vLLM, LM Studio, or custom gateways.
+  * **Bedrock**: the `bedrock` provider targets Bedrock's official OpenAI-compatible endpoint `https://bedrock-runtime.{region}.amazonaws.com/openai/v1`. The `{region}` placeholder is substituted from the config `region` key or the AWS environment (`AWS_REGION`, then `AWS_DEFAULT_REGION`); a spec whose region cannot be found resolves to `MockModel` with a message naming the missing setting. Authentication is a bearer token from `BEDROCK_API_KEY`, and the harness never shells out to the AWS CLI.
 * **`MockModel`**: Deterministic scripted replay model for zero-cost offline testing and CI.
 
 ---
@@ -473,3 +474,4 @@ Deliberately unimplemented or bounded behaviour, recorded so it is not mistaken 
 ### 5.3 Other limitations
 * **Bounded session discovery**: `find_recent_sessions` parses each candidate `trace.json` in full, so the second (correctness) pass over a large `runs_dir` is proportional to the number of session directories. Bounding it trades away the workspace-affinity guarantee; the two-pass structure keeps the common case cheap. A future session index (e.g. a small sidecar `meta.json`) would remove the trade-off entirely.
 * **Unserializable step payloads**: Steps containing circular references or non-primitive dict keys are replaced by a placeholder, preserving the step index but not that step's message content. See §3.8.
+* **Bedrock via the OpenAI shim**: the `bedrock` provider (§3.5) talks to Bedrock's OpenAI-compatible endpoint, not the native Converse API. Consequences: the profile declares `cache_strategy: "none"` and `reasoning_format: "none"` because the shim documents no cache-control or reasoning-effort parameters, and model availability is whatever the user's Bedrock account and region expose. A native Converse client (stdlib SigV4 signing) is the intended follow-up.

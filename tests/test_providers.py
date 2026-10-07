@@ -29,7 +29,7 @@ class TestRegistryLoading(unittest.TestCase):
     def test_builtin_registry_has_the_expected_providers(self):
         """Invariant: the committed providers.json seeds the well-known endpoints."""
         registry = load_builtin_providers()
-        for name in ("google", "openrouter", "openai", "anthropic"):
+        for name in ("google", "openrouter", "openai", "anthropic", "bedrock"):
             self.assertIn(name, registry)
             self.assertTrue(registry[name]["endpoint"].startswith("https://"))
         for name in ("lmstudio", "vllm", "llamacpp", "ollama", "local"):
@@ -431,6 +431,123 @@ class TestResolveConnection(unittest.TestCase):
 
         conn_local = resolve_connection("local", config=config, registry=self.REGISTRY)
         self.assertEqual(conn_local.endpoint, "http://localhost:1234/v1")
+
+
+class TestBedrockProvider(unittest.TestCase):
+    """Bedrock ships as an OpenAI-compatible shim with a regional endpoint and a bearer token."""
+
+    REGISTRY = {
+        "bedrock": {
+            "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+            "default_model": "anthropic.claude-sonnet-5-5",
+            "env_keys": ["BEDROCK_API_KEY"],
+        }
+    }
+
+    def test_builtin_registry_registers_bedrock(self):
+        """Invariant: bedrock is a built-in provider with a regional endpoint template."""
+        registry = load_builtin_providers()
+        self.assertIn("bedrock", registry)
+        self.assertIn("{region}", registry["bedrock"]["endpoint"])
+        self.assertTrue(registry["bedrock"]["endpoint"].startswith("https://"))
+        self.assertTrue(registry["bedrock"]["env_keys"])
+        self.assertTrue(registry["bedrock"]["default_model"])
+
+    def test_endpoint_match_maps_a_regional_url_back_to_the_template(self):
+        """Invariant: a concrete regional URL is attributed to the templated profile."""
+        name, profile = find_provider_by_endpoint(
+            self.REGISTRY, "https://bedrock-runtime.eu-west-2.amazonaws.com/openai/v1"
+        )
+        self.assertEqual(name, "bedrock")
+        self.assertEqual(profile["default_model"], "anthropic.claude-sonnet-5-5")
+
+    def test_endpoint_match_rejects_an_unrelated_host(self):
+        """Invariant: a template wildcard never attributes an unrelated endpoint."""
+        self.assertEqual(
+            find_provider_by_endpoint(self.REGISTRY, "https://evil.example/openai/v1"),
+            (None, {}),
+        )
+
+    def test_region_is_substituted_from_the_aws_environment(self):
+        """Invariant: AWS_REGION fills the endpoint template at resolution time."""
+        with patch.dict(os.environ, {"AWS_REGION": "eu-west-1"}, clear=True):
+            connection = resolve_connection(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertEqual(
+            connection.endpoint,
+            "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1",
+        )
+        self.assertEqual(connection.model, "anthropic.claude-sonnet-5-5")
+        self.assertEqual(connection.provider, "bedrock")
+
+    def test_region_in_config_wins_over_the_environment(self):
+        """Invariant: an explicit config region outranks AWS environment variables."""
+        env = {"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "us-east-1"}
+        with patch.dict(os.environ, env, clear=True):
+            connection = resolve_connection(
+                {"model": "m", "provider": "bedrock"},
+                config={"region": "ap-south-1"},
+                registry=self.REGISTRY,
+            )
+        self.assertEqual(
+            connection.endpoint, "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+        )
+
+    def test_aws_default_region_is_the_last_env_fallback(self):
+        """Invariant: AWS_DEFAULT_REGION is honoured when AWS_REGION is unset."""
+        with patch.dict(os.environ, {"AWS_DEFAULT_REGION": "us-east-2"}, clear=True):
+            connection = resolve_connection(
+                {"model": "m", "provider": "bedrock"}, registry=self.REGISTRY
+            )
+        self.assertEqual(
+            connection.endpoint, "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+        )
+
+    def test_missing_region_is_reported_offline(self):
+        """Invariant: an unfillable template is offline, never a literal '{region}' URL."""
+        with patch.dict(os.environ, {}, clear=True):
+            connection = resolve_connection(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertTrue(connection.is_offline)
+        self.assertIsNone(connection.endpoint)
+
+    def test_builds_a_regional_client_with_a_bearer_token(self):
+        """Invariant: a bedrock spec yields an HttpChatModel pointed at the region's shim."""
+        env = {"AWS_REGION": "ap-south-1", "BEDROCK_API_KEY": "brk-token"}
+        with patch.dict(os.environ, env, clear=True):
+            model = build_model_from_spec(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(
+            model.endpoint,
+            "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1/chat/completions",
+        )
+        self.assertEqual(model.api_key, "brk-token")
+        self.assertEqual(model.model, "anthropic.claude-sonnet-5-5")
+        self.assertEqual(model.provider, "bedrock")
+
+    def test_model_id_version_suffix_survives_parsing(self):
+        """Invariant: a colon-suffixed Bedrock id is not split into provider and model."""
+        request = parse_model_spec("bedrock/us.amazon.nova-premier-v1:0", {}, self.REGISTRY)
+        self.assertEqual(request.model, "us.amazon.nova-premier-v1:0")
+        self.assertEqual(request.provider, "bedrock")
+
+    def test_offline_without_region_falls_back_to_the_mock_model(self):
+        """Invariant: a bedrock spec without a region still runs, offline, with a hint."""
+        with patch.dict(os.environ, {}, clear=True):
+            model = build_model_from_spec(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertIsInstance(model, MockModel)
+        self.assertIn("AWS_REGION", model.script[0][0])
+
+    def test_default_model_is_offered_in_discovery(self):
+        """Invariant: the bedrock default appears in the /model listing via discovery."""
+        entries = get_available_models_from_config({}, self.REGISTRY)
+        self.assertIn("anthropic.claude-sonnet-5-5", [e["model"] for e in entries])
 
 
 class TestResolveModelSpec(unittest.TestCase):

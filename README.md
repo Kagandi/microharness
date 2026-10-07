@@ -62,6 +62,19 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 4. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
 5. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
 
+#### Amazon Bedrock
+`bedrock` is a built-in provider that targets Bedrock's official OpenAI-compatible endpoint:
+
+```bash
+export BEDROCK_API_KEY=...          # A Bedrock bearer token
+export AWS_REGION=us-west-2         # Or "region" in config.json (config wins over env)
+uv run microharness --model "bedrock/anthropic.claude-sonnet-5-5" "Refactor auth.py"
+```
+
+The registry endpoint `https://bedrock-runtime.{region}.amazonaws.com/openai/v1` is a regional template. The region resolves from `config.json` `"region"`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`. Without a region the Bedrock spec falls back to `MockModel` and says what is missing. The harness never shells out to the AWS CLI; the token is set by you.
+
+The shim exposes no prompt-cache or reasoning parameters, so the Bedrock profile runs with `cache_strategy: "none"` and `reasoning_format: "none"`.
+
 ### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:
 * **Global Baseline**: `~/.microharness/AGENTS.md` (e.g., your personal coding habits, formatting preferences).
