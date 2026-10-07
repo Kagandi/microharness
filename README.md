@@ -85,7 +85,7 @@ Auth schemes are pluggable: built-ins are `none`, `bearer`, `header`, and `sigv4
 (see `core/auth.py`), and extra single-file plugins can be installed as
 `~/.microharness/auth/<scheme>.py` (global dir only, never project-local).
 
-The shim exposes no prompt-cache or reasoning parameters, so the Bedrock profile runs with `cache_strategy: "none"` and `reasoning_format: "none"`.
+The shim exposes no prompt-cache or reasoning parameters, so the Bedrock profile runs with `cache_strategy: "openai_breakpoint"` and `reasoning_format: "none"`: with `cache_ttl` on, the first system text part carries an explicit `prompt_cache_breakpoint` (sub-1024-token prefixes are a server-side no-op); a stale user `providers.json` keeps `"none"` and simply skips breakpoints.
 
 ### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:

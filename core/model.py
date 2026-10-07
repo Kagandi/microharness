@@ -278,18 +278,30 @@ class HttpChatModel(UsageTelemetry):
         supports_cache_ctrl = self.cache_strategy == "anthropic_block"
         for msg in messages:
             msg_dict = msg.to_dict()
-            if self.cache_ttl and supports_cache_ctrl and msg.role == "system" and not system_cached:
-                cache_ctrl: dict[str, Any] = {"type": "ephemeral"}
-                if self.cache_ttl == "1h":
-                    cache_ctrl["ttl"] = "1h"
-                msg_dict["content"] = [
-                    {
-                        "type": "text",
-                        "text": msg.content or "",
-                        "cache_control": cache_ctrl,
-                    }
-                ]
-                system_cached = True
+            if self.cache_ttl and msg.role == "system" and not system_cached:
+                if supports_cache_ctrl:
+                    cache_ctrl: dict[str, Any] = {"type": "ephemeral"}
+                    if self.cache_ttl == "1h":
+                        cache_ctrl["ttl"] = "1h"
+                    msg_dict["content"] = [
+                        {
+                            "type": "text",
+                            "text": msg.content or "",
+                            "cache_control": cache_ctrl,
+                        }
+                    ]
+                    system_cached = True
+                elif self.cache_strategy == "openai_breakpoint" and isinstance(
+                    msg.content, str
+                ):
+                    msg_dict["content"] = [
+                        {
+                            "type": "text",
+                            "text": msg.content,
+                            "prompt_cache_breakpoint": {"mode": "explicit"},
+                        }
+                    ]
+                    system_cached = True
             formatted_messages.append(msg_dict)
 
         payload: dict[str, Any] = {
