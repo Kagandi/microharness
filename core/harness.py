@@ -9,11 +9,8 @@ from typing import Any, Callable
 
 from core.commands import (
     Command,
-    SlashOutcome,
     discover_commands,
-    expand_command,
     resolve_slash_input,
-    split_slash_input,
 )
 from core.config import (
     PROJECT_TRUST_NOTICE,
@@ -61,11 +58,8 @@ from core.session import (
 )
 from core.skills import (
     Skill,
-    SkillCommandResult,
-    compose_skill_prompt,
     discover_skills,
     render_skills_index,
-    resolve_skill_command,
 )
 from core.tools import (
     BashTool,
@@ -85,19 +79,13 @@ __all__ = [
     "Command",
     "Harness",
     "Skill",
-    "SkillCommandResult",
-    "SlashOutcome",
-    "compose_skill_prompt",
     "discover_commands",
     "discover_skills",
-    "expand_command",
     "get_default_global_dir",
     "load_global_config",
     "load_project_config",
     "render_skills_index",
-    "resolve_skill_command",
     "resolve_slash_input",
-    "split_slash_input",
 ]
 
 
