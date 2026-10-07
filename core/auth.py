@@ -10,7 +10,10 @@ Only the standard library is used.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
@@ -145,6 +148,108 @@ def get_signer(name: str) -> RequestSigner:
 def builtin_schemes() -> list[str]:
     """Lists the built-in Tier 1 scheme names."""
     return sorted(_BUILTIN_NAMES)
+
+
+class _FunctionSigner:
+    """Adapts a module-level ``sign()`` function to the RequestSigner protocol."""
+
+    def __init__(self, func):
+        self._func = func
+
+    def sign(self, *, method, url, headers, body, options, secrets):
+        return self._func(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            options=options,
+            secrets=secrets,
+        )
+
+
+def load_auth_plugins(global_dir: Path | str | None) -> dict[str, str]:
+    """Loads Tier 2 auth-scheme plugins from the trusted global dir.
+
+    Only ``global_dir`` is accepted by construction: project-local dirs are
+    never searched because auth code sees secrets. Callers must pass the
+    trusted global dir only (e.g. ``~/.microharness/auth``) and call once at
+    startup. No sandboxing beyond this scoping; a plugin runs with full
+    process privileges.
+
+    Contract per file: ``SCHEME_NAME: str`` (non-empty) plus EITHER a
+    module-level ``SIGNER`` object with a callable ``sign()`` OR a
+    module-level ``sign()`` function (wrapped in an adapter). Failures
+    (import error, bad contract, name collision) print a stderr warning
+    with the full path and skip the file (fail closed). Built-ins and
+    earlier files always win collisions.
+
+    Returns a mapping of loaded (normalized) scheme name -> source file path.
+    """
+    if global_dir is None:
+        return {}
+    base = Path(global_dir)
+    if not base.is_dir():
+        return {}
+    try:
+        entries = sorted(
+            (
+                p
+                for p in base.iterdir()
+                if p.is_file()
+                and p.suffix == ".py"
+                and p.name != "__init__.py"
+                and not p.name.startswith("_")
+            ),
+            key=lambda p: p.name,
+        )
+    except OSError as exc:
+        print(f"Warning: cannot list auth plugins in '{base}': {exc}", file=sys.stderr)
+        return {}
+    loaded: dict[str, str] = {}
+    for path in entries:
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"_mh_auth_{path.stem}_{abs(hash(str(path)))}", path
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot create module spec for '{path}'")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            print(
+                f"Warning: Skipping auth plugin '{path}': import failed: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            scheme = getattr(module, "SCHEME_NAME", None)
+            if not isinstance(scheme, str) or not scheme:
+                raise TypeError("SCHEME_NAME must be a non-empty string")
+            name = _normalize(scheme)
+            if name in _REGISTRY:
+                print(
+                    f"Warning: Skipping auth plugin '{path}': "
+                    f"scheme {name!r} already registered",
+                    file=sys.stderr,
+                )
+                continue
+            signer = getattr(module, "SIGNER", None)
+            if signer is not None and hasattr(signer, "sign"):
+                if not callable(signer.sign):
+                    raise TypeError("SIGNER.sign must be callable")
+            elif callable(getattr(module, "sign", None)):
+                signer = _FunctionSigner(module.sign)
+            else:
+                raise TypeError("plugin must define SIGNER.sign or sign()")
+            register_scheme(name, signer)
+            loaded[name] = str(path)
+        except Exception as exc:
+            print(
+                f"Warning: Skipping auth plugin '{path}': {exc}",
+                file=sys.stderr,
+            )
+            continue
+    return loaded
 
 
 def resolve_auth(profile: dict) -> tuple[str, dict]:
