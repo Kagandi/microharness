@@ -321,6 +321,21 @@ class Connection:
         """True when no endpoint could be resolved, so no HTTP client is possible."""
         return not self.endpoint
 
+    @property
+    def is_local(self) -> bool:
+        """True when the endpoint targets a local development server without API auth."""
+        if not self.endpoint:
+            return False
+        ep = self.endpoint.lower()
+        return "localhost" in ep or "127.0.0.1" in ep or "::1" in ep
+
+    @property
+    def missing_credentials(self) -> bool:
+        """True when the connection requires an API key but none is configured."""
+        if self.is_offline or self.is_local:
+            return False
+        return not bool(self.api_key)
+
 
 def resolve_connection(
     spec: str | dict[str, Any],

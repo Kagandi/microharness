@@ -606,6 +606,21 @@ class TestModel(unittest.TestCase):
         self.assertEqual(payload_num.get("reasoning"), {"max_tokens": 4096})
         self.assertNotIn("reasoning_effort", payload_num)
 
+        # xhigh and max on standard (mapped to 'high' for OpenAI portability)
+        m_xhigh_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="xhigh")
+        payload_xhigh_std = m_xhigh_std._build_payload(messages, tools=[])
+        self.assertEqual(payload_xhigh_std.get("reasoning_effort"), "high")
+
+        m_max_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="max")
+        payload_max_std = m_max_std._build_payload(messages, tools=[])
+        self.assertEqual(payload_max_std.get("reasoning_effort"), "high")
+
+        # xhigh and max on OpenRouter (passed through as supported)
+        m_xhigh_or = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="xhigh")
+        payload_xhigh_or = m_xhigh_or._build_payload(messages, tools=[])
+        self.assertEqual(payload_xhigh_or.get("reasoning_effort"), "xhigh")
+        self.assertEqual(payload_xhigh_or.get("reasoning"), {"effort": "xhigh"})
+
         # Off / None
         m_off = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort=None)
         payload_off = m_off._build_payload(messages, tools=[])

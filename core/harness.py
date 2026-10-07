@@ -698,7 +698,7 @@ class Harness:
         turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
         tui = CursesTUI(state)
-        ui = TuiUI(state, redraw=lambda: tui.draw(tui.stdscr) if tui.stdscr else None)
+        ui = TuiUI(state, redraw=lambda: tui.request_redraw() if tui.stdscr else None)
         router = self._make_router(
             memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=True
         )

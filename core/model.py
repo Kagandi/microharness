@@ -293,12 +293,16 @@ class HttpChatModel(UsageTelemetry):
         }
         if self.reasoning_effort and self.reasoning_format != "none":
             effort = self.reasoning_effort.lower()
-            if effort in ("low", "medium", "high", "xhigh", "max"):
-                payload["reasoning_effort"] = effort
-                if self.reasoning_format == "openrouter":
+            if self.reasoning_format == "openrouter":
+                if effort in ("low", "medium", "high", "xhigh", "max"):
+                    payload["reasoning_effort"] = effort
                     payload["reasoning"] = {"effort": effort}
-            elif effort.isdigit() and self.reasoning_format == "openrouter":
-                payload["reasoning"] = {"max_tokens": int(effort)}
+                elif effort.isdigit():
+                    payload["reasoning"] = {"max_tokens": int(effort)}
+            else:
+                standard_effort = "high" if effort in ("xhigh", "max") else effort
+                if standard_effort in ("low", "medium", "high"):
+                    payload["reasoning_effort"] = standard_effort
 
         if tools:
             if self.cache_ttl and supports_cache_ctrl:

@@ -13,3 +13,4 @@ dist/
 !.env.example
 datasets/
 .microharness/
+BLOG_POST.md

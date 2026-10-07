@@ -39,22 +39,35 @@ This PR modernizes the interactive developer experience, provider registry, and 
    - Fully replaced `max_context_chars` and `max_tool_chars` with `max_context_tokens` (default 64,000 tokens ≈ 256k chars) and `max_tool_tokens` (default 8,000 tokens ≈ 32k chars).
    - `HarnessConfig`, `ResolvedConfig`, `Harness`, `Memory`, and `ToolRegistry` expose only token limits.
    - Legacy character settings from old config files are automatically converted to tokens during resolution.
-   - Head (10k chars) + Tail (22k chars) preservation for tool outputs with disk log spillover.
+   - Head (1/3 ≈ 10.6k chars) + Tail (2/3 ≈ 21.3k chars) preservation for tool outputs (at default 8,000 tokens) with disk log spillover.
 
-8. **Fixed Live Model Switching**:
-   - `/model <name>` now dynamically synchronizes active model across `Harness`, `TuiTurnRunner`, and `TUIState` (updating title bar and provider display immediately).
+8. **Robust TUI Thread Safety & Cancellation UX**:
+   - `TUIState` protects transcript mutations and line slices under `threading.RLock()`.
+   - Curses rendering calls are kept strictly on the main thread via `request_redraw()`.
+   - Submitting Enter while a turn is running gives immediate feedback (`⏳ Turn is running (press Esc or Ctrl+C to cancel)`).
+   - `Harness.run_tui(task_id="interactive_session")` standardizes run-directory naming, with `allow_bare_words=True` enabled for interactive shell commands.
 
-9. **Offline Interactive Guidance**:
-   - Interactive sessions without configured credentials or offline status fail fast with clear setup instructions instead of silently falling back to a dummy `MockModel`.
+9. **Configuration Migration & Backward Compatibility**:
+   - `get_default_global_dir()` gracefully falls back to `~/.mini-harness` if `~/.microharness` does not exist.
+   - Legacy `max_tool_chars` and `max_context_chars` in configuration files are automatically converted to tokens (`chars // 4`).
+   - Re-exported `find_recent_sessions`, `load_session_messages`, and `reconstruct_messages_from_steps` in `core.tracer` for backward compatibility.
+
+10. **Portable Reasoning Effort**:
+    - Maps `xhigh` and `max` to `"high"` on standard OpenAI endpoints to prevent API validation 400 errors, while preserving full values on OpenRouter endpoints.
+
+11. **Offline Interactive Guidance**:
+    - Interactive TUI launch verifies endpoint and credentials for non-local providers and fails fast with setup instructions, while headless batch and benchmark runs continue using `MockModel` when offline.
 
 ## Verification & Testing
 
 - **Zero Runtime Dependencies**: Standard library only (`pyproject.toml` dependencies remain empty).
+- **Correct Repository URLs**: Pointing to `https://github.com/Kagandi/microharness`.
 - **Unit Test Suite**: 556 passing tests (`uv run pytest`):
-  - `tests/test_config.py` (token limits, cascade priority, reasoning choices)
+  - `tests/test_config.py` (token limits, legacy char migration, global dir fallback, cascade priority, reasoning choices)
   - `tests/test_harness.py` (TUI defaults, headless NullUI, session handling)
   - `tests/test_interactive.py` (model switching runner synchronization, reasoning status update)
   - `tests/test_memory.py` (token limits, high-water mark compaction)
+  - `tests/test_model.py` (reasoning effort mapping for OpenAI vs OpenRouter)
   - `tests/test_providers.py` (local provider presets, scoped endpoints)
   - `tests/test_tools.py` (token limits and spillover)
   - `tests/test_tui.py` (Esc key safety, reasoning subcommand menus, non-blocking threading)

@@ -365,20 +365,12 @@ def _resolve_model(
     connection = resolve_connection(spec, config, registry)
 
     if connection.is_offline:
-        if args and (getattr(args, "demo", None) or getattr(args, "benchmark", None)):
-            print("🎓 Running demo with deterministic MockModel (offline, no endpoint configured).\n")
-            return build_mock_agent_script()
+        print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
         print(
-            "❌ No API key or model endpoint configured.\n\n"
-            "To configure a provider, choose one of:\n"
-            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=...)\n"
-            "  2. Pass CLI flags: --provider <name> --api-key <key>\n"
-            "  3. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
-            "  4. Configure ~/.microharness/config.json with default_model and providers.\n\n"
-            "Tip: Run with --demo calculator to test offline without API credentials.\n",
-            file=sys.stderr,
+            "Tip: Add MODEL_ENDPOINT to .env, pass --endpoint, or "
+            "configure ~/.microharness/config.json.\n"
         )
-        sys.exit(1)
+        return build_mock_agent_script()
 
     cache_label = cache_ttl.upper() if cache_ttl and cache_ttl.lower() != "off" else "OFF"
     reasoning_label = f", reasoning: {reasoning_effort.upper()}" if reasoning_effort else ""
@@ -691,6 +683,34 @@ def main(argv: list[str] | None = None) -> None:
     if not sys.stdin.isatty():
         print(
             "❌ Interactive TUI requires a terminal. Use --batch for scripted/headless execution.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from core.model import HttpChatModel, MockModel
+
+    is_local_endpoint = (
+        isinstance(context.model, HttpChatModel)
+        and any(h in (context.model.endpoint or "").lower() for h in ("localhost", "127.0.0.1", "::1"))
+    )
+    if isinstance(context.model, MockModel) or (
+        isinstance(context.model, HttpChatModel)
+        and not context.model.api_key
+        and not is_local_endpoint
+    ):
+        reason = (
+            f"No API key configured for model '{getattr(context.model, 'model', 'unknown')}'."
+            if isinstance(context.model, HttpChatModel) and not context.model.api_key
+            else "No API key or model endpoint configured."
+        )
+        print(
+            f"❌ {reason}\n\n"
+            "To configure a provider, choose one of:\n"
+            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=...)\n"
+            "  2. Pass CLI flags: --provider <name> --api-key <key>\n"
+            "  3. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
+            "  4. Configure ~/.microharness/config.json with default_model and providers.\n\n"
+            "Tip: Run with --demo calculator to test offline without API credentials.\n",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -444,6 +444,7 @@ class TUIState:
     """
 
     def __init__(self, title: str = "microharness"):
+        self._lock = threading.RLock()
         self.title = title
         self.lines: list[TUILine] = []
         self.scroll_offset: int = 0
@@ -659,58 +660,69 @@ class TUIState:
         return chosen_cmd
 
     def add_user(self, text: str) -> None:
-        if self.lines and self.lines[-1].text != "":
-            self.lines.append(TUILine(text="", tag="dim"))
-        lines = text.splitlines() or [""]
-        for i, line in enumerate(lines):
-            prefix = "> " if i == 0 else "  "
-            self.lines.append(TUILine(text=f"{prefix}{line}", tag="user"))
-        self.scroll_offset = 0
+        with self._lock:
+            if self.lines and self.lines[-1].text != "":
+                self.lines.append(TUILine(text="", tag="dim"))
+            lines = text.splitlines() or [""]
+            for i, line in enumerate(lines):
+                prefix = "> " if i == 0 else "  "
+                self.lines.append(TUILine(text=f"{prefix}{line}", tag="user"))
+            self.scroll_offset = 0
 
     def add_thought(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"Thinking: {text}", tag="thought"))
-        self.scroll_offset = 0
+        with self._lock:
+            self.lines.append(TUILine(text=f"Thinking: {text}", tag="thought"))
+            self.scroll_offset = 0
 
     def add_action(self, text: str) -> None:
-        self.lines.append(TUILine(text=text, tag="action"))
-        self.scroll_offset = 0
+        with self._lock:
+            self.lines.append(TUILine(text=text, tag="action"))
+            self.scroll_offset = 0
 
     def add_error(self, text: str) -> None:
-        self.lines.append(TUILine(text=f"error: {text}", tag="error"))
-        self.scroll_offset = 0
+        with self._lock:
+            self.lines.append(TUILine(text=f"error: {text}", tag="error"))
+            self.scroll_offset = 0
 
     def add_agent(self, text: str, max_width: int = 80) -> None:
-        self.lines.append(TUILine(text="", tag="dim"))
-        parsed = parse_markdown_to_tui_lines(text, max_width=max_width)
-        self.lines.extend(parsed)
-        self.lines.append(TUILine(text="", tag="dim"))
-        self.scroll_offset = 0
+        with self._lock:
+            self.lines.append(TUILine(text="", tag="dim"))
+            parsed = parse_markdown_to_tui_lines(text, max_width=max_width)
+            self.lines.extend(parsed)
+            self.lines.append(TUILine(text="", tag="dim"))
+            self.scroll_offset = 0
 
     def add_system(self, text: str) -> None:
-        for line in text.splitlines():
-            self.lines.append(TUILine(text=line, tag="system"))
-        self.scroll_offset = 0
+        with self._lock:
+            for line in text.splitlines():
+                self.lines.append(TUILine(text=line, tag="system"))
+            self.scroll_offset = 0
 
     def update_status(self, stats: dict[str, Any], cache_stats: dict[str, Any] | None = None) -> None:
-        self.status_tokens = int(stats.get("estimated_tokens") or 0)
-        self.max_tokens = int(stats.get("max_estimated_tokens") or 0)
-        self.usage_pct = float(stats.get("usage_pct") or 0.0)
-        self.messages_count = int(stats.get("total_messages") or 0)
-        if cache_stats:
-            self.cache_hit_pct = float(cache_stats.get("cache_hit_rate_pct") or 0.0)
+        with self._lock:
+            self.status_tokens = int(stats.get("estimated_tokens") or 0)
+            self.max_tokens = int(stats.get("max_estimated_tokens") or 0)
+            self.usage_pct = float(stats.get("usage_pct") or 0.0)
+            self.messages_count = int(stats.get("total_messages") or 0)
+            if cache_stats:
+                self.cache_hit_pct = float(cache_stats.get("cache_hit_rate_pct") or 0.0)
 
     def scroll_up(self, n: int = 3) -> None:
-        self.scroll_offset += n
+        with self._lock:
+            self.scroll_offset += n
 
     def scroll_down(self, n: int = 3) -> None:
-        self.scroll_offset = max(0, self.scroll_offset - n)
+        with self._lock:
+            self.scroll_offset = max(0, self.scroll_offset - n)
 
     def get_wrapped_lines(self, width: int) -> list[tuple[str, str]]:
         """Wraps transcript lines to fit the specified column width."""
+        with self._lock:
+            lines_snapshot = list(self.lines)
         wrapped: list[tuple[str, str]] = []
         eff_width = max(10, width - 2)
 
-        for line_item in self.lines:
+        for line_item in lines_snapshot:
             if not line_item.text:
                 wrapped.append(("", line_item.tag))
             elif line_item.tag in ("table_border", "table_header", "table_row", "code_border", "code"):
@@ -735,13 +747,15 @@ class TUIState:
 
     def get_visible_slice(self, height: int, width: int) -> list[tuple[str, str]]:
         """Calculates visible lines based on height and current scroll offset."""
+        with self._lock:
+            scroll = self.scroll_offset
         wrapped = self.get_wrapped_lines(width)
         total = len(wrapped)
         if total <= height:
             return wrapped
 
         max_scroll = max(0, total - height)
-        actual_scroll = min(self.scroll_offset, max_scroll)
+        actual_scroll = min(scroll, max_scroll)
         end_idx = total - actual_scroll
         start_idx = max(0, end_idx - height)
         return wrapped[start_idx:end_idx]
@@ -902,8 +916,13 @@ class CursesTUI:
         self.stdscr: Any = None
         self.has_colors = False
         self._cancel_requested = False
+        self._redraw_requested = False
         self._draw_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
+
+    def request_redraw(self) -> None:
+        """Schedules a thread-safe redraw for the next main loop iteration."""
+        self._redraw_requested = True
 
     def _init_colors(self) -> None:
         try:
@@ -1244,6 +1263,7 @@ class CursesTUI:
         # 2. Enter: Complete open autocomplete selection or submit
         if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
             if self.state.turn_active:
+                self.state.add_system("⏳ Turn is running (press Esc or Ctrl+C to cancel)")
                 return True
             if file_matches:
                 self.state.complete_selected_file_tag()
@@ -1354,6 +1374,7 @@ class CursesTUI:
         def _execute_submit(text: str) -> None:
             if self.worker_thread and self.worker_thread.is_alive():
                 return
+            self._cancel_requested = False
             self.state.turn_active = True
 
             def _worker() -> None:
@@ -1361,6 +1382,8 @@ class CursesTUI:
                     on_user_submit(text)
                 finally:
                     self.state.turn_active = False
+                    self._cancel_requested = False
+                    self.request_redraw()
 
             self.worker_thread = threading.Thread(target=_worker, daemon=True)
             self.worker_thread.start()
@@ -1382,15 +1405,23 @@ class CursesTUI:
                 _execute_submit(initial_instruction.strip())
 
             while True:
+                if self._redraw_requested:
+                    self._redraw_requested = False
+                    self.draw(stdscr)
+
                 try:
                     ch = stdscr.get_wch()
                 except (KeyboardInterrupt, EOFError):
                     if self.state.turn_active:
                         self._cancel_requested = True
+                        self.state.add_system("⚠️ Cancellation requested...")
+                        self.draw(stdscr)
                         continue
                     break
                 except curses.error:
-                    self.draw(stdscr)
+                    if self.state.turn_active or self._redraw_requested:
+                        self._redraw_requested = False
+                        self.draw(stdscr)
                     continue
 
                 if ch in (27, "\x1b"):
@@ -1406,7 +1437,7 @@ class CursesTUI:
 
             if self.worker_thread and self.worker_thread.is_alive():
                 self._cancel_requested = True
-                self.worker_thread.join(timeout=0.5)
+                self.worker_thread.join(timeout=5.0)
 
             _reset_key_reporting()
 

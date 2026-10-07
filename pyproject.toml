@@ -32,9 +32,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/dimakagan/mini-harness"
-Repository = "https://github.com/dimakagan/mini-harness"
-Issues = "https://github.com/dimakagan/mini-harness/issues"
+Homepage = "https://github.com/Kagandi/microharness"
+Repository = "https://github.com/Kagandi/microharness"
+Issues = "https://github.com/Kagandi/microharness/issues"
 
 [project.scripts]
 microharness = "main:main"

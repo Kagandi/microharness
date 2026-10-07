@@ -64,7 +64,11 @@ class SessionUI(Protocol):
 
 
 class NullUI:
-    """Headless no-op sink for headless dispatching."""
+    """Headless no-op UI sink for silent execution, headless batch runs, and tests.
+
+    Suppresses all terminal output and UI notifications (info, success, error, status).
+    Errors are not printed to stdout/stderr; debugging traces should inspect the Tracer.
+    """
 
     def info(self, text: str) -> None:
         pass

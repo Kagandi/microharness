@@ -183,6 +183,24 @@ class TestHarnessConfigCascade(unittest.TestCase):
             self._resolve(HarnessConfig(cache_ttl="17m"))
         self.assertIn("Unsupported cache TTL", str(ctx.exception))
 
+    def test_legacy_char_configs_convert_to_tokens(self):
+        """Invariant: legacy character limits in config files convert to tokens at 4 chars per token."""
+        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000, "max_context_chars": 40000})
+        self.assertEqual(cfg.max_tool_tokens, 1000)
+        self.assertEqual(cfg.max_context_tokens, 10000)
+
+    def test_get_default_global_dir_falls_back_to_legacy_mini_harness(self):
+        """Invariant: falls back to ~/.mini-harness if ~/.microharness does not exist."""
+        from unittest.mock import patch
+
+        from core.config import get_default_global_dir
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_home = Path(tmp_dir)
+            legacy = fake_home / ".mini-harness"
+            legacy.mkdir()
+            with patch("pathlib.Path.home", return_value=fake_home):
+                self.assertEqual(get_default_global_dir(), legacy)
 
 
 class TestProjectToolTrust(unittest.TestCase):
