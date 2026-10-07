@@ -76,9 +76,6 @@ class Memory:
         """Estimates total tokens currently held in memory (~4 chars per token)."""
         return sum(len(m.content) for m in self.messages) // 4
 
-    def total_chars(self) -> int:
-        return sum(len(m.content) for m in self.messages)
-
     def stats(self) -> dict[str, Any]:
         """Returns diagnostic metrics on memory and context budget."""
         tokens = self.estimated_tokens()

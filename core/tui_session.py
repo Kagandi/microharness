@@ -14,18 +14,12 @@ from typing import Any
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.protocols import CancellableModel, Model, ModelCancelledError
-from core.tracer import Tracer, _format_action_summary, _pair_calls_with_results
+from core.tracer import Tracer, _format_action_summary, _pair_calls_with_results, _preview
 from core.types import Message, StepTrace
 
 MAX_STEPS_PER_TURN = 30
 THOUGHT_PREVIEW_CHARS = 80
 ERROR_PREVIEW_CHARS = 60
-
-
-def _preview(text: str, limit: int) -> str:
-    """Truncates long single-line text for a one-line preview."""
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    return f"{line[:limit]}..." if len(line) > limit else line
 
 
 def replay_messages(state: Any, messages: list[Message]) -> None:

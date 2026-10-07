@@ -7,19 +7,13 @@ import warnings
 from pathlib import Path
 from typing import Any, Callable
 
-from core.session import (
-    find_recent_sessions,
-    load_session_messages,
-    reconstruct_messages_from_steps,
-)
+from core.session import reconstruct_messages_from_steps
 from core.types import EvalResult, StepTrace, Task
 from core.usage import summarize_run_usage
 
 __all__ = [
     "ActionFormatter",
     "Tracer",
-    "find_recent_sessions",
-    "load_session_messages",
     "reconstruct_messages_from_steps",
     "register_action_formatter",
     "unregister_action_formatter",

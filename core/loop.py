@@ -47,8 +47,6 @@ class AgentLoop:
         step_usage: dict[str, Any] = {}
         if isinstance(self.model, UsageReportingModel):
             step_usage = self.model.get_last_step_usage()
-        elif hasattr(self.model, "get_last_step_usage"):
-            step_usage = self.model.get_last_step_usage()
         elif hasattr(self.model, "last_usage"):
             step_usage = dict(getattr(self.model, "last_usage", {}) or {})
 

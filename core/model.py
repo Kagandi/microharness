@@ -111,8 +111,6 @@ __all__ = [
     "ReasoningAwareModel",
     "ResettableModel",
     "UsageReportingModel",
-    "ModelCancelledError",
-    "RateLimitError",
     "RetryPolicy",
     "build_model_from_spec",
     "extract_retry_delay",
