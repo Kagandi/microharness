@@ -4,10 +4,37 @@ version = "0.1.0"
 description = "A minimal, zero-dependency, and pluggable AI agent microframework in Python"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 authors = [
     { name = "Dima Kagan" }
 ]
+keywords = [
+    "agent",
+    "ai",
+    "coding-agent",
+    "harness",
+    "llm",
+    "microframework",
+    "swe-bench",
+    "zero-dependency",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Kagandi/microharness"
+Repository = "https://github.com/Kagandi/microharness"
+Issues = "https://github.com/Kagandi/microharness/issues"
 
 [project.scripts]
 microharness = "main:main"

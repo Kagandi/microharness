@@ -30,18 +30,16 @@ from core.discovery import discover_workspace_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
 from core.interactive import (
-    EXIT,
-    SKIP,
     TURN,
     CommandContext,
     CommandRouter,
-    ConsoleUI,
+    NullUI,
     SessionUI,
     TuiUI,
     TurnState,
 )
 from core.loop import AgentLoop
-from core.memory import Memory, format_compact_num
+from core.memory import Memory
 from core.model import (
     CacheAwareModel,
     DeadlineAwareModel,
@@ -56,7 +54,6 @@ from core.providers import (
     resolve_model_spec,
 )
 from core.session import (
-    MAX_STEPS_EXCEEDED,
     find_recent_sessions,
     load_session,
     rate_limit_wait,
@@ -67,7 +64,6 @@ from core.skills import (
     SkillCommandResult,
     compose_skill_prompt,
     discover_skills,
-    extract_skill_summary,
     render_skills_index,
     resolve_skill_command,
 )
@@ -80,13 +76,12 @@ from core.tools import (
     WriteFileTool,
     discover_tool_plugins,
 )
-from core.tracer import ActionFormatter, Tracer, _dim
+from core.tracer import ActionFormatter, Tracer
 from core.tui_session import TuiTurnRunner, replay_messages
 from core.types import EvalResult, Message, RunResult, Task
 from core.usage import summarize_run_usage
 
 __all__ = [
-    "DEFAULT_GLOBAL_DIR",
     "Command",
     "Harness",
     "Skill",
@@ -106,19 +101,7 @@ __all__ = [
 ]
 
 
-DEFAULT_GLOBAL_DIR = get_default_global_dir()
-
-
 EMPTY_SPEC_ERROR = "Model specification cannot be empty."
-
-# Skill and command discovery moved to core/skills.py and core/commands.py. These
-# aliases keep the historical import paths working for the CLI and tests.
-_discover_skills = discover_skills
-_discover_skills_index = render_skills_index
-_extract_skill_summary = extract_skill_summary
-_discover_commands = discover_commands
-_expand_command = expand_command
-_resolve_skill_command = resolve_skill_command
 
 
 class Harness:
@@ -140,8 +123,8 @@ class Harness:
         trust_project_tools: bool | None = None,
         evaluator: Evaluator | None = None,
         runs_dir: Path | str | None = None,
-        max_tool_chars: int | None = None,
-        max_context_chars: int | None = None,
+        max_tool_tokens: int | None = None,
+        max_context_tokens: int | None = None,
         trigger_ratio: float | None = None,
         cache_ttl: str | None = None,
         reasoning_effort: str | None = None,
@@ -167,8 +150,8 @@ class Harness:
             auto_discover_tools=auto_discover_tools,
             disable_default_tools=disable_default_tools,
             runs_dir=runs_dir,
-            max_tool_chars=max_tool_chars,
-            max_context_chars=max_context_chars,
+            max_tool_tokens=max_tool_tokens,
+            max_context_tokens=max_context_tokens,
             trigger_ratio=trigger_ratio,
             cache_ttl=cache_ttl,
             reasoning_effort=reasoning_effort,
@@ -182,8 +165,8 @@ class Harness:
         self.auto_discover_tools = cfg.auto_discover_tools
         self.disable_default_tools = cfg.disable_default_tools
         self.runs_dir = cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
-        self.max_tool_chars = cfg.max_tool_chars
-        self.max_context_chars = cfg.max_context_chars
+        self.max_tool_tokens = cfg.max_tool_tokens
+        self.max_context_tokens = cfg.max_context_tokens
         self.trigger_ratio = cfg.trigger_ratio
         self.cache_ttl = cfg.cache_ttl
         self.reasoning_effort = cfg.reasoning_effort
@@ -401,7 +384,7 @@ class Harness:
         return env
 
     def _init_tools(self, env: Environment) -> ToolRegistry:
-        registry = ToolRegistry(env=env, max_tool_chars=self.max_tool_chars)
+        registry = ToolRegistry(env=env, max_tool_tokens=self.max_tool_tokens)
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
@@ -503,7 +486,7 @@ class Harness:
         memory = Memory(
             system_prompt=active_system_prompt,
             user_prompt=effective_instruction,
-            max_context_chars=self.max_context_chars,
+            max_context_tokens=self.max_context_tokens,
             trigger_ratio=self.trigger_ratio,
         )
         task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)
@@ -675,73 +658,12 @@ class Harness:
         """
         turns = TurnState(step_index=step_holder[0] if step_holder else 1)
         router = self._make_router(
-            memory, custom_commands, skills or {}, ConsoleUI(), workspace_dir, tracer, turns
+            memory, custom_commands, skills or {}, NullUI(), workspace_dir, tracer, turns
         )
         action = router.dispatch(user_input)
         if step_holder is not None:
             step_holder[0] = turns.step_index
         return action
-
-    def _restore_session(self, memory: Memory, resume: bool | str | Path | None) -> int:
-        """Restores a previous session into memory, returning the step index to resume at."""
-        if not resume:
-            return 1
-        messages, meta = self.load_session(None if resume is True else resume)
-        if not messages:
-            print(f"\n⚠️ Could not resume session ({meta.get('error', 'not found')}). Starting fresh session.\n")
-            return 1
-        memory.restore_messages(messages, refresh_system_prompt=memory.system_prompt)
-        step_index = meta.get("total_steps", 0) + 1
-        print(
-            f"\n🔄 Resumed session '{meta.get('run_id')}' "
-            f"({len(messages)} messages loaded, continuing at step {step_index}).\n"
-        )
-        return step_index
-
-    def _print_session_banner(self, env: Environment) -> None:
-        """Prints the session header: workspace, model, and the command reminder."""
-        print("\n🚀 Interactive Session Started")
-        print(f"📁 Project Workspace: {env.workspace_dir}")
-        if self.docker:
-            print(f"🐳 Docker Sandbox: ACTIVE ({self.docker_image})")
-        provider = getattr(self.model, "provider", "") or ""
-        suffix = f" [{provider}]" if provider else ""
-        print(f"🤖 Active Model: {self.active_model_name()}{suffix}")
-        print(f"⚡ Prompt Caching: {self.cache_ttl.upper() if self.cache_ttl else 'OFF'}")
-        reasoning = self.get_reasoning_effort()
-        print(f"🧠 Reasoning Effort: {reasoning.upper() if reasoning else 'OFF'}")
-        print(
-            "💡 Commands: /model | /resume | /reasoning | /cache | /compact | /status | "
-            "/new | /skill | /help | /exit\n"
-        )
-
-    def _print_context_footer(self, memory: Memory) -> None:
-        """Prints the single-line context usage footer shown before each prompt."""
-        stats = memory.stats()
-        print(
-            _dim(
-                f"─── 📊 Context: {stats['estimated_tokens']:,} / {stats['max_estimated_tokens']:,} "
-                f"tokens ({stats['usage_pct']}%) | Messages: {stats['total_messages']} ───"
-            )
-        )
-
-    def _finalize_session(self, env: Environment, tracer: Tracer, run_dir: Path) -> None:
-        """Writes the patch and trace for an interactive session that has ended."""
-        patch_diff = env.get_git_patch()
-        self._write_patch(patch_diff, run_dir)
-        _, md_path = tracer.finalize(
-            finish_reason="session_ended",
-            patch_diff=patch_diff,
-            telemetry=self.get_cache_stats(),
-        )
-        print(f"\n📄 Complete session trace saved to:\n   {md_path}\n")
-
-    def _print_context_footer(self, memory: Memory) -> None:
-        """Prints the compact context usage footer shown before each prompt."""
-        stats = memory.stats()
-        used = format_compact_num(stats["estimated_tokens"])
-        total = format_compact_num(stats["max_estimated_tokens"])
-        print(_dim(f"─── 📊 Context: {used} / {total} ({stats['usage_pct']}%) ───"))
 
     def run_interactive(
         self,
@@ -749,85 +671,13 @@ class Harness:
         task_id: str = "interactive_session",
         resume: bool | str | Path | None = None,
     ) -> None:
-        """Interactive multi-turn session with slash commands and context usage tracking."""
-        env, _, memory, tracer, loop, run_dir = self._setup_run(
-            task_id=task_id,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            initial_instruction="",
-            initial_files={},
-        )
-
-        turns = TurnState(step_index=self._restore_session(memory, resume))
-        commands = discover_commands(env.workspace_dir, self.global_dir)
-        skills = discover_skills(env.workspace_dir, self.global_dir)
-        router = self._make_router(
-            memory, commands, skills, ConsoleUI(), env.workspace_dir, tracer, turns
-        )
-        tracer.compact = True
-
-        self._print_session_banner(env)
-        max_steps_per_turn = 30
-        pending_turn = self._submit(router, initial_instruction)
-        if pending_turn == EXIT:
-            env.teardown()
-            return
-
-        try:
-            while True:
-                if pending_turn == TURN:
-                    pending_turn = self._run_pending_turn(
-                        loop, tracer, turns, max_steps_per_turn
-                    )
-
-                self._print_context_footer(memory)
-                try:
-                    user_input = input("👤 You: ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    print("\nSession interrupted.")
-                    break
-
-                if not user_input:
-                    continue
-                pending_turn = self._submit(router, user_input)
-                if pending_turn == EXIT:
-                    break
-
-            self._finalize_session(env, tracer, run_dir)
-        finally:
-            env.teardown()
-
-    def _submit(self, router: CommandRouter, user_input: str | None) -> str:
-        """Dispatches one line of input; returns the resulting action."""
-        if not user_input or not user_input.strip():
-            return SKIP
-        return router.dispatch(user_input)
-
-    def _run_pending_turn(
-        self,
-        loop: AgentLoop,
-        tracer: Tracer,
-        turns: TurnState,
-        max_steps: int,
-    ) -> str:
-        """Executes the queued agent turn and returns the action to take next."""
-        outcome = run_steps(
-            self.model,
-            loop,
-            tracer,
-            turns.step_index,
-            max_steps,
-            max_retries=self.max_step_retries,
-            retry_delay=self.step_retry_delay,
-        )
-        turns.step_index = outcome.next_step
-        if not outcome.finished and outcome.reason == MAX_STEPS_EXCEEDED:
-            print(f"\n⚠️ Reached safety limit of {max_steps} steps for this turn. Returning to prompt.\n")
-        return SKIP
+        """Interactive multi-turn session (launches full-screen TUI)."""
+        self.run_tui(initial_instruction=initial_instruction, task_id=task_id, resume=resume)
 
     def run_tui(
         self,
         initial_instruction: str | None = None,
-        task_id: str = "tui_session",
+        task_id: str = "interactive_session",
         resume: bool | str | Path | None = None,
     ) -> None:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
@@ -848,9 +698,9 @@ class Harness:
         turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
         tui = CursesTUI(state)
-        ui = TuiUI(state, redraw=lambda: tui.draw(tui.stdscr) if tui.stdscr else None)
+        ui = TuiUI(state, redraw=lambda: tui.request_redraw() if tui.stdscr else None)
         router = self._make_router(
-            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=False
+            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=True
         )
         runner = TuiTurnRunner(
             model=self.model,
@@ -862,6 +712,7 @@ class Harness:
             cache_stats=self.get_cache_stats,
             step_index=turns.step_index,
         )
+        router.ctx.runner = runner
 
         def on_user_submit(user_text: str) -> None:
             """Handles one submitted line, running a turn when a prompt was queued."""

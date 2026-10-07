@@ -10,9 +10,9 @@ Built with **zero external runtime dependencies** (standard library only) to tea
 
 | Component | Responsibility | Location in `microharness` |
 | :--- | :--- | :--- |
-| **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](file:///Users/dimakagan/Projects/mini-harness/core/loop.py) (~40 LOC) |
-| **Harness** *(The Chassis)* | The outer environment: workspace directory, sandboxing, budgets, memory compaction, telemetry/tracing, and grading. | [`core/harness.py`](file:///Users/dimakagan/Projects/mini-harness/core/harness.py) |
-| **Interactive Router** | One command table (`/model`, `/resume`, `/compact`, `/skill`, ...) shared by the CLI session and the TUI, so the two frontends cannot drift. | [`core/interactive.py`](file:///Users/dimakagan/Projects/mini-harness/core/interactive.py) |
+| **Agent Loop** *(The Engine)* | Pure Thought $\to$ Action $\to$ Observation cycle. Agnostic to benchmarks, sandboxes, and models. | [`core/loop.py`](core/loop.py) (~40 LOC) |
+| **Harness** *(The Chassis)* | The outer environment: workspace directory, sandboxing, budgets, memory compaction, telemetry/tracing, and grading. | [`core/harness.py`](core/harness.py) |
+| **Interactive Router** | One command table (`/model`, `/resume`, `/compact`, `/skill`, ...) shared by the CLI session and the TUI, so the two frontends cannot drift. | [`core/interactive.py`](core/interactive.py) |
 
 ---
 
@@ -29,16 +29,28 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 
 ```json
 {
-  "endpoint": "https://openrouter.ai/api/v1",
-  "model": "anthropic/claude-5.5-sonnet",
-  "api_key": "sk-or-v1-...",
-  "max_context_chars": 32000,
+  "default_model": "smart",
+  "max_context_tokens": 64000,
   "trigger_ratio": 0.80,
-  "max_tool_chars": 2000,
+  "max_tool_tokens": 8000,
   "sandbox": false,
   "models": {
-    "fast": { "model": "gemini-2.5-flash", "provider": "google", "description": "Fast flash model" },
-    "smart": { "model": "anthropic/claude-5.5-sonnet", "provider": "openrouter", "description": "Frontier reasoning model" }
+    "fast": {
+      "model": "gemini-2.5-flash",
+      "provider": "google",
+      "description": "Fast flash model"
+    },
+    "smart": {
+      "model": "anthropic/claude-5.5-sonnet",
+      "provider": "openrouter",
+      "description": "Frontier reasoning model"
+    },
+    "local": {
+      "model": "local-model",
+      "provider": "lmstudio",
+      "endpoint": "http://localhost:1234/v1",
+      "description": "Local offline LLM"
+    }
   }
 }
 ```
@@ -231,9 +243,8 @@ uv run pytest
 
 ### 3. Interactive and TUI Sessions
 ```bash
-# Launch interactive mode (or full-screen TUI with --tui):
+# Launch interactive mode (full-screen TUI):
 uv run microharness
-uv run microharness --tui
 
 # Resume previous interactive session:
 uv run microharness --resume
@@ -314,7 +325,7 @@ harness = Harness(
     global_dir="~/.microharness",  # Global config, instructions & skills
     tools=[bash_tool, my_tool],  # Custom tools (dynamically documented in system prompt)
 )
-harness.run_interactive("Help me refactor the database layer")
+harness.run_tui("Help me refactor the database layer")
 ```
 
 ---
@@ -347,7 +358,7 @@ harness.run_interactive("Help me refactor the database layer")
 6. **Proactive 80% Context Compaction & Memory Optimization (`core/memory.py`)**
    - Proactively prunes older tool observations at an 80% high-water mark (`trigger_ratio = 0.80`), keeping 20% reserved for output tokens and model reasoning.
    - **Enriched Tombstones with Log Pointers**: Collapsed tool outputs embed the exact spilled log file path (`Full log: <path>. Use read_file to inspect if needed.`), giving the agent a deterministic bridge to inspect full outputs.
-   - **Historical Reasoning Pruning**: Automatically prunes transient `<think>...</think>` and `<thinking>...</thinking>` reasoning streams from older assistant turns to reclaim thousands of tokens for reasoning models (DeepSeek-R1, Claude 3.7 Thinking, o1/o3).
+   - **Historical Reasoning Pruning**: Automatically prunes transient `<think>...</think>` and `<thinking>...</thinking>` reasoning streams from older assistant turns to reclaim thousands of tokens for reasoning models (DeepSeek-R1, Claude Thinking, o1/o3).
    - **Session Files Modified Ledger**: Injects and maintains an active session ledger (`[Session Files Modified: file1.py, file2.py]`) across compactions at the safe prefix.
    - Preserves system prompt, initial task, and recent working turns.
 

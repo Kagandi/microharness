@@ -203,14 +203,14 @@ When a command outputs excessive text (e.g. `> 2,000` chars):
 
 ### 3.4 Context & Memory Management (`core/memory.py`)
 Maintains message history across multi-turn sessions with proactive and on-demand compaction:
-* **Proactive 80% High-Water Mark (`trigger_ratio = 0.80`)**: Compaction triggers when cumulative characters exceed 80% of `max_context_chars`. This strictly preserves 20% of the window as output headroom for the model's thoughts, reasoning, and JSON tool calls, preventing mid-generation cutoffs (`finish_reason: "length"`) and provider HTTP 400 errors.
+* **Proactive 80% High-Water Mark (`trigger_ratio = 0.80`)**: Compaction triggers when cumulative tokens exceed 80% of `max_context_tokens`. This strictly preserves 20% of the window as output headroom for the model's thoughts, reasoning, and JSON tool calls, preventing mid-generation cutoffs (`finish_reason: "length"`) and provider HTTP 400 errors.
 * **Immutability of Core Prompts**: System instructions and the original task instruction are **never** pruned or modified.
 * **Recency Protection**: The last $K$ turns (`keep_recent_turns`, default: 4) are kept completely intact.
 * **Historical Reasoning Pruning**: Older assistant turns have transient `<think>...</think>` and `<thinking>...</thinking>` reasoning streams stripped out, collapsing pure-reasoning turns to lightweight placeholders while keeping final answers and tool calls fully intact.
 * **Enriched Tool Tombstones with Log Pointers**: Older tool outputs in the middle are replaced with enriched tombstone markers embedding the spilled log path (`[Tool output collapsed (N chars). Full log: <path>. Use read_file to inspect if needed.]`), allowing the model to recover full outputs if needed.
 * **Session "Files Touched" Ledger**: Tracks all files successfully modified via `write_file` or `edit_file` during the session and injects/updates an active system ledger (`[Session Files Modified: ...]`) at the safe prefix upon compaction.
 * **Manual Compaction**: Supports `/compact` (forced compaction) regardless of total character count.
-* **Context Diagnostics**: `stats()` provides real-time character count, estimated tokens, maximum allowance, trigger threshold (`trigger_threshold_chars`), usage percentage, and role breakdown.
+* **Context Diagnostics**: `stats()` provides real-time estimated tokens, maximum allowance, trigger threshold (`trigger_threshold_tokens`), usage percentage, and role breakdown.
 * **Reset**: `/new` clears message history while preserving system prompt and workspace files.
 
 ---
@@ -320,11 +320,11 @@ while not done:
   * `trace.json`: Full machine-readable record of prompt states, latencies, tool calls, reconstructed messages, and patch diff.
   * `trace.md`: Formatted human-readable summary of the entire session including unified git diffs.
   * `patch.diff`: Dedicated unified patch file generated automatically when modifying git workspaces.
-* **One Command Table, Two Frontends**: the plain-text session and the full-screen TUI answer the
-  same `/`-commands and differ only in presentation. `core/interactive.py` holds the command table
-  and the handlers; each frontend supplies a `SessionUI` sink (`ConsoleUI` prints, `TuiUI` writes to
-  `TUIState`). Handlers perform the work and report through the sink, then return one of `exit`,
-  `turn`, or `skip`. A command is added once, not once per frontend.
+* **Unified Command Dispatch & TUI Sink**: interactive mode runs in a full-screen curses TUI (`core/tui.py`).
+  `core/interactive.py` holds the command table and handlers decoupled from terminal rendering via a
+  `SessionUI` sink (`TuiUI` writes to `TUIState`). Handlers perform the work and report through the sink,
+  then return one of `exit`, `turn`, or `skip`. A command is added once and automatically integrates with
+  autocomplete, routing, and `/help`.
   * A `CommandSpec` is the single source of truth for a command: its `names` drive routing, its
     `usage` and `description` drive `/help`, and `core/tui.py` derives its autocomplete catalog
     from the same specs. The menu therefore cannot offer fewer commands than the router executes.

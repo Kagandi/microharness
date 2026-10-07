@@ -11,7 +11,6 @@ from core.interactive import (
     TURN,
     CommandContext,
     CommandRouter,
-    ConsoleUI,
     TurnState,
     command_argument,
     expand_specs,
@@ -28,8 +27,8 @@ SKILL = Skill("deploy", "Deploy app", "d/SKILL.md", "project", "DEPLOY BODY")
 COMMAND = Command("review", "Review PR", "Review $ARGUMENTS", "project")
 
 
-class RecordingUI(ConsoleUI):
-    """Console sink that keeps its output instead of printing it."""
+class RecordingUI:
+    """SessionUI sink that keeps its output instead of printing it."""
 
     def __init__(self):
         self.infos: list[str] = []
@@ -56,6 +55,9 @@ class RecordingUI(ConsoleUI):
 
     def refresh(self):
         self.refreshes += 1
+
+    def render_context(self, stats, reasoning, cache):
+        return render_context_breakdown(stats, reasoning, cache)
 
     @property
     def all_text(self) -> str:
@@ -168,7 +170,7 @@ class TestRouterDispatch(RouterTestCase):
     def test_compact_reports_freed_tokens(self):
         """Invariant: a compaction that did work reports how much context it freed."""
         with patch.object(Memory, "compact_if_needed", return_value=True), patch.object(
-            Memory, "total_chars", side_effect=[8000, 4000]
+            Memory, "estimated_tokens", side_effect=[2000, 1000]
         ):
             self.assertEqual(self.router.dispatch("/compact"), SKIP)
         self.assertIn("freed ~1,000 tokens", self.ui.all_text)
@@ -197,6 +199,23 @@ class TestRouterDispatch(RouterTestCase):
         self.assertEqual(self.router.dispatch("/model fast"), SKIP)
         self.harness.switch_model.assert_called_once_with("fast")
         self.assertIn("Switched model to gemini", self.ui.successes)
+
+    def test_model_switch_synchronizes_state_and_runner(self):
+        """Invariant: /model synchronizes state.model_name, state.provider_name, and runner.model."""
+        new_model = MagicMock()
+        new_model.provider = "openrouter"
+        self.harness.switch_model.return_value = (True, "Switched model to claude", new_model)
+        self.harness.active_model_name.return_value = "claude-5.5-sonnet"
+
+        mock_state = MagicMock()
+        self.ui.state = mock_state
+        mock_runner = MagicMock()
+        self.router.ctx.runner = mock_runner
+
+        self.router.dispatch("/model smart")
+        self.assertEqual(mock_state.model_name, "claude-5.5-sonnet")
+        self.assertEqual(mock_state.provider_name, "openrouter")
+        self.assertEqual(mock_runner.model, new_model)
 
     def test_model_switch_failure_is_reported_as_an_error(self):
         """Invariant: a rejected switch surfaces as an error, not a success."""
@@ -281,6 +300,14 @@ class TestRouterDispatch(RouterTestCase):
         self.harness.set_reasoning_effort.return_value = "high"
         self.router.dispatch("/reasoning high")
         self.assertIn("switched to: HIGH", self.ui.successes[0])
+
+    def test_reasoning_switch_synchronizes_state(self):
+        """Invariant: /reasoning synchronizes state.reasoning."""
+        mock_state = MagicMock()
+        self.ui.state = mock_state
+        self.harness.set_reasoning_effort.return_value = "high"
+        self.router.dispatch("/reasoning high")
+        self.assertEqual(mock_state.reasoning, "HIGH")
 
     def test_reasoning_invalid_value_is_an_error(self):
         """Invariant: a rejected effort level surfaces the validation message."""

@@ -18,12 +18,12 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="System instructions",
             user_prompt="Task goal",
-            max_context_chars=1000,
+            max_context_tokens=250,
         )
         mem.add_assistant("Short response")
         mem.add_tool_result(ToolResult(call_id="c1", output="Short output"))
 
-        # Invariant: Compaction does nothing when below max_context_chars
+        # Invariant: Compaction does nothing when below max_context_tokens
         compacted = mem.compact_if_needed()
         self.assertFalse(compacted)
         self.assertEqual(mem.messages[-1].content, "Short output")
@@ -36,7 +36,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt=huge_system,
             user_prompt=huge_task,
-            max_context_chars=100,
+            max_context_tokens=25,
             keep_recent_turns=2,
         )
         mem.add_assistant("Step 1 thought")
@@ -55,7 +55,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="GOAL",
-            max_context_chars=150,
+            max_context_tokens=40,
             keep_recent_turns=2,
         )
 
@@ -85,7 +85,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_chars=1000,
+            max_context_tokens=250,
             trigger_ratio=0.80,
         )
         mem.add_assistant("reply", [])
@@ -98,16 +98,17 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(s["by_role"]["assistant"], 1)
         self.assertEqual(s["by_role"]["tool"], 1)
         self.assertEqual(s["trigger_ratio"], 0.80)
-        self.assertEqual(s["trigger_threshold_chars"], 800)
-        self.assertGreater(s["total_chars"], 0)
+        self.assertEqual(s["trigger_threshold_tokens"], 200)
+        self.assertEqual(s["max_context_tokens"], 250)
+        self.assertGreater(s["estimated_tokens"], 0)
         self.assertGreater(s["usage_pct"], 0.0)
 
     def test_compaction_triggers_at_high_water_mark_ratio(self):
-        # max_context_chars = 1000, trigger_ratio = 0.80 -> threshold is 800 chars
+        # max_context_tokens = 250, trigger_ratio = 0.80 -> threshold is 200 tokens (800 chars)
         mem = Memory(
             system_prompt="SYS",
             user_prompt="GOAL",
-            max_context_chars=1000,
+            max_context_tokens=250,
             trigger_ratio=0.80,
             keep_recent_turns=1,
         )
@@ -123,7 +124,7 @@ class TestMemory(unittest.TestCase):
         mem.add_tool_result(ToolResult(call_id="c2", output="Y" * 100))
         mem.add_assistant("Latest")
 
-        # Invariant: Compaction triggers proactively at 80% (800 chars), well before hitting 100% (1000 chars)
+        # Invariant: Compaction triggers proactively at 80% (200 tokens / 800 chars), well before hitting 100%
         self.assertTrue(mem.compact_if_needed(force=False))
         # Verify middle output was collapsed
         self.assertIn("[Tool output collapsed", mem.messages[3].content)
@@ -165,7 +166,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS_PROMPT",
             user_prompt="INITIAL",
-            max_context_chars=5000,
+            max_context_tokens=1250,
             keep_recent_turns=2,
         )
         mem.add_assistant("Plan", [ToolCall(id="c1", name="bash", arguments={})])
@@ -198,7 +199,7 @@ class TestMemory(unittest.TestCase):
     def test_compaction_with_no_system_prompt(self):
         # When system_prompt is empty, only initial user prompt is at index 0
         mem = Memory(
-            system_prompt="", user_prompt="TASK", max_context_chars=100, keep_recent_turns=1
+            system_prompt="", user_prompt="TASK", max_context_tokens=25, keep_recent_turns=1
         )
         mem.add_assistant("Step 1")
         mem.add_tool_result(ToolResult(call_id="c1", output="A" * 300))
@@ -217,7 +218,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_chars=100,
+            max_context_tokens=25,
             keep_recent_turns=2,
         )
         # Turn 1: thinking with actual response and tool call
@@ -262,7 +263,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_chars=100,
+            max_context_tokens=25,
             keep_recent_turns=1,
         )
         mem.add_assistant("Step 1")
@@ -304,7 +305,7 @@ class TestMemory(unittest.TestCase):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_chars=100,
+            max_context_tokens=25,
             keep_recent_turns=1,
         )
         mem.record_modified_file("src/main.py")

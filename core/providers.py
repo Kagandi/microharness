@@ -21,6 +21,9 @@ PROVIDER_ALIASES: dict[str, str] = {
     "gemini": "google",
     "google-ai-studio": "google",
     "open-router": "openrouter",
+    "lm-studio": "lmstudio",
+    "llama-cpp": "llamacpp",
+    "llama.cpp": "llamacpp",
 }
 
 # Last-resort API key lookup when neither the spec nor the provider profile names one.
@@ -202,7 +205,7 @@ def _discovered_models(
 ) -> list[dict[str, Any]]:
     """Falls back to the configured default model plus each provider's default model."""
     entries: list[dict[str, Any]] = []
-    current = config.get("model")
+    current = config.get("default_model") or config.get("defaultModel") or config.get("model")
     if current and str(current).strip():
         model = str(current).strip()
         entries.append(
@@ -318,6 +321,21 @@ class Connection:
         """True when no endpoint could be resolved, so no HTTP client is possible."""
         return not self.endpoint
 
+    @property
+    def is_local(self) -> bool:
+        """True when the endpoint targets a local development server without API auth."""
+        if not self.endpoint:
+            return False
+        ep = self.endpoint.lower()
+        return "localhost" in ep or "127.0.0.1" in ep or "::1" in ep
+
+    @property
+    def missing_credentials(self) -> bool:
+        """True when the connection requires an API key but none is configured."""
+        if self.is_offline or self.is_local:
+            return False
+        return not bool(self.api_key)
+
 
 def resolve_connection(
     spec: str | dict[str, Any],
@@ -339,7 +357,12 @@ def resolve_connection(
         resolved_registry, request.provider or cfg.get("provider")
     )
 
-    endpoint = request.endpoint or cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+    endpoint = request.endpoint
+    if not endpoint and profile.get("endpoint"):
+        endpoint = profile.get("endpoint")
+    if not endpoint:
+        endpoint = cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+
     if not profile and endpoint:
         detected_name, detected_profile = find_provider_by_endpoint(resolved_registry, endpoint)
         if detected_profile:
@@ -351,11 +374,13 @@ def resolve_connection(
     return Connection(
         model=(
             request.model
+            or cfg.get("default_model")
+            or cfg.get("defaultModel")
             or cfg.get("model")
             or os.getenv("MODEL_NAME")
             or profile.get("default_model", LAST_RESORT_MODEL)
         ),
-        endpoint=endpoint or profile.get("endpoint"),
+        endpoint=endpoint,
         provider=provider_name or profile.get("name"),
         api_key=resolve_api_key(request, profile, cfg),
         headers=headers,

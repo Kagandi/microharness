@@ -409,7 +409,7 @@ class TestTracer(unittest.TestCase):
 
     def test_reconstruct_messages_from_steps(self):
         """Invariant: reconstruct_messages_from_steps builds complete history including assistant calls and tool results."""
-        from core.tracer import reconstruct_messages_from_steps
+        from core.session import reconstruct_messages_from_steps
 
         # Empty steps -> empty messages
         self.assertEqual(reconstruct_messages_from_steps([]), [])
@@ -459,7 +459,7 @@ class TestTracer(unittest.TestCase):
 
     def test_load_session_messages_variants(self):
         """Invariant: load_session_messages recovers from trace.json, legacy steps-only trace, and crashed trajectory.jsonl."""
-        from core.tracer import load_session_messages
+        from core.session import load_session_messages
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir)
@@ -534,7 +534,7 @@ class TestTracer(unittest.TestCase):
         """Invariant: find_recent_sessions sorts by workspace affinity and recency with limit enforcement."""
         import os
 
-        from core.tracer import find_recent_sessions
+        from core.session import find_recent_sessions
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             runs_dir = Path(tmp_dir)

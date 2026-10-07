@@ -30,6 +30,7 @@ from core.model import (
     seed_user_providers,
 )
 from core.providers import (
+    Connection,
     build_model_from_spec,
     get_available_models_from_config,
     load_provider_registry,
@@ -196,11 +197,6 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Run single one-shot task and exit immediately without entering interactive chat",
     )
     parser.add_argument(
-        "--tui",
-        action="store_true",
-        help="Launch interactive mode in full-screen TUI with bottom-anchored chat",
-    )
-    parser.add_argument(
         "--resume",
         nargs="?",
         const=True,
@@ -252,7 +248,7 @@ def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--reasoning",
         default=None,
-        help="Reasoning/thinking effort level: 'low', 'medium', 'high', numeric token budget, or 'off' (env: REASONING_EFFORT or config.json)",
+        help="Reasoning/thinking effort level: 'low', 'medium', 'high', 'xhigh', 'max', numeric token budget, or 'off' (env: REASONING_EFFORT or config.json)",
     )
 
 
@@ -685,6 +681,43 @@ def main(argv: list[str] | None = None) -> None:
         _run_single_task(context, parser)
         return
 
+    if not sys.stdin.isatty():
+        print(
+            "❌ Interactive TUI requires a terminal. Use --batch for scripted/headless execution.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from core.model import HttpChatModel, MockModel
+
+    conn = (
+        Connection(
+            endpoint=context.model.endpoint,
+            api_key=context.model.api_key,
+            model=getattr(context.model, "model", "unknown"),
+        )
+        if isinstance(context.model, HttpChatModel)
+        else Connection()
+    )
+
+    if isinstance(context.model, MockModel) or conn.missing_credentials:
+        reason = (
+            f"No API key configured for model '{conn.model}'."
+            if conn.missing_credentials
+            else "No API key or model endpoint configured."
+        )
+        print(
+            f"❌ {reason}\n\n"
+            "To configure a provider, choose one of:\n"
+            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=...)\n"
+            "  2. Pass CLI flags: --provider <name> --api-key <key>\n"
+            "  3. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
+            "  4. Configure ~/.microharness/config.json with default_model and providers.\n\n"
+            "Tip: Run with --demo calculator to test offline without API credentials.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     sandbox = args.sandbox or bool(context.config.get("sandbox", False))
     harness = Harness(
         model=context.model,
@@ -700,10 +733,7 @@ def main(argv: list[str] | None = None) -> None:
         verbose=True,
     )
 
-    if args.tui:
-        harness.run_tui(initial_instruction=args.instruction, resume=args.resume)
-    else:
-        harness.run_interactive(initial_instruction=args.instruction, resume=args.resume)
+    harness.run_tui(initial_instruction=args.instruction, resume=args.resume)
 
 
 if __name__ == "__main__":

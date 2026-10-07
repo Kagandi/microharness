@@ -1,8 +1,8 @@
 """Running an agent turn inside the full-screen TUI.
 
-The plain-text session delegates to :func:`core.session.run_steps`; the TUI
-cannot, because it must stay responsive and redraw between steps. This module
-holds that TUI-specific loop: step rendering, the cooperative cancel probe, and
+The TUI maintains its own turn loop because it must stay responsive, probe
+for cooperative cancellation, and redraw between individual steps. This module
+holds that TUI-specific runner: step rendering, cancellation probes, and
 turn abort handling.
 """
 
@@ -65,9 +65,11 @@ class TuiTurnRunner:
         self.step_index = step_index
 
     def refresh(self) -> None:
-        """Updates the status area and repaints, if a screen is attached."""
+        """Updates the status area and requests a redraw from the main UI thread."""
         self.state.update_status(self.memory.stats(), self.cache_stats())
-        if self.tui.stdscr:
+        if hasattr(self.tui, "request_redraw"):
+            self.tui.request_redraw()
+        elif getattr(self.tui, "stdscr", None):
             self.tui.draw(self.tui.stdscr)
 
     def run_turn(self, max_steps: int = MAX_STEPS_PER_TURN) -> None:

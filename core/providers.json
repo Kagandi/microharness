@@ -8,7 +8,7 @@
   },
   "openrouter": {
     "endpoint": "https://openrouter.ai/api/v1",
-    "default_model": "stealth/space-bunny-alpha",
+    "default_model": "anthropic/claude-5.5-sonnet",
     "env_keys": ["OPENROUTER_API_KEY"],
     "headers": {
       "HTTP-Referer": "https://github.com/microharness",
@@ -26,7 +26,7 @@
   },
   "anthropic": {
     "endpoint": "https://api.anthropic.com/v1",
-    "default_model": "claude-3-5-sonnet-20241022",
+    "default_model": "claude-5.5-sonnet",
     "env_keys": ["ANTHROPIC_API_KEY"],
     "headers": {
       "anthropic-version": "2023-06-01"
@@ -46,6 +46,34 @@
     "default_model": "qwen2.5-coder:7b",
     "env_keys": [],
     "reasoning_format": "none",
+    "cache_strategy": "none"
+  },
+  "lmstudio": {
+    "endpoint": "http://localhost:1234/v1",
+    "default_model": "qwen2.5-coder-7b-instruct",
+    "env_keys": [],
+    "reasoning_format": "standard",
+    "cache_strategy": "none"
+  },
+  "vllm": {
+    "endpoint": "http://localhost:8000/v1",
+    "default_model": "qwen2.5-coder-7b-instruct",
+    "env_keys": [],
+    "reasoning_format": "standard",
+    "cache_strategy": "none"
+  },
+  "llamacpp": {
+    "endpoint": "http://localhost:8080/v1",
+    "default_model": "local-model",
+    "env_keys": [],
+    "reasoning_format": "standard",
+    "cache_strategy": "none"
+  },
+  "local": {
+    "endpoint": "http://localhost:1234/v1",
+    "default_model": "qwen2.5-coder-7b-instruct",
+    "env_keys": [],
+    "reasoning_format": "standard",
     "cache_strategy": "none"
   },
   "groq": {

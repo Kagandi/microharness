@@ -1,12 +1,9 @@
-"""Interactive command routing shared by the CLI session and the TUI.
+"""Interactive command routing for microharness.
 
-Both frontends answer the same questions (``/model``, ``/resume``, ``/compact``,
-``/skill``, ...) and differ only in how they render. A handler therefore does
-the work and reports through a :class:`SessionUI` sink, and the router returns
-one of three actions for the caller to act on.
-
-This is what keeps the two frontends from drifting: adding a command means one
-handler, not two.
+Handlers process slash commands (``/model``, ``/resume``, ``/compact``,
+``/skill``, ...) and report through a :class:`SessionUI` sink, returning
+one of three actions for the caller to act on (:data:`EXIT`, :data:`TURN`, or
+:data:`SKIP`).
 """
 
 from __future__ import annotations
@@ -30,11 +27,9 @@ EXIT = "exit"
 TURN = "turn"
 SKIP = "skip"
 
-CHARS_PER_TOKEN = 4
-
 REASONING_USAGE = (
     "  • Usage: /reasoning low | /reasoning medium | /reasoning high | "
-    "/reasoning off | /reasoning <tokens>"
+    "/reasoning xhigh | /reasoning max | /reasoning off | /reasoning <tokens>"
 )
 CACHE_USAGE = "  • Usage: /cache 5m | /cache 1h | /cache off"
 
@@ -68,26 +63,30 @@ class SessionUI(Protocol):
         """Renders the context report in this frontend's preferred shape."""
 
 
-class ConsoleUI:
-    """Print-based sink for the plain-text session."""
+class NullUI:
+    """Headless no-op UI sink for silent execution, headless batch runs, and tests.
+
+    Suppresses all terminal output and UI notifications (info, success, error, status).
+    Errors are not printed to stdout/stderr; debugging traces should inspect the Tracer.
+    """
 
     def info(self, text: str) -> None:
-        print(f"\n{text}\n")
+        pass
 
     def success(self, text: str) -> None:
-        print(f"\n✅ {text}\n")
+        pass
 
     def error(self, text: str) -> None:
-        print(f"\n❌ {text}\n")
+        pass
 
     def status(self, text: str) -> None:
-        print(text)
+        pass
 
     def echo(self, text: str) -> None:
-        """A terminal already echoes typed input."""
+        pass
 
     def refresh(self) -> None:
-        """Nothing to refresh on a plain-text console."""
+        pass
 
     def render_context(
         self, stats: dict[str, Any], reasoning: str | None, cache: dict[str, Any]
@@ -145,6 +144,7 @@ class CommandContext:
     skills: dict[str, Skill] = field(default_factory=dict)
     tracer: Tracer | None = None
     turns: TurnState = field(default_factory=TurnState)
+    runner: Any = None
 
 
 @dataclass(frozen=True)
@@ -384,7 +384,7 @@ def render_context_breakdown(
     reasoning: str | None,
     cache: dict[str, Any],
 ) -> list[str]:
-    """Renders the multi-line context report used by the plain-text session."""
+    """Renders the detailed multi-line context report."""
     roles = stats["by_role"]
     lines = [
         "📊 Context Breakdown:",
@@ -481,9 +481,9 @@ class CommandRouter:
 
     def _cmd_compact(self, _arg: str) -> str:
         memory = self.ctx.memory
-        before = memory.total_chars() // CHARS_PER_TOKEN
+        before = memory.estimated_tokens()
         compacted = memory.compact_if_needed(force=True)
-        after = memory.total_chars() // CHARS_PER_TOKEN
+        after = memory.estimated_tokens()
 
         if compacted:
             self.ctx.ui.info(
@@ -510,8 +510,18 @@ class CommandRouter:
             self.ctx.ui.status("Tip: Type /model <name|number> to switch active model.")
             return SKIP
 
-        ok, message, _ = self.ctx.harness.switch_model(arg)
-        (self.ctx.ui.success if ok else self.ctx.ui.error)(message)
+        ok, message, new_model = self.ctx.harness.switch_model(arg)
+        if ok:
+            self.ctx.ui.success(message)
+            state = getattr(self.ctx.ui, "state", None)
+            if state is not None:
+                state.model_name = self.ctx.harness.active_model_name()
+                state.provider_name = getattr(new_model, "provider", "") or ""
+            runner = getattr(self.ctx, "runner", None)
+            if runner is not None:
+                runner.model = new_model
+        else:
+            self.ctx.ui.error(message)
         self.ctx.ui.refresh()
         return SKIP
 
@@ -577,6 +587,9 @@ class CommandRouter:
             )
         else:
             self.ctx.ui.success("🧠 Reasoning effort disabled (off) for subsequent turns.")
+        state = getattr(self.ctx.ui, "state", None)
+        if state is not None:
+            state.reasoning = effort.upper() if effort else ""
         self.ctx.ui.refresh()
         return SKIP
 
@@ -600,6 +613,9 @@ class CommandRouter:
             )
         else:
             self.ctx.ui.success("⚡ Prompt caching disabled for subsequent turns.")
+        state = getattr(self.ctx.ui, "state", None)
+        if state is not None:
+            state.cache_ttl = ttl.upper() if ttl else ""
         self.ctx.ui.refresh()
         return SKIP
 

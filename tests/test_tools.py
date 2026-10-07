@@ -22,7 +22,7 @@ class TestTools(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.env = Environment(workspace_dir=self.temp_dir, cleanup_on_teardown=True)
-        self.registry = ToolRegistry(env=self.env, max_tool_chars=120)
+        self.registry = ToolRegistry(env=self.env, max_tool_tokens=30)
         self.registry.register(BashTool(self.env))
         self.registry.register(ReadFileTool(self.env))
         self.registry.register(WriteFileTool(self.env))
@@ -39,7 +39,7 @@ class TestTools(unittest.TestCase):
             tool_name="bash",
             step_index=1,
             logs_dir=self.env.logs_dir,
-            max_chars=120,
+            max_tokens=30,
         )
 
         self.assertFalse(was_truncated)
@@ -56,14 +56,14 @@ class TestTools(unittest.TestCase):
         tail_part = ("." * 90) + "TRAILER_FINISH"  # > 80 chars (tail_size)
         full_text = head_part + middle_part + tail_part
 
-        max_chars = 120
+        max_tokens = 30
         formatted, was_truncated, log_path = format_tool_output(
             output=full_text,
             call_id="call_long",
             tool_name="bash",
             step_index=1,
             logs_dir=self.env.logs_dir,
-            max_chars=max_chars,
+            max_tokens=max_tokens,
         )
 
         self.assertTrue(was_truncated)
@@ -162,7 +162,7 @@ class TestTools(unittest.TestCase):
                 tool_name="bash",
                 step_index=1,
                 logs_dir=self.env.logs_dir,
-                max_chars=1000,
+                max_tokens=250,
             )
             self.assertTrue(was_truncated)
             self.assertIsNone(raw_log_path)
