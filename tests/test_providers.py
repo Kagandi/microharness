@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.model import HttpChatModel, MockModel
 from core.providers import (
@@ -29,7 +29,7 @@ class TestRegistryLoading(unittest.TestCase):
     def test_builtin_registry_has_the_expected_providers(self):
         """Invariant: the committed providers.json seeds the well-known endpoints."""
         registry = load_builtin_providers()
-        for name in ("google", "openrouter", "openai", "anthropic"):
+        for name in ("google", "openrouter", "openai", "anthropic", "bedrock"):
             self.assertIn(name, registry)
             self.assertTrue(registry[name]["endpoint"].startswith("https://"))
         for name in ("lmstudio", "vllm", "llamacpp", "ollama", "local"):
@@ -431,6 +431,473 @@ class TestResolveConnection(unittest.TestCase):
 
         conn_local = resolve_connection("local", config=config, registry=self.REGISTRY)
         self.assertEqual(conn_local.endpoint, "http://localhost:1234/v1")
+
+
+class TestBedrockProvider(unittest.TestCase):
+    """Bedrock ships as an OpenAI-compatible shim with a regional endpoint and a bearer token."""
+
+    REGISTRY = {
+        "bedrock": {
+            "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+            "default_model": "anthropic.claude-sonnet-5-5",
+            "env_keys": ["BEDROCK_API_KEY"],
+        }
+    }
+
+    def test_builtin_registry_registers_bedrock(self):
+        """Invariant: bedrock is a built-in provider with a regional endpoint template."""
+        registry = load_builtin_providers()
+        self.assertIn("bedrock", registry)
+        self.assertIn("{region}", registry["bedrock"]["endpoint"])
+        self.assertTrue(registry["bedrock"]["endpoint"].startswith("https://"))
+        self.assertTrue(registry["bedrock"]["env_keys"])
+        self.assertTrue(registry["bedrock"]["default_model"])
+
+    def test_endpoint_match_maps_a_regional_url_back_to_the_template(self):
+        """Invariant: a concrete regional URL is attributed to the templated profile."""
+        name, profile = find_provider_by_endpoint(
+            self.REGISTRY, "https://bedrock-runtime.eu-west-2.amazonaws.com/openai/v1"
+        )
+        self.assertEqual(name, "bedrock")
+        self.assertEqual(profile["default_model"], "anthropic.claude-sonnet-5-5")
+
+    def test_endpoint_match_rejects_an_unrelated_host(self):
+        """Invariant: a template wildcard never attributes an unrelated endpoint."""
+        self.assertEqual(
+            find_provider_by_endpoint(self.REGISTRY, "https://evil.example/openai/v1"),
+            (None, {}),
+        )
+
+    def test_region_is_substituted_from_the_aws_environment(self):
+        """Invariant: AWS_REGION fills the endpoint template at resolution time."""
+        with patch.dict(os.environ, {"AWS_REGION": "eu-west-1"}, clear=True):
+            connection = resolve_connection(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertEqual(
+            connection.endpoint,
+            "https://bedrock-runtime.eu-west-1.amazonaws.com/openai/v1",
+        )
+        self.assertEqual(connection.model, "anthropic.claude-sonnet-5-5")
+        self.assertEqual(connection.provider, "bedrock")
+
+    def test_region_in_config_wins_over_the_environment(self):
+        """Invariant: an explicit config region outranks AWS environment variables."""
+        env = {"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "us-east-1"}
+        with patch.dict(os.environ, env, clear=True):
+            connection = resolve_connection(
+                {"model": "m", "provider": "bedrock"},
+                config={"region": "ap-south-1"},
+                registry=self.REGISTRY,
+            )
+        self.assertEqual(
+            connection.endpoint, "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1"
+        )
+
+    def test_aws_default_region_is_the_last_env_fallback(self):
+        """Invariant: AWS_DEFAULT_REGION is honoured when AWS_REGION is unset."""
+        with patch.dict(os.environ, {"AWS_DEFAULT_REGION": "us-east-2"}, clear=True):
+            connection = resolve_connection(
+                {"model": "m", "provider": "bedrock"}, registry=self.REGISTRY
+            )
+        self.assertEqual(
+            connection.endpoint, "https://bedrock-runtime.us-east-2.amazonaws.com/openai/v1"
+        )
+
+    def test_missing_region_is_reported_offline(self):
+        """Invariant: an unfillable template is offline, never a literal '{region}' URL."""
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                connection = resolve_connection(
+                    "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+                )
+        self.assertTrue(connection.is_offline)
+        self.assertIsNone(connection.endpoint)
+
+    def test_builds_a_regional_client_with_a_bearer_token(self):
+        """Invariant: a bedrock spec yields an HttpChatModel pointed at the region's shim."""
+        env = {"AWS_REGION": "ap-south-1", "BEDROCK_API_KEY": "brk-token"}
+        with patch.dict(os.environ, env, clear=True):
+            model = build_model_from_spec(
+                "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+            )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(
+            model.endpoint,
+            "https://bedrock-runtime.ap-south-1.amazonaws.com/openai/v1/chat/completions",
+        )
+        self.assertEqual(model.api_key, "brk-token")
+        self.assertEqual(model.model, "anthropic.claude-sonnet-5-5")
+        self.assertEqual(model.provider, "bedrock")
+
+    def test_model_id_version_suffix_survives_parsing(self):
+        """Invariant: a colon-suffixed Bedrock id is not split into provider and model."""
+        request = parse_model_spec("bedrock/us.amazon.nova-premier-v1:0", {}, self.REGISTRY)
+        self.assertEqual(request.model, "us.amazon.nova-premier-v1:0")
+        self.assertEqual(request.provider, "bedrock")
+
+    def test_offline_without_region_falls_back_to_the_mock_model(self):
+        """Invariant: a bedrock spec without a region still runs, offline, with a hint."""
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {"HOME": home}, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/anthropic.claude-sonnet-5-5", registry=self.REGISTRY
+                )
+        self.assertIsInstance(model, MockModel)
+        self.assertIn("AWS_REGION", model.script[0][0])
+
+    def test_default_model_is_offered_in_discovery(self):
+        """Invariant: the bedrock default appears in the /model listing via discovery."""
+        entries = get_available_models_from_config({}, self.REGISTRY)
+        self.assertIn("anthropic.claude-sonnet-5-5", [e["model"] for e in entries])
+
+
+SIGV4_REGISTRY = {
+    "bedrock": {
+        "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+        "default_model": "us.openai.gpt-5.6-sol",
+        "env_keys": ["BEDROCK_API_KEY"],
+        "reasoning_format": "none",
+        "cache_strategy": "none",
+        "auth": {"scheme": "sigv4", "service": "bedrock"},
+    }
+}
+
+
+def _clean_aws_env(home: str) -> dict:
+    return {
+        "HOME": home,
+        "AWS_ACCESS_KEY_ID": "",
+        "AWS_SECRET_ACCESS_KEY": "",
+        "AWS_SESSION_TOKEN": "",
+        "AWS_REGION": "",
+        "AWS_DEFAULT_REGION": "",
+        "AWS_PROFILE": "",
+        "BEDROCK_API_KEY": "",
+        "MODEL_ENDPOINT": "",
+        "MODEL_NAME": "",
+    }
+
+
+class TestBedrockSigV4Wiring(unittest.TestCase):
+    def test_builtin_bedrock_uses_sigv4_and_working_default(self):
+        """Invariant: the shipped bedrock entry signs SigV4 with a usable default model."""
+        registry = load_builtin_providers()
+        self.assertEqual(
+            registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
+        )
+        self.assertEqual(registry["bedrock"]["default_model"], "us.openai.gpt-5.6-sol")
+
+    def test_no_credentials_reports_auth_error_with_sso_hint(self):
+        """Invariant: offline SSO-less SigV4 names `aws sso login`, never 'offline'."""
+
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                connection = resolve_connection(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"region": "us-east-1"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+                self.assertEqual(connection.auth_scheme, "sigv4")
+                self.assertEqual(
+                    connection.auth_options, {"service": "bedrock", "aws_profile": "default"}
+                )
+                self.assertIsNotNone(connection.auth_error)
+                assert connection.auth_error is not None
+                self.assertIn("aws sso login", connection.auth_error)
+                self.assertNotIn("offline", connection.auth_error.lower())
+                self.assertTrue(connection.missing_credentials)
+
+    def test_auth_error_builds_a_mock_model_carrying_the_hint(self):
+        """Invariant: an unresolvable SigV4 connection still runs, offline, with the hint."""
+
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"region": "us-east-1"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+        self.assertIsInstance(model, MockModel)
+        self.assertIn("aws sso login", model.script[0][0])
+
+    def test_sigv4_client_is_built_from_env_credentials(self):
+        """Invariant: env AWS credentials yield a SigV4 HttpChatModel, not a MockModel."""
+
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update(
+                {
+                    "AWS_ACCESS_KEY_ID": "AKID",
+                    "AWS_SECRET_ACCESS_KEY": "SECRET",
+                    "AWS_REGION": "us-east-1",
+                }
+            )
+            with patch.dict(os.environ, env, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(
+            model.endpoint,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+        )
+        self.assertEqual(model.auth_scheme, "sigv4")
+        self.assertEqual(model.auth_options, {"service": "bedrock", "aws_profile": "default"})
+        self.assertEqual(
+            model.auth_secrets,
+            {
+                "access_key": "AKID",
+                "secret_key": "SECRET",
+                "session_token": None,
+                "region": "us-east-1",
+            },
+        )
+
+    def test_sigv4_request_carries_an_aws4_authorization_header(self):
+        """Invariant: a SigV4 generate() signs the wire request (mocked urlopen)."""
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update(
+                {
+                    "AWS_ACCESS_KEY_ID": "AKID",
+                    "AWS_SECRET_ACCESS_KEY": "SECRET",
+                    "AWS_REGION": "us-east-1",
+                }
+            )
+            with patch.dict(os.environ, env, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+            from core.types import Message
+
+            resp = MagicMock()
+            resp.read.return_value = json.dumps(
+                {"choices": [{"message": {"content": "hello"}}]}
+            ).encode("utf-8")
+            resp.__enter__.return_value = resp
+            with patch.dict(os.environ, env, clear=True):
+                with patch("urllib.request.urlopen", return_value=resp) as mock_urlopen:
+                    content, _ = model.generate([Message(role="user", content="hi")], [])
+        self.assertEqual(content, "hello")
+        (request,), _ = mock_urlopen.call_args
+        auth = request.get_header("Authorization")
+        self.assertTrue(auth.startswith("AWS4-HMAC-SHA256 "))
+        self.assertIn("bedrock/aws4_request", auth)
+        self.assertNotIn("Bearer", auth)
+
+    def test_stale_user_registry_is_backfilled_with_auth(self):
+        """Invariant: a pre-SigV4 user copy gains the auth key; user edits still win."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            stale = {
+                "bedrock": {
+                    "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+                    "default_model": "my-pinned-model",
+                    "env_keys": ["BEDROCK_API_KEY"],
+                    "reasoning_format": "none",
+                    "cache_strategy": "none",
+                }
+            }
+            (global_dir / "providers.json").write_text(json.dumps(stale), encoding="utf-8")
+            registry = load_provider_registry(global_dir=global_dir)
+        self.assertEqual(
+            registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
+        )
+        self.assertEqual(registry["bedrock"]["default_model"], "my-pinned-model")
+
+    def test_spec_dict_auth_beats_config_auth_beats_profile_auth(self):
+        """Invariant: auth precedence is spec-dict > config > profile."""
+
+        profile = {"endpoint": "https://x/v1", "auth": {"scheme": "none"}}
+        registry = {"custom": profile}
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                conn_profile = resolve_connection(
+                    {"model": "m", "provider": "custom"}, registry=registry
+                )
+                self.assertEqual(conn_profile.auth_scheme, "none")
+                conn_cfg = resolve_connection(
+                    {"model": "m", "provider": "custom"},
+                    config={"auth": "bearer"},
+                    registry=registry,
+                )
+                self.assertEqual(conn_cfg.auth_scheme, "bearer")
+                conn_spec = resolve_connection(
+                    {"model": "m", "provider": "custom", "auth": {"scheme": "none"}},
+                    config={"auth": "bearer"},
+                    registry=registry,
+                )
+                self.assertEqual(conn_spec.auth_scheme, "none")
+
+    def test_model_module_has_no_provider_branches(self):
+        """Invariant: core/model.py never names bedrock (registry-driven auth only)."""
+        from pathlib import Path as _Path
+
+        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("bedrock", source.lower())
+
+
+class TestWave6AuthWiring(unittest.TestCase):
+    def test_string_alias_carrying_auth_none_is_honored(self):
+        """Invariant: a string alias resolving to a dict with auth uses that auth."""
+        registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "bearer"}}
+        config = {
+            "models": {
+                "fast": {
+                    "model": "m",
+                    "provider": "custom",
+                    "auth": {"scheme": "none"},
+                }
+            }
+        }
+        conn = resolve_connection("fast", config=config, registry=registry)
+        self.assertEqual(conn.auth_scheme, "none")
+
+    def test_string_alias_to_bare_id_uses_profile_auth(self):
+        """Invariant: a string alias resolving to a bare id keeps profile auth."""
+        registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "bearer"}}
+        config = {"models": {"fast": "custom/m"}}
+        conn = resolve_connection("fast", config=config, registry=registry)
+        self.assertEqual(conn.auth_scheme, "bearer")
+
+    def test_bedrock_api_key_overrides_sigv4_with_bearer(self):
+        """Invariant: BEDROCK_API_KEY turns a SigV4 spec into a bearer client."""
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update({"BEDROCK_API_KEY": "brk-token", "AWS_REGION": "us-east-1"})
+            with patch.dict(os.environ, env, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.auth_scheme, "bearer")
+        self.assertEqual(
+            model.endpoint,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+        )
+        self.assertEqual(model.auth_secrets, {"api_key": "brk-token"})
+
+    def test_custom_aws_profile_flows_into_auth_options(self):
+        """Invariant: config aws_profile is stashed in auth_options for sigv4."""
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                conn = resolve_connection(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"region": "us-east-1", "aws_profile": "myprof"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+                self.assertEqual(conn.auth_scheme, "sigv4")
+                self.assertEqual(conn.auth_options["aws_profile"], "myprof")
+                self.assertTrue(conn.missing_credentials)
+
+    def test_missing_credentials_is_profile_aware(self):
+        """Invariant: shared-file creds for the stashed profile clear the gate."""
+        with tempfile.TemporaryDirectory() as home:
+            aws_dir = Path(home) / ".aws"
+            aws_dir.mkdir()
+            (aws_dir / "credentials").write_text(
+                "[myprof]\naws_access_key_id = AKID-FILE\n"
+                "aws_secret_access_key = SECRET-FILE\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                conn = resolve_connection(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"region": "us-east-1", "aws_profile": "myprof"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+                self.assertFalse(conn.missing_credentials)
+
+    def test_main_gate_reconstruction_carries_auth_error_and_profile(self):
+        """Invariant: the main.py credentials-gate shape keeps auth_error/profile."""
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, _clean_aws_env(home), clear=True):
+                conn = resolve_connection(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"region": "us-east-1", "aws_profile": "myprof"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+                rebuilt = Connection(
+                    endpoint=conn.endpoint,
+                    api_key=conn.api_key,
+                    model=conn.model,
+                    auth_scheme=conn.auth_scheme,
+                    auth_options=dict(conn.auth_options),
+                    auth_error=conn.auth_error,
+                )
+                self.assertEqual(rebuilt.auth_options.get("aws_profile"), "myprof")
+                self.assertIsNotNone(rebuilt.auth_error)
+                assert rebuilt.auth_error is not None
+                self.assertIn("aws sso login", rebuilt.auth_error)
+                self.assertTrue(rebuilt.missing_credentials)
+
+    def test_missing_credentials_none_is_false(self):
+        """Invariant: scheme none never reports missing credentials."""
+        conn = Connection(
+            model="m",
+            endpoint="https://x.example/v1",
+            auth_scheme="none",
+        )
+        self.assertFalse(conn.missing_credentials)
+
+    def test_missing_credentials_header_env_source(self):
+        """Invariant: header env:VAR is missing exactly when the variable is unset."""
+        conn = Connection(
+            model="m",
+            endpoint="https://x.example/v1",
+            auth_scheme="header",
+            auth_options={"name": "X-Api-Key", "value_source": "env:TEST_MH_W6_KEY"},
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("TEST_MH_W6_KEY", None)
+            self.assertTrue(conn.missing_credentials)
+        with patch.dict(os.environ, {"TEST_MH_W6_KEY": "v"}):
+            self.assertFalse(conn.missing_credentials)
+
+    def test_unknown_scheme_fails_fast_in_build(self):
+        """Invariant: an unknown scheme raises ValueError before any client exists."""
+        registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "nope-xyz"}}
+        with self.assertRaises(ValueError):
+            build_model_from_spec(
+                {"model": "m", "provider": "custom"}, registry=registry
+            )
+
+    def test_backfill_values_are_deep_copied(self):
+        """Invariant: mutating a returned profile auth never touches fresh registries."""
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            stale = {
+                "bedrock": {
+                    "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+                    "default_model": "my-pinned-model",
+                    "env_keys": ["BEDROCK_API_KEY"],
+                    "reasoning_format": "none",
+                    "cache_strategy": "none",
+                }
+            }
+            (global_dir / "providers.json").write_text(json.dumps(stale), encoding="utf-8")
+            first = load_provider_registry(global_dir=global_dir)
+        first["bedrock"]["auth"]["scheme"] = "mutated"
+        self.assertEqual(
+            load_builtin_providers()["bedrock"]["auth"],
+            {"scheme": "sigv4", "service": "bedrock"},
+        )
+        with tempfile.TemporaryDirectory() as tmp2:
+            global_dir2 = Path(tmp2)
+            (global_dir2 / "providers.json").write_text(
+                json.dumps(stale), encoding="utf-8"
+            )
+            second = load_provider_registry(global_dir=global_dir2)
+        self.assertEqual(
+            second["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
+        )
 
 
 class TestResolveModelSpec(unittest.TestCase):

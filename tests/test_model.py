@@ -172,6 +172,7 @@ class TestModel(unittest.TestCase):
         m = HttpChatModel(
             base_url="https://openrouter.ai/api/v1",
             model="anthropic/claude-3.5-sonnet",
+            api_key="test-key",
             cache_ttl="5m",
         )
 
@@ -224,6 +225,7 @@ class TestModel(unittest.TestCase):
         m = HttpChatModel(
             base_url="https://openrouter.ai/api/v1",
             model="anthropic/claude-5.5-sonnet",
+            api_key="test-key",
             cache_ttl="1h",
         )
 
@@ -271,6 +273,7 @@ class TestModel(unittest.TestCase):
         m = HttpChatModel(
             base_url="https://openrouter.ai/api/v1",
             model="test",
+            api_key="test-key",
             cache_ttl="off",
         )
 
@@ -323,7 +326,7 @@ class TestModel(unittest.TestCase):
 
         mock_urlopen.side_effect = [http_err, mock_success]
 
-        m = HttpChatModel(base_url="http://test/v1", model="test")
+        m = HttpChatModel(base_url="http://test/v1", model="test", api_key="test-key")
         content, _ = m.generate([Message(role="user", content="hi")], [])
 
         self.assertEqual(content, "recovered")
@@ -348,7 +351,7 @@ class TestModel(unittest.TestCase):
         )
         mock_urlopen.side_effect = http_err
 
-        m = HttpChatModel(base_url="http://test/v1", model="test")
+        m = HttpChatModel(base_url="http://test/v1", model="test", api_key="test-key")
         with self.assertRaises(RateLimitError) as ctx:
             m.generate([Message(role="user", content="hi")], [])
 
@@ -919,7 +922,7 @@ class TestModel(unittest.TestCase):
 
         mock_urlopen.side_effect = [err, success_resp]
 
-        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini")
+        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini", api_key="test-key")
         result = m._send_request(payload={"model": "gemini"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
@@ -991,7 +994,7 @@ class TestModel(unittest.TestCase):
         )
         mock_urlopen.side_effect = err
 
-        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m")
+        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m", api_key="test-key")
         # Fail the first attempt, then report a cancel for every later check.
         calls = {"n": 0}
 
@@ -1023,7 +1026,7 @@ class TestModel(unittest.TestCase):
         )
         mock_urlopen.side_effect = err
 
-        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m")
+        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="m", api_key="test-key")
         # Neutralise the backoff so only the pre-attempt guard can observe the cancel.
         m._wait_or_cancel = lambda seconds: None
 
@@ -1056,7 +1059,7 @@ class TestModel(unittest.TestCase):
         )
         mock_urlopen.side_effect = err
 
-        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="test")
+        m = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="test", api_key="test-key")
         with self.assertRaises(RateLimitError) as ctx:
             m._send_request(payload={"model": "test"}, headers={})
 
@@ -1084,7 +1087,7 @@ class TestModel(unittest.TestCase):
 
         mock_urlopen.side_effect = [err, success_resp]
 
-        m = HttpChatModel(base_url="https://api.example.com", model="test-model")
+        m = HttpChatModel(base_url="https://api.example.com", model="test-model", api_key="test-key")
         result = m._send_request(payload={"prompt": "hi"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
@@ -1127,6 +1130,7 @@ class TestModel(unittest.TestCase):
         model = HttpChatModel(
             base_url="https://api.example.com",
             model="test-model",
+            api_key="test-key",
             timeout=90.0,
         )
         model.set_deadline(time.time() - 1.0)
@@ -1146,6 +1150,7 @@ class TestModel(unittest.TestCase):
         model = HttpChatModel(
             base_url="https://api.example.com",
             model="test-model",
+            api_key="test-key",
             timeout=90.0,
         )
         # Set deadline 3.0 seconds in the future
@@ -1173,6 +1178,7 @@ class TestModel(unittest.TestCase):
         model = HttpChatModel(
             base_url="https://api.example.com",
             model="test-model",
+            api_key="test-key",
             timeout=15.0,
         )
         # Set deadline 100.0s in the future (remaining >> timeout)
@@ -1197,6 +1203,7 @@ class TestModel(unittest.TestCase):
         model = HttpChatModel(
             base_url="https://api.example.com",
             model="test-model",
+            api_key="test-key",
             timeout=15.0,
         )
         # Set deadline barely in the future (remaining ~0.02s < 0.1s floor)
@@ -1363,6 +1370,104 @@ class TestModel(unittest.TestCase):
             build_model_from_spec("", config=config, registry=registry)
         with self.assertRaises(ValueError):
             build_model_from_spec(123, config=config, registry=registry)  # type: ignore
+
+
+class TestBearerFailClosed(unittest.TestCase):
+    def test_nonlocal_bearer_without_key_raises_before_urlopen(self):
+        """Invariant: a non-local bearer client without a key fails closed, unsent."""
+        m = HttpChatModel(base_url="https://api.example.com/v1", model="m")
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            with self.assertRaises(ValueError):
+                m.generate([Message(role="user", content="hi")], [])
+            mock_urlopen.assert_not_called()
+
+    def test_local_keyless_clients_still_send(self):
+        """Invariant: localhost/127.0.0.1/::1 keep legacy keyless behavior."""
+        for base in (
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+        ):
+            mock_response = MagicMock()
+            mock_response.read.return_value = json.dumps(
+                {"choices": [{"message": {"content": "local-ok"}}]}
+            ).encode("utf-8")
+            mock_response.__enter__.return_value = mock_response
+            with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+                m = HttpChatModel(base_url=base, model="m")
+                content, _ = m.generate([Message(role="user", content="hi")], [])
+            self.assertEqual(content, "local-ok")
+            mock_urlopen.assert_called_once()
+
+
+class TestWave6SigningFreshness(unittest.TestCase):
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_retry_resigns_with_distinct_amz_dates(self, mock_urlopen, mock_sleep):
+        """Invariant: a retried SigV4 request carries a fresh x-amz-date per attempt."""
+        import urllib.error
+
+        err = urllib.error.HTTPError(
+            url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=b"upstream down")),
+        )
+        success = MagicMock()
+        success.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "recovered"}}]}
+        ).encode("utf-8")
+        success.__enter__.return_value = success
+        mock_urlopen.side_effect = [err, success]
+
+        m = HttpChatModel(
+            base_url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            model="m",
+            auth_scheme="sigv4",
+            auth_options={"service": "bedrock"},
+            auth_secrets={
+                "access_key": "AKID",
+                "secret_key": "SECRET",
+                "region": "us-east-1",
+            },
+        )
+        with patch(
+            "core.auth_sigv4._amz_timestamp",
+            side_effect=["20260101T000000Z", "20260101T000001Z"],
+        ):
+            result = m._send_request(payload={"model": "m"}, headers={})
+        self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
+
+        def amz_date_of(request) -> str | None:
+            for key, value in dict(request.headers).items():
+                if key.lower() == "x-amz-date":
+                    return value
+            return None
+
+        dates = [amz_date_of(call[0][0]) for call in mock_urlopen.call_args_list]
+        self.assertEqual(dates, ["20260101T000000Z", "20260101T000001Z"])
+
+    @patch("urllib.request.urlopen")
+    def test_401_error_text_contains_no_secret(self, mock_urlopen):
+        """Invariant: an auth failure never echoes the api_key in its message."""
+        import urllib.error
+
+        secret = "sk-super-secret-xyz-401"
+        err = urllib.error.HTTPError(
+            url="https://api.example.com/v1/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=MagicMock(read=MagicMock(return_value=b'{"error": "bad key"}')),
+        )
+        mock_urlopen.side_effect = err
+        m = HttpChatModel(
+            base_url="https://api.example.com/v1", model="m", api_key=secret
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            m.generate([Message(role="user", content="hi")], [])
+        self.assertNotIn(secret, str(ctx.exception))
 
 
 if __name__ == "__main__":

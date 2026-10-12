@@ -512,6 +512,10 @@ class CommandRouter:
 
         ok, message, new_model = self.ctx.harness.switch_model(arg)
         if ok:
+            cap = getattr(self.ctx.harness, "max_context_tokens", None)
+            mem = getattr(self.ctx, "memory", None)
+            if cap is not None and mem is not None:
+                mem.max_context_tokens = cap
             self.ctx.ui.success(message)
             state = getattr(self.ctx.ui, "state", None)
             if state is not None:
@@ -520,6 +524,17 @@ class CommandRouter:
             runner = getattr(self.ctx, "runner", None)
             if runner is not None:
                 runner.model = new_model
+                refresh = getattr(runner, "refresh", None)
+                if callable(refresh):
+                    refresh()
+            else:
+                state = getattr(self.ctx.ui, "state", None)
+                update = getattr(state, "update_status", None) if state is not None else None
+                if callable(update):
+                    update(
+                        self.ctx.memory.stats(),
+                        self.ctx.harness.get_cache_stats(),
+                    )
         else:
             self.ctx.ui.error(message)
         self.ctx.ui.refresh()

@@ -55,12 +55,42 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 }
 ```
 
+Per-model context caps: a `models` entry may declare `max_context_tokens`, and a provider profile in `providers.json` may declare `context_tokens` (entry > profile > global `max_context_tokens`/`max_tokens`/`context_tokens`); switching models applies the cap live.
+
+Legacy `max_context_chars`/`max_tool_chars` keys are removed; old char budgets converted as `chars//4` (e.g. 4000 chars behaved as 1000 tokens).
+To preserve prior behavior, set `max_tool_tokens`/`max_context_tokens` explicitly (e.g. `"max_tool_tokens": 1000` replaces a former 4000-char tool limit).
+
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)
 3. **Project Config** (`.microharness/config.json`) — *Project overrides*
 4. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
 5. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+
+#### Amazon Bedrock
+`bedrock` is a built-in provider that targets Bedrock's official OpenAI-compatible endpoint.
+On a machine with active AWS SSO (`aws sso login`) it works with zero config:
+
+```bash
+uv run microharness --model "bedrock/us.openai.gpt-5.6-sol" "Refactor auth.py"
+```
+
+Credentials resolve from the standard chain (environment, `~/.aws/credentials`, SSO
+cache), and requests are SigV4-signed with the standard library; the harness never
+shells out to the AWS CLI. The region resolves from `config.json` `"region"`, then
+`AWS_REGION`, then `AWS_DEFAULT_REGION`, then the `~/.aws/config` profile region
+(profile from `config.json` `"aws_profile"` or `AWS_PROFILE`, default `default`).
+Without credentials or region the spec falls back to `MockModel` with a hint
+(`aws sso login`). A `BEDROCK_API_KEY` bearer token still overrides SSO when set.
+Only models whose Bedrock model card lists Chat Completions are served on this
+endpoint (Claude/Nova IDs return `model_not_found`); the registry default is
+`us.openai.gpt-5.6-sol`.
+
+Auth schemes are pluggable: built-ins are `none`, `bearer`, `header`, and `sigv4`
+(see `core/auth.py`), and extra single-file plugins can be installed as
+`~/.microharness/auth/<scheme>.py` (global dir only, never project-local).
+
+The shim exposes no prompt-cache or reasoning parameters, so the Bedrock profile runs with `cache_strategy: "openai_breakpoint"` and `reasoning_format: "none"`: with `cache_ttl` on, the first system text part carries an explicit `prompt_cache_breakpoint` (sub-1024-token prefixes are a server-side no-op); a stale user `providers.json` keeps `"none"` and simply skips breakpoints.
 
 ### 2. Cascading Instructions (`AGENTS.md`)
 You can provide personal agent preferences globally, while projects can specialize or override them:

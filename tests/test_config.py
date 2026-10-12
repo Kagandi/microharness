@@ -183,11 +183,69 @@ class TestHarnessConfigCascade(unittest.TestCase):
             self._resolve(HarnessConfig(cache_ttl="17m"))
         self.assertIn("Unsupported cache TTL", str(ctx.exception))
 
-    def test_legacy_char_configs_convert_to_tokens(self):
-        """Invariant: legacy character limits in config files convert to tokens at 4 chars per token."""
-        cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000, "max_context_chars": 40000})
-        self.assertEqual(cfg.max_tool_tokens, 1000)
-        self.assertEqual(cfg.max_context_tokens, 10000)
+    def test_legacy_tool_chars_ignored_uses_default_and_warns(self):
+        """Invariant: max_tool_chars is ignored; defaults apply and a removal warning is emitted."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000})
+        self.assertEqual(cfg.max_tool_tokens, 8000)
+        self.assertEqual(cfg.max_context_tokens, 64000)
+        self.assertNotEqual(cfg.max_tool_tokens, 1000)
+        warning = buf.getvalue()
+        self.assertIn("max_tool_chars", warning)
+        self.assertIn("max_tool_tokens", warning)
+
+    def test_legacy_context_chars_ignored_uses_default_and_warns(self):
+        """Invariant: max_context_chars is ignored; defaults apply and a removal warning is emitted."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            cfg = self._resolve(HarnessConfig(), global_cfg={"max_context_chars": 40000})
+        self.assertEqual(cfg.max_tool_tokens, 8000)
+        self.assertEqual(cfg.max_context_tokens, 64000)
+        self.assertNotEqual(cfg.max_context_tokens, 10000)
+        warning = buf.getvalue()
+        self.assertIn("max_context_chars", warning)
+        self.assertIn("max_context_tokens", warning)
+
+    def test_legacy_chars_do_not_override_token_settings(self):
+        """Invariant: legacy chars never win over explicit token settings and warn once."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            cfg = self._resolve(
+                HarnessConfig(),
+                global_cfg={
+                    "max_tool_chars": 4000,
+                    "max_context_chars": 40000,
+                    "max_tool_tokens": 1234,
+                    "max_context_tokens": 5678,
+                },
+            )
+        self.assertEqual(cfg.max_tool_tokens, 1234)
+        self.assertEqual(cfg.max_context_tokens, 5678)
+        warning = buf.getvalue()
+        self.assertIn("max_tool_chars", warning)
+        self.assertIn("max_context_chars", warning)
+        self.assertEqual(warning.strip().count("\n"), 0)
+
+    def test_no_warning_without_legacy_chars(self):
+        """Invariant: token-only configs resolve silently on stderr."""
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_tokens": 1234})
+        self.assertEqual(cfg.max_tool_tokens, 1234)
+        self.assertEqual(buf.getvalue(), "")
 
     def test_get_default_global_dir_falls_back_to_legacy_mini_harness(self):
         """Invariant: falls back to ~/.mini-harness if ~/.microharness does not exist."""

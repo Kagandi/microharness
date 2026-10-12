@@ -34,6 +34,14 @@
     "reasoning_format": "standard",
     "cache_strategy": "anthropic_block"
   },
+  "bedrock": {
+    "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+    "default_model": "us.openai.gpt-5.6-sol",
+    "env_keys": ["BEDROCK_API_KEY"],
+    "reasoning_format": "none",
+    "cache_strategy": "openai_breakpoint",
+    "auth": {"scheme": "sigv4", "service": "bedrock"}
+  },
   "deepseek": {
     "endpoint": "https://api.deepseek.com/v1",
     "default_model": "deepseek-chat",

@@ -338,6 +338,17 @@ def _warn_unrecognized_model_flag(
         pass
 
 
+def _startup_model_spec(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
+    """Assembles the startup model spec (flag > environment > config file)."""
+    return {
+        "model": args.model or os.getenv("MODEL_NAME") or config.get("model"),
+        "provider": args.provider or config.get("provider"),
+        "endpoint": args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint"),
+        "api_key": args.api_key or os.getenv("MODEL_API_KEY"),
+        "headers": config.get("headers"),
+    }
+
+
 def _resolve_model(
     args: argparse.Namespace,
     config: dict[str, Any],
@@ -356,13 +367,7 @@ def _resolve_model(
         project_dir=target_dir,
         inline_providers=config.get("providers"),
     )
-    spec: dict[str, Any] = {
-        "model": args.model or os.getenv("MODEL_NAME") or config.get("model"),
-        "provider": args.provider or config.get("provider"),
-        "endpoint": args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint"),
-        "api_key": args.api_key or os.getenv("MODEL_API_KEY"),
-        "headers": config.get("headers"),
-    }
+    spec: dict[str, Any] = _startup_model_spec(args, config)
     connection = resolve_connection(spec, config, registry)
 
     if connection.is_offline:
@@ -428,12 +433,13 @@ class CliContext:
     verbose: bool = True
     args: argparse.Namespace | None = None
     config: dict[str, Any] = field(default_factory=dict)
+    model_spec: dict[str, Any] | None = None
 
     def harness(self, evaluator: Evaluator | None = None, sandbox: bool = True) -> Harness:
         """Builds a harness for this context, resetting a reusable model between tasks."""
         if isinstance(self.model, ResettableModel):
             self.model.reset()
-        return Harness(
+        harness = Harness(
             model=self.model,
             workspace_dir=self.target_dir,
             global_dir=self.global_dir,
@@ -447,6 +453,9 @@ class CliContext:
             trust_project_tools=self.trust_project_tools,
             verbose=self.verbose,
         )
+        if self.model_spec is not None:
+            harness.apply_model_context_tokens(self.model_spec)
+        return harness
 
 
 def create_benchmark_harness_factory(
@@ -634,6 +643,7 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         use_docker=args.docker if args.docker is not None else bool(config.get("docker", False)),
         docker_image=args.docker_image or config.get("docker_image", "python:3.11"),
         trust_project_tools=trust_project_tools,
+        model_spec=_startup_model_spec(args, config),
     )
 
 
@@ -695,6 +705,9 @@ def main(argv: list[str] | None = None) -> None:
             endpoint=context.model.endpoint,
             api_key=context.model.api_key,
             model=getattr(context.model, "model", "unknown"),
+            auth_scheme=getattr(context.model, "auth_scheme", "bearer") or "bearer",
+            auth_options=dict(getattr(context.model, "auth_options", None) or {}),
+            auth_error=getattr(context.model, "auth_error", None),
         )
         if isinstance(context.model, HttpChatModel)
         else Connection()
@@ -732,6 +745,8 @@ def main(argv: list[str] | None = None) -> None:
         trust_project_tools=context.trust_project_tools,
         verbose=True,
     )
+    if context.model_spec is not None:
+        harness.apply_model_context_tokens(context.model_spec)
 
     harness.run_tui(initial_instruction=args.instruction, resume=args.resume)
 
