@@ -57,6 +57,9 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 
 Per-model context caps: a `models` entry may declare `max_context_tokens`, and a provider profile in `providers.json` may declare `context_tokens` (entry > profile > global `max_context_tokens`/`max_tokens`/`context_tokens`); switching models applies the cap live.
 
+Legacy `max_context_chars`/`max_tool_chars` keys are removed; old char budgets converted as `chars//4` (e.g. 4000 chars behaved as 1000 tokens).
+To preserve prior behavior, set `max_tool_tokens`/`max_context_tokens` explicitly (e.g. `"max_tool_tokens": 1000` replaces a former 4000-char tool limit).
+
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)

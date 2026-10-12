@@ -341,7 +341,20 @@ class Harness:
         self.model = new_model
         if self.active_loop is not None:
             self.active_loop.model = new_model
-        self.apply_model_context_tokens(target_spec)
+        applied = self.apply_model_context_tokens(target_spec)
+        if applied is None:
+            cfg = self.merged_config if isinstance(self.merged_config, dict) else {}
+            fallback = 64000
+            for key in ("max_context_tokens", "max_tokens", "context_tokens"):
+                value = cfg.get(key)
+                if type(value) is int and value > 0:
+                    fallback = value
+                    break
+            self.max_context_tokens = fallback
+            loop = self.active_loop
+            memory = getattr(loop, "memory", None) if loop is not None else None
+            if memory is not None:
+                memory.max_context_tokens = fallback
 
         provider = getattr(new_model, "provider", "") or ""
         suffix = f" [{provider}]" if provider else ""

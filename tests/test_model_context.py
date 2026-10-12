@@ -243,6 +243,93 @@ class TestApplyModelContextTokens(unittest.TestCase):
         self.assertEqual(applied, None)
         self.assertEqual(harness.max_context_tokens, before)
 
+    def test_switch_big_to_small_reverts_to_default_on_both(self):
+        """Invariant: switching to a cap-less model resets sticky caps to the default."""
+        tmp = tempfile.mkdtemp()
+        ws = Path(tmp)
+        cfg_dir = ws / ".microharness"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "models": {
+                        "big": {
+                            "model": "m-big",
+                            "provider": "nope",
+                            "max_context_tokens": 200000,
+                        },
+                        "small": {"model": "m-small", "provider": "nope"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        harness = Harness(
+            model=MockModel([("hi", [])]),
+            workspace_dir=ws,
+            global_dir=Path(tempfile.mkdtemp()),
+            runs_dir=Path(tempfile.mkdtemp()),
+            verbose=False,
+        )
+        memory = Memory(system_prompt="s", user_prompt="")
+        loop = MagicMock()
+        loop.memory = memory
+        harness.active_loop = loop
+
+        ok, _, _ = harness.switch_model("big")
+        self.assertEqual(ok, True)
+        self.assertEqual(harness.max_context_tokens, 200000)
+        self.assertEqual(memory.max_context_tokens, 200000)
+
+        ok, _, _ = harness.switch_model("small")
+        self.assertEqual(ok, True)
+        self.assertEqual(harness.max_context_tokens, 64000)
+        self.assertEqual(memory.max_context_tokens, 64000)
+
+    def test_switch_big_to_small_reverts_to_global_triple(self):
+        """Invariant: a cap-less switch falls back to the global triple, first hit wins."""
+        tmp = tempfile.mkdtemp()
+        ws = Path(tmp)
+        cfg_dir = ws / ".microharness"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "max_context_tokens": 50000,
+                    "models": {
+                        "big": {
+                            "model": "m-big",
+                            "provider": "nope",
+                            "max_context_tokens": 200000,
+                        },
+                        "small": {"model": "m-small", "provider": "nope"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        runs = Path(tempfile.mkdtemp())
+        harness = Harness(
+            model=MockModel([("hi", [])]),
+            workspace_dir=ws,
+            global_dir=Path(tempfile.mkdtemp()),
+            runs_dir=runs,
+            verbose=False,
+        )
+        memory = Memory(system_prompt="s", user_prompt="")
+        loop = MagicMock()
+        loop.memory = memory
+        harness.active_loop = loop
+
+        ok, _, _ = harness.switch_model("big")
+        self.assertEqual(ok, True)
+        self.assertEqual(harness.max_context_tokens, 200000)
+
+        ok, _, _ = harness.switch_model("small")
+        self.assertEqual(ok, True)
+        self.assertEqual(harness.max_context_tokens, 50000)
+        self.assertEqual(memory.max_context_tokens, 50000)
+
 
 class TestModelSwitchFooterRefresh(unittest.TestCase):
     def _router(self):
@@ -278,6 +365,32 @@ class TestModelSwitchFooterRefresh(unittest.TestCase):
         router.ctx.runner = runner
         router.dispatch("/model x")
         self.assertEqual(runner.refresh.call_count, 0)
+
+    def test_dispatch_sync_updates_ctx_memory_with_no_active_loop(self):
+        """Invariant: /model success syncs ctx.memory cap even when active_loop is None."""
+        harness = _harness_with_models(
+            {
+                "big": {"model": "m-big", "provider": "nope", "max_context_tokens": 200000},
+            }
+        )
+        harness.active_loop = None
+        memory = Memory(system_prompt="s", user_prompt="")
+        self.assertNotEqual(memory.max_context_tokens, 200000)
+        ui = StubUI()
+        ctx = CommandContext(
+            harness=harness,
+            memory=memory,
+            ui=ui,
+            workspace=Path(tempfile.mkdtemp()),
+            commands={},
+            skills={},
+            tracer=None,
+            turns=TurnState(),
+        )
+        router = CommandRouter(ctx)
+        router.dispatch("/model big")
+        self.assertEqual(harness.max_context_tokens, 200000)
+        self.assertEqual(memory.max_context_tokens, 200000)
 
 
 if __name__ == "__main__":
