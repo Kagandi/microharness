@@ -600,3 +600,72 @@ def resolve_model_spec(
 
     valid = ", ".join(m["name"] for m in available) or "none configured"
     return False, "", f"Unknown model '{spec}'. Available models: {valid}"
+
+
+def _strict_context_tokens(value: Any) -> int | None:
+    """Returns ``value`` only when it is a genuine positive int (never coerced)."""
+    if type(value) is int and value > 0:
+        return value
+    return None
+
+
+def resolve_model_context_tokens(
+    spec: str | dict[str, Any] | None,
+    cfg: dict[str, Any] | None = None,
+    registry: dict[str, dict[str, Any]] | None = None,
+) -> int | None:
+    """Resolves the per-model context cap without ever naming a provider.
+
+    Precedence: direct-dict ``max_context_tokens`` > config-alias dict entry
+    ``max_context_tokens`` > provider-profile ``context_tokens`` > the global
+    triple (``max_context_tokens`` / ``max_tokens`` / ``context_tokens``).
+    Each level is strict (``type(x) is int and x > 0``); anything else skips
+    the level. Returns ``None`` when nothing is declared.
+    """
+    config = cfg if isinstance(cfg, dict) else {}
+    resolved_registry = load_builtin_providers() if registry is None else registry
+
+    if isinstance(spec, dict):
+        hit = _strict_context_tokens(spec.get("max_context_tokens"))
+        if hit is not None:
+            return hit
+        # Startup dicts carry the alias/model id under "model": fall through
+        # to the alias entry so --model <alias> honors per-model caps.
+        model_ref = spec.get("model")
+        if isinstance(model_ref, str):
+            models = config.get("models")
+            if isinstance(models, dict):
+                entry = models.get(model_ref)
+                if isinstance(entry, dict):
+                    hit = _strict_context_tokens(entry.get("max_context_tokens"))
+                    if hit is not None:
+                        return hit
+
+    if isinstance(spec, str):
+        models = config.get("models")
+        if isinstance(models, dict):
+            entry = models.get(spec)
+            if isinstance(entry, dict):
+                hit = _strict_context_tokens(entry.get("max_context_tokens"))
+                if hit is not None:
+                    return hit
+
+    if isinstance(spec, (str, dict)):
+        try:
+            request = parse_model_spec(spec, config, resolved_registry)
+        except Exception:
+            request = None
+        if request is not None:
+            provider_name = request.provider or config.get("provider")
+            if provider_name is None and isinstance(spec, str):
+                provider_name = spec.strip() or None
+            _, profile = resolve_provider(resolved_registry, provider_name)
+            hit = _strict_context_tokens(profile.get("context_tokens"))
+            if hit is not None:
+                return hit
+
+    for key in ("max_context_tokens", "max_tokens", "context_tokens"):
+        hit = _strict_context_tokens(config.get(key))
+        if hit is not None:
+            return hit
+    return None

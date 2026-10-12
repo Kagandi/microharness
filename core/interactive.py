@@ -520,6 +520,17 @@ class CommandRouter:
             runner = getattr(self.ctx, "runner", None)
             if runner is not None:
                 runner.model = new_model
+                refresh = getattr(runner, "refresh", None)
+                if callable(refresh):
+                    refresh()
+            else:
+                state = getattr(self.ctx.ui, "state", None)
+                update = getattr(state, "update_status", None) if state is not None else None
+                if callable(update):
+                    update(
+                        self.ctx.memory.stats(),
+                        self.ctx.harness.get_cache_stats(),
+                    )
         else:
             self.ctx.ui.error(message)
         self.ctx.ui.refresh()

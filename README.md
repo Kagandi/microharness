@@ -55,6 +55,8 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
 }
 ```
 
+Per-model context caps: a `models` entry may declare `max_context_tokens`, and a provider profile in `providers.json` may declare `context_tokens` (entry > profile > global `max_context_tokens`/`max_tokens`/`context_tokens`); switching models applies the cap live.
+
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)

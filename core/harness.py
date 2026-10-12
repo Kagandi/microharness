@@ -48,6 +48,7 @@ from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt, load_agents
 from core.providers import (
     build_model_from_spec,
     get_available_models_from_config,
+    resolve_model_context_tokens,
     resolve_model_spec,
 )
 from core.session import (
@@ -299,6 +300,27 @@ class Harness:
         ok, canonical, error = self.resolve_model_spec(clean)
         return (True, canonical, "") if ok else (False, None, error)
 
+    def apply_model_context_tokens(
+        self,
+        spec: str | dict[str, Any] | None,
+        cfg: dict[str, Any] | None = None,
+        registry: dict[str, dict[str, Any]] | None = None,
+    ) -> int | None:
+        """Applies the per-model context cap for ``spec`` in place. No-op when None."""
+        value = resolve_model_context_tokens(
+            spec,
+            self.merged_config if cfg is None else cfg,
+            self.provider_registry if registry is None else registry,
+        )
+        if type(value) is not int or value <= 0:
+            return None
+        self.max_context_tokens = value
+        loop = self.active_loop
+        memory = getattr(loop, "memory", None) if loop is not None else None
+        if memory is not None:
+            memory.max_context_tokens = value
+        return value
+
     def switch_model(self, spec: str | dict[str, Any]) -> tuple[bool, str, Model]:
         """Switches active model dynamically using config and provider registry."""
         ok, target_spec, error = self._canonical_model_spec(spec)
@@ -319,6 +341,7 @@ class Harness:
         self.model = new_model
         if self.active_loop is not None:
             self.active_loop.model = new_model
+        self.apply_model_context_tokens(target_spec)
 
         provider = getattr(new_model, "provider", "") or ""
         suffix = f" [{provider}]" if provider else ""
