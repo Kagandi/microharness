@@ -320,6 +320,71 @@ def _follow_config_alias(spec: str | dict[str, Any], config: dict[str, Any]) -> 
     return spec
 
 
+def _normalize_endpoint(value: Any) -> str:
+    """Normalizes an endpoint URL for comparison (trailing slash and case ignored)."""
+    if not isinstance(value, str):
+        return ""
+    return value.rstrip("/").lower()
+
+
+def _canonical_provider_name(name: str | None) -> str | None:
+    """Maps a provider name through aliases and casing to its canonical form."""
+    if not name:
+        return None
+    clean = str(name).strip().lower()
+    return PROVIDER_ALIASES.get(clean, clean)
+
+
+def _is_local_endpoint(value: Any) -> bool:
+    """Mirrors Connection.is_local for endpoint strings (loopback hosts)."""
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    return "localhost" in lowered or "127.0.0.1" in lowered or "::1" in lowered
+
+
+def _merge_alias_into_dict_spec(
+    spec: str | dict[str, Any], config: dict[str, Any]
+) -> str | dict[str, Any]:
+    """Merges a config alias entry underneath a dict spec that names the alias.
+
+    Only dict specs whose ``model`` is a non-empty string matching a key in
+    ``config['models']`` are merged: a dict entry is laid underneath with the
+    spec's non-None values winning (headers merge entry-under-spec), while a
+    string entry becomes the spec's model id. Anything else passes through
+    untouched, so :func:`_follow_config_alias` string behavior is unchanged.
+    """
+    if not isinstance(spec, dict):
+        return spec
+    model_ref = spec.get("model")
+    if not isinstance(model_ref, str) or not model_ref:
+        return spec
+    cfg_models = config.get("models")
+    if not isinstance(cfg_models, dict):
+        return spec
+    entry = cfg_models.get(model_ref)
+    if isinstance(entry, str):
+        if not entry.strip():
+            return spec
+        merged_str = dict(spec)
+        merged_str["model"] = entry.strip()
+        return merged_str
+    if not isinstance(entry, dict):
+        return spec
+    merged: dict[str, Any] = dict(entry)
+    for key, value in spec.items():
+        if key == "model" or value is None:
+            continue
+        if key == "headers" and isinstance(value, dict):
+            base = merged.get("headers")
+            merged["headers"] = {**(base if isinstance(base, dict) else {}), **value}
+        else:
+            merged[key] = value
+    if not isinstance(merged.get("model"), str) or not merged["model"]:
+        merged["model"] = model_ref
+    return merged
+
+
 def parse_model_spec(
     spec: str | dict[str, Any],
     config: dict[str, Any],
@@ -430,17 +495,47 @@ def resolve_connection(
     """
     cfg = dict(config or {})
     resolved_registry = load_builtin_providers() if registry is None else registry
-    request = parse_model_spec(spec, cfg, resolved_registry)
+    merged_spec = _merge_alias_into_dict_spec(spec, cfg)
+    request = parse_model_spec(merged_spec, cfg, resolved_registry)
 
     provider_name, profile = resolve_provider(
         resolved_registry, request.provider or cfg.get("provider")
     )
 
-    endpoint = request.endpoint
-    if not endpoint and profile.get("endpoint"):
-        endpoint = profile.get("endpoint")
-    if not endpoint:
-        endpoint = cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+    # Endpoint precedence: an explicit request endpoint (flag/env, alias entry,
+    # or direct) always wins. Otherwise the profile endpoint and the global
+    # config endpoint compete: when both are present but different, the config
+    # endpoint is attributed to a provider — it wins when unattributable or
+    # when it belongs to the selected provider, else the profile wins.
+    profile_endpoint = profile.get("endpoint")
+    cfg_endpoint = cfg.get("endpoint") or os.getenv("MODEL_ENDPOINT")
+    if request.endpoint:
+        endpoint = request.endpoint
+    else:
+        norm_profile = _normalize_endpoint(profile_endpoint)
+        norm_cfg = _normalize_endpoint(cfg_endpoint)
+        if norm_profile and norm_cfg and norm_profile != norm_cfg:
+            profile_local = _is_local_endpoint(profile_endpoint)
+            cfg_local = _is_local_endpoint(cfg_endpoint)
+            if cfg_local and not profile_local:
+                # A loopback global default never hijacks a cloud provider.
+                endpoint = profile_endpoint
+            elif profile_local and not cfg_local:
+                endpoint = cfg_endpoint
+            else:
+                attributed, _ = find_provider_by_endpoint(resolved_registry, cfg_endpoint)
+                if (
+                    attributed is None
+                    or _canonical_provider_name(attributed)
+                    == _canonical_provider_name(provider_name)
+                ):
+                    endpoint = cfg_endpoint
+                else:
+                    endpoint = profile_endpoint
+        elif norm_profile:
+            endpoint = profile_endpoint
+        else:
+            endpoint = cfg_endpoint or None
 
     if not profile and endpoint:
         detected_name, detected_profile = find_provider_by_endpoint(resolved_registry, endpoint)
@@ -450,10 +545,10 @@ def resolve_connection(
     headers = {**(profile.get("headers") or {}), **(cfg.get("headers") or {})}
     headers.update(request.headers)
 
-    # Auth precedence: spec-dict auth > config auth > profile auth. A string
-    # spec may name a config alias whose definition is a dict carrying auth;
-    # the alias-resolved spec is what counts (a raw dict spec is unchanged).
-    resolved_spec = _follow_config_alias(spec, cfg)
+    # Auth precedence: spec-dict auth > config auth > profile auth. The merged
+    # spec carries alias-entry auth for dict specs; a string spec naming an
+    # alias is followed to its definition (a raw dict spec is unchanged).
+    resolved_spec = _follow_config_alias(merged_spec, cfg)
     spec_auth = resolved_spec.get("auth") if isinstance(resolved_spec, dict) else None
     if spec_auth is not None:
         auth_scheme, auth_options = resolve_auth({"auth": spec_auth})
@@ -526,9 +621,19 @@ def build_model_from_spec(
         return MockModel([(message, [])])
     effective_scheme = connection.auth_scheme
     auth_error = connection.auth_error
-    if connection.auth_scheme == "sigv4" and connection.api_key:
+    # Bearer override only when the profile's own token env var is set (e.g.
+    # BEDROCK_API_KEY). A resolved api_key alone is not proof: global configs
+    # commonly carry api_key "none" for keyless local endpoints, which must
+    # never flip SigV4 to bearer.
+    _, override_profile = resolve_provider(
+        registry or load_builtin_providers(), connection.provider
+    )
+    bearer_env_set = any(
+        os.getenv(key) for key in (override_profile.get("env_keys") or [])
+    )
+    if connection.auth_scheme == "sigv4" and connection.api_key and bearer_env_set:
         print(
-            "SigV4 auth: BEDROCK_API_KEY present, using bearer auth override",
+            "SigV4 auth: profile token env var present, using bearer auth override",
             file=sys.stderr,
         )
         effective_scheme = "bearer"
