@@ -10,9 +10,12 @@ from core.commands import Command
 from core.interactive import COMMAND_SPECS
 from core.skills import Skill
 from core.tui import (
+    SPINNER_FRAMES,
+    SPINNER_INTERVAL,
     CursesTUI,
     TUILine,
     TUIState,
+    _read_pending,
     decode_terminal_sequence,
     parse_inline_segments,
     render_markdown_table,
@@ -27,6 +30,20 @@ def display_width(text: str) -> int:
         else (2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
         for ch in text
     )
+
+
+def status_bar_text(mock_stdscr) -> str:
+    """The most recently drawn reverse-video status bar text."""
+    import curses
+
+    texts = [
+        call.args[2]
+        for call in mock_stdscr.addstr.call_args_list
+        if len(call.args) >= 4 and call.args[3] == curses.A_REVERSE
+    ]
+    if not texts:
+        raise AssertionError("no status bar was drawn")
+    return texts[-1]
 
 
 class TestMarkdownTable(unittest.TestCase):
@@ -293,33 +310,59 @@ class TestTUIInterrupt(unittest.TestCase):
             )
             self.assertFalse(captured["state"].turn_active)
 
+    def test_read_pending_keeps_the_window_timeout(self):
+        """Invariant: polling for input hands the read timeout back, so the screen keeps repainting."""
+        import curses
+
+        # 1. A window with a 50 ms timeout gets it back after the poll
+        window = MagicMock()
+        window.gettimeout.return_value = 50
+        window.get_wch.side_effect = curses.error("no input")
+        self.assertEqual(_read_pending(window), [])
+        window.timeout.assert_called_once_with(50)
+        window.nodelay.assert_called_once_with(True)
+
+        # 2. A window with no timeout is left blocking again
+        window = MagicMock()
+        window.gettimeout.return_value = -1
+        window.get_wch.side_effect = curses.error("no input")
+        self.assertEqual(_read_pending(window), [])
+        window.nodelay.assert_any_call(False)
+
+        # 3. The characters that were pending are returned
+        window = MagicMock()
+        window.gettimeout.return_value = 50
+        window.get_wch.side_effect = ["\x1b", "[", "A", curses.error("end")]
+        self.assertEqual(_read_pending(window), ["\x1b", "[", "A"])
+        window.timeout.assert_called_once_with(50)
+
     def test_check_cancel_requested_variants(self):
-        """Invariant: check_cancel_requested detects standalone Esc and ignores sequences or non-Esc keys."""
+        """Invariant: the cancel flag is consumed once and the curses window is never read off-thread."""
         import curses
 
         state = TUIState()
         tui = CursesTUI(state)
 
-        # 1. stdscr is None -> False
+        # 1. No cancel requested -> False
         self.assertFalse(tui.check_cancel_requested())
 
-        # 2. stdscr raises curses.error (no input) -> False
+        # 2. A pending cancel is reported once and then consumed
+        tui._cancel_requested = True
+        self.assertTrue(tui.check_cancel_requested())
+        self.assertFalse(tui.check_cancel_requested())
+
+        # 3. The window is never read: the main thread owns the keyboard
         mock_scr = MagicMock()
         mock_scr.get_wch.side_effect = curses.error("no input")
         tui.stdscr = mock_scr
         self.assertFalse(tui.check_cancel_requested())
+        mock_scr.get_wch.assert_not_called()
 
-        # 3. stdscr has standalone Esc (27) followed by curses.error -> True
-        mock_scr.get_wch.side_effect = [27, curses.error("end of sequence")]
+        # 4. Esc during a turn sets the flag the worker thread polls
+        state.turn_active = True
+        self.assertTrue(tui.handle_key(27, lambda _t: None))
         self.assertTrue(tui.check_cancel_requested())
-
-        # 4. stdscr has standalone Esc as '\x1b' -> True
-        mock_scr.get_wch.side_effect = ["\x1b", curses.error("end of sequence")]
-        self.assertTrue(tui.check_cancel_requested())
-
-        # 5. stdscr has arrow key sequence (\x1b, '[', 'A') -> False
-        mock_scr.get_wch.side_effect = ["\x1b", "[", "A", curses.error("end")]
-        self.assertFalse(tui.check_cancel_requested())
+        self.assertFalse(tui._cancel_requested)
 
     def test_status_bar_displays_running_indicator_when_turn_active(self):
         """Invariant: status bar states Esc's real timing and points at Ctrl+C for immediate abort."""
@@ -338,6 +381,93 @@ class TestTUIInterrupt(unittest.TestCase):
         self.assertIn("Esc cancels after current step", joined)
         self.assertIn("Ctrl+C cancels now", joined)
         self.assertNotIn("Esc to cancel]", joined)
+
+    def test_status_bar_starts_with_spinner_frame_and_running_when_turn_active(self):
+        """Invariant: the first status field is the spinner frame followed by the word running."""
+        state = TUIState()
+        state.turn_active = True
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 120)
+        clock = [0.0]
+        with patch("core.tui.time.monotonic", side_effect=lambda: clock[0]):
+            tui = CursesTUI(state)
+            tui.draw(mock_stdscr)
+
+        status = status_bar_text(mock_stdscr)
+        # 1. The spinner leads the bar so a narrow terminal cannot truncate it away.
+        self.assertTrue(status.startswith(f" {SPINNER_FRAMES[0]} running "))
+        # 2. The cancel hint keeps both timings and drops the duplicated word.
+        self.assertIn("[Esc cancels after current step · Ctrl+C cancels now]", status)
+        self.assertNotIn("[running ·", status)
+
+    def test_status_bar_has_no_spinner_when_no_turn_active(self):
+        """Invariant: an idle status bar shows no spinner frame and is unchanged otherwise."""
+        state = TUIState()
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 120)
+        tui = CursesTUI(state)
+        tui.draw(mock_stdscr)
+
+        status = status_bar_text(mock_stdscr)
+        # 1. No spinner glyph leaks into the idle bar.
+        for frame in SPINNER_FRAMES:
+            self.assertNotIn(frame, status)
+        # 2. The idle bar is exactly what it was before the spinner existed.
+        self.assertEqual(status, " context: 0 / 0 (0.0%) ")
+
+    def test_advance_spinner_steps_frame_per_interval_and_wraps(self):
+        """Invariant: one frame per whole interval, remainder kept, last frame wraps to first."""
+        state = TUIState()
+        # 1. Less than a full interval leaves the frame alone.
+        state.advance_spinner(SPINNER_INTERVAL / 2)
+        self.assertEqual(state.spinner_frame, 0)
+        self.assertAlmostEqual(state.spinner_elapsed, SPINNER_INTERVAL / 2)
+        # 2. The saved remainder completes an interval and advances exactly one frame.
+        state.advance_spinner(SPINNER_INTERVAL / 2)
+        self.assertEqual(state.spinner_frame, 1)
+        self.assertAlmostEqual(state.spinner_elapsed, 0.0)
+        # 3. An interval and a half advances one frame and keeps the extra half.
+        state.advance_spinner(SPINNER_INTERVAL * 1.5)
+        self.assertEqual(state.spinner_frame, 2)
+        self.assertAlmostEqual(state.spinner_elapsed, SPINNER_INTERVAL / 2)
+        # 4. The frame wraps back to the first frame after the last one.
+        state.spinner_frame = len(SPINNER_FRAMES) - 1
+        state.advance_spinner(SPINNER_INTERVAL)
+        self.assertEqual(state.spinner_frame, 0)
+
+    def test_spinner_does_not_advance_while_no_turn_is_active(self):
+        """Invariant: idle draws never move the spinner frame, however long the idle gap."""
+        state = TUIState()
+        state.turn_active = False
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 120)
+        clock = [0.0]
+        with patch("core.tui.time.monotonic", side_effect=lambda: clock[0]):
+            tui = CursesTUI(state)
+            # 1. A long idle gap must not accumulate animation time.
+            clock[0] += 5.0
+            tui.draw(mock_stdscr)
+            tui.draw(mock_stdscr)
+        self.assertEqual(state.spinner_frame, 0)
+        self.assertEqual(state.spinner_elapsed, 0.0)
+
+    def test_spinner_advances_between_draws_while_turn_is_active(self):
+        """Invariant: consecutive draws during a turn advance the frame and repaint the new glyph."""
+        state = TUIState()
+        state.turn_active = True
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 120)
+        clock = [0.0]
+        with patch("core.tui.time.monotonic", side_effect=lambda: clock[0]):
+            tui = CursesTUI(state)
+            tui.draw(mock_stdscr)
+            first_frame = state.spinner_frame
+            clock[0] += SPINNER_INTERVAL
+            tui.draw(mock_stdscr)
+        # 1. The frame index moved forward.
+        self.assertNotEqual(state.spinner_frame, first_frame)
+        # 2. The repainted bar shows the new frame glyph.
+        self.assertIn(SPINNER_FRAMES[state.spinner_frame], status_bar_text(mock_stdscr))
 
     def test_escape_key_during_turn_active_keeps_session_alive(self):
         """Invariant: Esc during turn_active does not terminate the session."""
@@ -826,6 +956,470 @@ class TestTUI(unittest.TestCase):
         state.input_buffer = "/exit"
         ret = tui.handle_key("\n", dummy_submit)
         self.assertFalse(ret)
+
+    def test_cursor_movement_and_editing_at_cursor(self):
+        """Invariant: Left/Right move the caret, and edits land at the caret instead of the buffer end."""
+        import curses
+
+        state = TUIState()
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+
+        def dummy_submit(text: str) -> None:
+            submitted.append(text)
+
+        # 1. Left and Right move the caret one character at a time
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        self.assertEqual(state.cursor_pos, 2)
+        tui.handle_key(curses.KEY_RIGHT, dummy_submit)
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 2. Left clamps at the start of the buffer
+        state.cursor_pos = 0
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        self.assertEqual(state.cursor_pos, 0)
+
+        # 3. Right clamps at the end of the buffer
+        state.cursor_pos = len(state.input_buffer)
+        tui.handle_key(curses.KEY_RIGHT, dummy_submit)
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 4. Typed text lands at the moved caret, not at the end of the buffer
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        tui.handle_key("X", dummy_submit)
+        self.assertEqual(state.input_buffer, "abXc")
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 5. Backspace deletes the character before the moved caret
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        tui.handle_key(curses.KEY_BACKSPACE, dummy_submit)
+        self.assertEqual(state.input_buffer, "bc")
+        self.assertEqual(state.cursor_pos, 0)
+
+        # 6. Home and End move within the caret's own line
+        state.input_buffer = "abc\ndef"
+        state.cursor_pos = 5
+        tui.handle_key(curses.KEY_HOME, dummy_submit)
+        self.assertEqual(state.cursor_pos, 4)
+        tui.handle_key(curses.KEY_END, dummy_submit)
+        self.assertEqual(state.cursor_pos, 7)
+
+        # 7. Ctrl+A and Ctrl+E do the same as Home and End
+        state.input_buffer = "abc\ndef"
+        state.cursor_pos = 5
+        tui.handle_key(1, dummy_submit)
+        self.assertEqual(state.cursor_pos, 4)
+        tui.handle_key(5, dummy_submit)
+        self.assertEqual(state.cursor_pos, 7)
+
+        # 8. Delete removes the character under the caret and leaves it in place
+        state.input_buffer = "abc"
+        state.cursor_pos = 1
+        tui.handle_key(curses.KEY_DC, dummy_submit)
+        self.assertEqual(state.input_buffer, "ac")
+        self.assertEqual(state.cursor_pos, 1)
+
+        # 9. Negative: Delete at the end of the buffer changes nothing
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key(curses.KEY_DC, dummy_submit)
+        self.assertEqual(state.input_buffer, "abc")
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 10. Negative: Backspace at the start of the buffer changes nothing
+        state.input_buffer = "abc"
+        state.cursor_pos = 0
+        tui.handle_key(curses.KEY_BACKSPACE, dummy_submit)
+        self.assertEqual(state.input_buffer, "abc")
+        self.assertEqual(state.cursor_pos, 0)
+
+        # 11. Moving the caret never submits the input
+        self.assertEqual(submitted, [])
+
+    def test_cursor_keys_with_open_menu_and_raw_escape_sequences(self):
+        """Invariant: Right completes an open menu, Left moves the caret, and raw arrows act like their key codes."""
+        import curses
+
+        state = TUIState()
+        state.set_custom_commands({"alpha": Command("alpha", "does alpha", "t", "project")})
+        tui = CursesTUI(state)
+
+        def dummy_submit(text: str) -> None:
+            return None
+
+        # 1. Right arrow with an open command menu completes the selected entry
+        state.input_buffer = "/al"
+        state.cursor_pos = 3
+        self.assertEqual(len(state.get_matching_commands()), 1)
+        tui.handle_key(curses.KEY_RIGHT, dummy_submit)
+        self.assertEqual(state.input_buffer, "/alpha")
+
+        # 2. Left arrow with an open menu moves the caret instead of completing
+        state.input_buffer = "/al"
+        state.cursor_pos = 3
+        tui.handle_key(curses.KEY_LEFT, dummy_submit)
+        self.assertEqual(state.cursor_pos, 2)
+        self.assertEqual(state.input_buffer, "/al")
+
+        # 3. Raw left and right sequences move the caret like the key codes do
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key("\x1b[D", dummy_submit)
+        self.assertEqual(state.cursor_pos, 2)
+        tui.handle_key("\x1b[C", dummy_submit)
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 4. A raw right sequence with an open menu completes the entry, like KEY_RIGHT
+        state.input_buffer = "/al"
+        state.cursor_pos = 3
+        tui.handle_key("\x1b[C", dummy_submit)
+        self.assertEqual(state.input_buffer, "/alpha")
+
+        # 5. Raw Home and End sequences move the caret to the ends of its line
+        state.input_buffer = "abc\ndef"
+        state.cursor_pos = 5
+        tui.handle_key("\x1b[7~", dummy_submit)
+        self.assertEqual(state.cursor_pos, 4)
+        tui.handle_key("\x1b[8~", dummy_submit)
+        self.assertEqual(state.cursor_pos, 7)
+
+        # 6. Negative: an unknown escape sequence moves nothing and inserts nothing
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key("\x1b[Q", dummy_submit)
+        self.assertEqual(state.cursor_pos, 3)
+        self.assertEqual(state.input_buffer, "abc")
+
+        # 7. Negative: a bare Escape is not read as an arrow and still clears the input
+        state.input_buffer = "abc"
+        state.cursor_pos = 3
+        tui.handle_key("\x1b", dummy_submit)
+        self.assertEqual(state.input_buffer, "")
+
+        # 8. Negative: the Shift+Enter sequences still insert a newline
+        state.input_buffer = "ab"
+        state.cursor_pos = 2
+        tui.handle_key("\x1b[13;2u", dummy_submit)
+        self.assertEqual(state.input_buffer, "ab\n")
+        self.assertEqual(state.cursor_pos, 3)
+
+    def test_caret_stays_visible_after_moving_left(self):
+        """Invariant: the character under the caret stays on screen once the caret moves left."""
+        state = TUIState()
+        tui = CursesTUI(state)
+        buffer = "0123456789" * 10
+        state.input_buffer = buffer
+        state.cursor_pos = 40
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 40)
+        tui.draw(mock_stdscr)
+
+        # 1. The input row is drawn from the window offset that reveals the caret
+        drawn = [c.args[2] for c in mock_stdscr.addstr.call_args_list if len(c.args) >= 3 and c.args[1] == 2]
+        self.assertEqual(len(drawn), 1)
+        self.assertEqual(drawn[0], buffer[5:41])
+        self.assertEqual(drawn[0][35], buffer[40])
+
+        # 2. The cursor is placed on the column where the caret's character is drawn
+        mock_stdscr.move.assert_called_once_with(23, 37)
+
+        # 3. With the caret at the end of the line the tail is still what gets drawn
+        state.cursor_pos = len(buffer)
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 40)
+        tui.draw(mock_stdscr)
+
+        drawn = [c.args[2] for c in mock_stdscr.addstr.call_args_list if len(c.args) >= 3 and c.args[1] == 2]
+        self.assertEqual(len(drawn), 1)
+        self.assertEqual(drawn[0], buffer[-36:])
+        mock_stdscr.move.assert_called_once_with(23, 38)
+
+    def test_vertical_cursor_movement_between_lines(self):
+        """Invariant: Up and Down move the caret between the lines of a multiline input."""
+        state = TUIState()
+        state.input_buffer = "abc\ndef\nghi"
+        state.cursor_pos = 0
+
+        # 1. Down walks down the lines, keeping the column
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 4)
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 8)
+
+        # 2. Up walks back up the lines, keeping the column
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 4)
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 0)
+
+        # 3. Negative: Up on the first line leaves the caret where it is
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 0)
+
+        # 4. Negative: Down on the last line leaves the caret where it is
+        state.cursor_pos = len(state.input_buffer)
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, len(state.input_buffer))
+
+        # 5. Negative: a single-line input has no line to move to
+        state.input_buffer = "abc"
+        state.cursor_pos = 1
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 1)
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 1)
+
+    def test_vertical_cursor_movement_keeps_goal_column(self):
+        """Invariant: vertical moves keep aiming at the column the caret left."""
+        state = TUIState()
+        state.input_buffer = "0123456789\nabcde\n0123456789"
+        state.cursor_pos = 10
+
+        # 1. Down from column 10 lands on the end of the 5-character line
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 16)
+
+        # 2. Up returns to column 10 of the first line
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 10)
+
+    def test_horizontal_move_resets_goal_column(self):
+        """Invariant: a horizontal move makes the next vertical move aim at the new column."""
+        state = TUIState()
+        state.input_buffer = "0123456789\n0123456789\n0123456789"
+        state.cursor_pos = 10
+
+        # 1. Down remembers column 10 as the goal column
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 21)
+
+        # 2. Left moves the caret to column 9 and forgets the goal column
+        state.move_cursor_left()
+        self.assertEqual(state.cursor_pos, 20)
+
+        # 3. The next Down aims at column 9, not at the remembered column 10
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 31)
+
+    def test_typing_resets_goal_column(self):
+        """Invariant: typing at the caret makes the next vertical move aim at the new column."""
+        state = TUIState()
+        state.input_buffer = "0123456789\n0123456789\n0123456789"
+        state.cursor_pos = 9
+
+        # 1. Down remembers column 9 as the goal column
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 20)
+
+        # 2. Typing moves the caret to column 10 and forgets the goal column
+        state.handle_input_char("X")
+        self.assertEqual(state.cursor_pos, 21)
+        self.assertEqual(state.input_buffer, "0123456789\n012345678X9\n0123456789")
+
+        # 3. The next Down aims at column 10, not at the remembered column 9
+        state.move_cursor_down()
+        self.assertEqual(state.cursor_pos, 33)
+
+    def test_truncating_the_input_resets_the_goal_column(self):
+        """Invariant: cutting the input buffer forgets the column vertical moves aim at."""
+        state = TUIState()
+        state.input_buffer = "abc\n0123456789"
+        state.cursor_pos = 14
+
+        # 1. Up remembers column 10 as the goal column
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 2. Truncating the buffer forgets the goal column
+        state.truncate_input(3)
+        self.assertEqual(state.input_buffer, "abc")
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 3. The next vertical move aims at the caret's own column, not at column 10
+        state.handle_newline()
+        state.move_cursor_up()
+        self.assertEqual(state.cursor_pos, 0)
+
+    def test_raw_key_sequence_map_covers_both_cursor_key_encodings(self):
+        """Invariant: raw arrow sequences map to the right key in both cursor key encodings."""
+        import curses
+
+        from core.tui import RAW_KEY_SEQUENCES
+
+        # 1. Normal mode sequences
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[A"], curses.KEY_UP)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[B"], curses.KEY_DOWN)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[C"], curses.KEY_RIGHT)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[D"], curses.KEY_LEFT)
+
+        # 2. Application cursor mode sequences
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOA"], curses.KEY_UP)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOB"], curses.KEY_DOWN)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOC"], curses.KEY_RIGHT)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOD"], curses.KEY_LEFT)
+
+        # 3. Home, End, Delete and the shifted arrows
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOH"], curses.KEY_HOME)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1bOF"], curses.KEY_END)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[3~"], curses.KEY_DC)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[1;2A"], curses.KEY_SR)
+        self.assertEqual(RAW_KEY_SEQUENCES["\x1b[1;2B"], curses.KEY_SF)
+
+    def test_raw_up_and_down_sequences_move_the_caret(self):
+        """Invariant: raw up and down sequences move the caret between lines."""
+        state = TUIState()
+        tui = CursesTUI(state)
+        state.input_buffer = "abc\ndef"
+        state.cursor_pos = 7
+
+        # 1. A raw up sequence moves the caret to the line above
+        tui.handle_key("\x1b[A", lambda _t: None)
+        self.assertEqual(state.cursor_pos, 3)
+
+        # 2. A raw down sequence moves it back to the line below
+        tui.handle_key("\x1b[B", lambda _t: None)
+        self.assertEqual(state.cursor_pos, 7)
+
+        # 3. The application cursor mode encodings do the same
+        state.cursor_pos = 7
+        tui.handle_key("\x1bOA", lambda _t: None)
+        self.assertEqual(state.cursor_pos, 3)
+        tui.handle_key("\x1bOB", lambda _t: None)
+        self.assertEqual(state.cursor_pos, 7)
+
+    def test_up_and_down_do_not_scroll_the_transcript(self):
+        """Invariant: with no menu open, Up and Down move the caret and never scroll the transcript."""
+        import curses
+
+        state = TUIState()
+        state.input_buffer = "abc\ndef"
+        state.cursor_pos = 0
+        tui = CursesTUI(state)
+
+        # 1. Up on the first line moves nothing and scrolls nothing
+        tui.handle_key(curses.KEY_UP, lambda _t: None)
+        self.assertEqual(state.cursor_pos, 0)
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 2. Down moves the caret and leaves the scroll offset alone
+        tui.handle_key(curses.KEY_DOWN, lambda _t: None)
+        self.assertEqual(state.cursor_pos, 4)
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 3. Shift-Tab with no menu open scrolls nothing
+        tui.handle_key(curses.KEY_BTAB, lambda _t: None)
+        self.assertEqual(state.cursor_pos, 4)
+        self.assertEqual(state.scroll_offset, 0)
+
+    def test_shift_up_and_down_scroll_the_transcript_by_one_line(self):
+        """Invariant: Shift+Up and Shift+Down scroll the transcript by exactly one line."""
+        import curses
+
+        state = TUIState()
+        tui = CursesTUI(state)
+
+        # 1. Shift+Up scrolls up one line
+        tui.handle_key(curses.KEY_SR, lambda _t: None)
+        self.assertEqual(state.scroll_offset, 1)
+
+        # 2. Shift+Down scrolls back down one line
+        tui.handle_key(curses.KEY_SF, lambda _t: None)
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 3. The raw shift sequences scroll the same way
+        tui.handle_key("\x1b[1;2A", lambda _t: None)
+        self.assertEqual(state.scroll_offset, 1)
+        tui.handle_key("\x1b[1;2B", lambda _t: None)
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 4. Shift+Up scrolls even while a menu is open
+        state.input_buffer = "/"
+        tui.handle_key(curses.KEY_SR, lambda _t: None)
+        self.assertEqual(state.scroll_offset, 1)
+        self.assertEqual(state.selected_command_idx, 0)
+
+    def test_up_and_down_navigate_an_open_menu_without_moving_the_caret(self):
+        """Invariant: with a menu open, Up and Down select entries instead of moving the caret."""
+        import curses
+
+        state = TUIState()
+        state.input_buffer = "/"
+        state.cursor_pos = 1
+        tui = CursesTUI(state)
+        self.assertGreater(len(state.get_matching_commands()), 1)
+
+        # 1. Up selects the previous entry and leaves the caret alone
+        tui.handle_key(curses.KEY_UP, lambda _t: None)
+        self.assertEqual(state.selected_command_idx, len(state.get_matching_commands()) - 1)
+        self.assertEqual(state.cursor_pos, 1)
+
+        # 2. Down selects the next entry and leaves the caret alone
+        tui.handle_key(curses.KEY_DOWN, lambda _t: None)
+        self.assertEqual(state.selected_command_idx, 0)
+        self.assertEqual(state.cursor_pos, 1)
+
+    def test_input_box_follows_the_caret_vertically(self):
+        """Invariant: the input box scrolls so the caret's line stays visible."""
+        import curses
+
+        state = TUIState()
+        state.input_buffer = "\n".join(f"line {i}" for i in range(1, 11))
+        state.cursor_pos = len(state.input_buffer)
+        tui = CursesTUI(state)
+
+        def drawn_rows(mock_stdscr: MagicMock) -> list[tuple[int, str]]:
+            return [
+                (c.args[0], c.args[2])
+                for c in mock_stdscr.addstr.call_args_list
+                if len(c.args) >= 3 and c.args[1] == 2 and c.args[0] >= 18
+            ]
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui.draw(mock_stdscr)
+
+        # 1. With the caret on the last line the box shows the last six lines
+        self.assertEqual(
+            drawn_rows(mock_stdscr),
+            [
+                (18, "line 5"),
+                (19, "line 6"),
+                (20, "line 7"),
+                (21, "line 8"),
+                (22, "line 9"),
+                (23, "line 10"),
+            ],
+        )
+        mock_stdscr.move.assert_called_once_with(23, 9)
+
+        # 2. Moving the caret up scrolls the box so its line stays visible
+        for _ in range(5):
+            tui.handle_key(curses.KEY_UP, lambda _t: None)
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui.draw(mock_stdscr)
+
+        self.assertEqual(
+            drawn_rows(mock_stdscr),
+            [
+                (18, "line 1"),
+                (19, "line 2"),
+                (20, "line 3"),
+                (21, "line 4"),
+                (22, "line 5"),
+                (23, "line 6"),
+            ],
+        )
+        mock_stdscr.move.assert_called_once_with(22, 8)
 
     def test_escape_never_exits_on_empty_prompt(self):
         """Invariant: Esc never terminates the session on an empty prompt; it clears input or dismisses menus."""

@@ -6,6 +6,7 @@ import re
 import sys
 import textwrap
 import threading
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -72,6 +73,35 @@ SHIFT_ENTER_SEQUENCES: set[str | int] = {
     545,
     546,
 }
+
+# Cursor and editing keys some terminals deliver untranslated, as raw escape
+# sequences instead of curses key codes. Terminals in application cursor mode
+# send ESC O <letter>; the rest send ESC [ <letter>.
+RAW_KEY_SEQUENCES: dict[str, int] = {
+    "\x1b[A": curses.KEY_UP,
+    "\x1b[B": curses.KEY_DOWN,
+    "\x1b[C": curses.KEY_RIGHT,
+    "\x1b[D": curses.KEY_LEFT,
+    "\x1bOA": curses.KEY_UP,
+    "\x1bOB": curses.KEY_DOWN,
+    "\x1bOC": curses.KEY_RIGHT,
+    "\x1bOD": curses.KEY_LEFT,
+    "\x1b[H": curses.KEY_HOME,
+    "\x1b[F": curses.KEY_END,
+    "\x1bOH": curses.KEY_HOME,
+    "\x1bOF": curses.KEY_END,
+    "\x1b[1~": curses.KEY_HOME,
+    "\x1b[7~": curses.KEY_HOME,
+    "\x1b[4~": curses.KEY_END,
+    "\x1b[8~": curses.KEY_END,
+    "\x1b[3~": curses.KEY_DC,
+    "\x1b[1;2A": curses.KEY_SR,
+    "\x1b[1;2B": curses.KEY_SF,
+}
+
+# Braille spinner frames and the seconds each frame is shown.
+SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+SPINNER_INTERVAL: float = 0.1
 
 def compact_path(path_str: str) -> str:
     """Compacts an absolute path with ~ if within the user's home directory."""
@@ -450,6 +480,7 @@ class TUIState:
         self.scroll_offset: int = 0
         self.input_buffer: str = ""
         self.cursor_pos: int = 0
+        self._goal_column: int | None = None
         self.status_tokens: int = 0
         self.max_tokens: int = 0
         self.usage_pct: float = 0.0
@@ -469,6 +500,19 @@ class TUIState:
         self.workspace_files: list[str] = []
         self.selected_command_idx: int = 0
         self.turn_active: bool = False
+        self.spinner_frame: int = 0
+        self.spinner_elapsed: float = 0.0
+
+    def advance_spinner(self, elapsed: float) -> None:
+        """Advances the spinner frame once per whole elapsed interval."""
+        self.spinner_elapsed += elapsed
+        while self.spinner_elapsed >= SPINNER_INTERVAL:
+            self.spinner_elapsed -= SPINNER_INTERVAL
+            self.spinner_frame = (self.spinner_frame + 1) % len(SPINNER_FRAMES)
+
+    def spinner_char(self) -> str:
+        """The glyph of the current spinner frame."""
+        return SPINNER_FRAMES[self.spinner_frame % len(SPINNER_FRAMES)]
 
     def set_available_models(self, models: list[dict[str, Any]]) -> None:
         """Loads available models for /model autocomplete."""
@@ -566,6 +610,7 @@ class TUIState:
         after = self.input_buffer[at_idx + 1 + len(query):]
         self.input_buffer = f"{before}{chosen_tag} {after}"
         self.cursor_pos = len(before) + len(chosen_tag) + 1
+        self._reset_goal_column()
         return chosen_tag
 
     def get_matching_commands(self) -> list[tuple[str, str]]:
@@ -657,6 +702,7 @@ class TUIState:
         chosen_cmd, _ = matches[idx]
         self.input_buffer = chosen_cmd
         self.cursor_pos = len(self.input_buffer)
+        self._reset_goal_column()
         return chosen_cmd
 
     def add_user(self, text: str) -> None:
@@ -765,12 +811,14 @@ class TUIState:
         pos = min(self.cursor_pos, len(self.input_buffer))
         self.input_buffer = self.input_buffer[:pos] + char_str + self.input_buffer[pos:]
         self.cursor_pos = pos + len(char_str)
+        self._reset_goal_column()
 
     def handle_newline(self) -> None:
         """Inserts a newline character at cursor position for multiline editing."""
         pos = min(self.cursor_pos, len(self.input_buffer))
         self.input_buffer = self.input_buffer[:pos] + "\n" + self.input_buffer[pos:]
         self.cursor_pos = pos + 1
+        self._reset_goal_column()
 
     def handle_backspace(self) -> None:
         """Removes the character before cursor position from input buffer."""
@@ -778,12 +826,88 @@ class TUIState:
             pos = min(self.cursor_pos, len(self.input_buffer))
             self.input_buffer = self.input_buffer[: pos - 1] + self.input_buffer[pos:]
             self.cursor_pos = max(0, pos - 1)
+        self._reset_goal_column()
+
+    def _clamp_cursor(self) -> None:
+        """Clamps a stale cursor position to the length of the current input buffer."""
+        self.cursor_pos = max(0, min(self.cursor_pos, len(self.input_buffer)))
+
+    def _reset_goal_column(self) -> None:
+        """Forgets the column vertical moves aim at, so the next one starts from the caret."""
+        self._goal_column = None
+
+    def move_cursor_left(self) -> None:
+        """Moves the cursor one character to the left, never before the start of the buffer."""
+        self._clamp_cursor()
+        self.cursor_pos = max(0, self.cursor_pos - 1)
+        self._reset_goal_column()
+
+    def move_cursor_right(self) -> None:
+        """Moves the cursor one character to the right, never past the end of the buffer."""
+        self._clamp_cursor()
+        self.cursor_pos = min(len(self.input_buffer), self.cursor_pos + 1)
+        self._reset_goal_column()
+
+    def move_cursor_home(self) -> None:
+        """Moves the cursor to the start of the line it is on."""
+        self._clamp_cursor()
+        before = self.input_buffer[: self.cursor_pos]
+        self.cursor_pos = before.rfind("\n") + 1
+        self._reset_goal_column()
+
+    def move_cursor_end(self) -> None:
+        """Moves the cursor to the end of the line it is on."""
+        self._clamp_cursor()
+        after = self.input_buffer[self.cursor_pos :]
+        newline = after.find("\n")
+        self.cursor_pos = len(self.input_buffer) if newline < 0 else self.cursor_pos + newline
+        self._reset_goal_column()
+
+    def move_cursor_up(self) -> None:
+        """Moves the caret to the line above, aiming at the goal column."""
+        self._move_cursor_vertically(-1)
+
+    def move_cursor_down(self) -> None:
+        """Moves the caret to the line below, aiming at the goal column."""
+        self._move_cursor_vertically(1)
+
+    def _move_cursor_vertically(self, delta: int) -> None:
+        """Moves the caret one line up or down, keeping the column it aims at."""
+        self._clamp_cursor()
+        lines = self.input_buffer.split("\n")
+        before = self.input_buffer[: self.cursor_pos]
+        target = before.count("\n") + delta
+        if target < 0 or target >= len(lines):
+            return
+        if self._goal_column is None:
+            self._goal_column = len(before.split("\n")[-1])
+        column = min(self._goal_column, len(lines[target]))
+        self.cursor_pos = self._line_start(lines, target) + column
+
+    def _line_start(self, lines: list[str], index: int) -> int:
+        """Returns the offset where the given line of the input buffer starts."""
+        return sum(len(line) + 1 for line in lines[:index])
+
+    def delete_forward(self) -> None:
+        """Removes the character at the cursor position from the input buffer."""
+        self._clamp_cursor()
+        pos = self.cursor_pos
+        if pos < len(self.input_buffer):
+            self.input_buffer = self.input_buffer[:pos] + self.input_buffer[pos + 1 :]
+        self._reset_goal_column()
+
+    def truncate_input(self, length: int) -> None:
+        """Cuts the input buffer to the given length and places the caret at its end."""
+        self.input_buffer = self.input_buffer[:length]
+        self.cursor_pos = min(length, len(self.input_buffer))
+        self._reset_goal_column()
 
     def clear_input(self) -> str:
         """Clears and returns the current input buffer."""
         val = self.input_buffer.strip()
         self.input_buffer = ""
         self.cursor_pos = 0
+        self._reset_goal_column()
         return val
 
 
@@ -865,6 +989,41 @@ def _set_nodelay(window: Any, enabled: bool) -> None:
         pass
 
 
+def _read_pending(window: Any) -> list[str]:
+    """Reads the characters pending on a window, leaving its read timeout unchanged.
+
+    A window left in blocking mode stops timing out, so a caller that polls for
+    input must hand the timeout back or the screen stops repainting between
+    keystrokes.
+    """
+    saved: int | None = None
+    try:
+        value = window.gettimeout()
+        saved = value if isinstance(value, int) else None
+    except (curses.error, AttributeError):
+        saved = None
+    _set_nodelay(window, True)
+    try:
+        chars: list[str] = []
+        while True:
+            try:
+                value = window.get_wch()
+            except (curses.error, EOFError, StopIteration):
+                break
+            chars.append(
+                chr(value) if isinstance(value, int) and 0 <= value <= 0x10FFFF else str(value)
+            )
+        return chars
+    finally:
+        if saved is None or saved < 0:
+            _set_nodelay(window, False)
+        else:
+            try:
+                window.timeout(saved)
+            except curses.error:
+                pass
+
+
 def _drain_escape_sequence(window: Any) -> str:
     """Reads the remainder of an escape sequence without blocking.
 
@@ -872,14 +1031,7 @@ def _drain_escape_sequence(window: Any) -> str:
     nothing behind, which is how a lone keypress is told apart from CSI-u and
     modifyOtherKeys sequences that decode to ordinary characters.
     """
-    seq = "\x1b"
-    while True:
-        try:
-            nxt = window.get_wch()
-        except (curses.error, EOFError, StopIteration):
-            break
-        seq += chr(nxt) if isinstance(nxt, int) and 0 <= nxt <= 0x10FFFF else str(nxt)
-    return seq
+    return "\x1b" + "".join(_read_pending(window))
 
 
 def _reset_key_reporting() -> None:
@@ -919,6 +1071,7 @@ class CursesTUI:
         self._redraw_requested = False
         self._draw_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
+        self._last_frame_at: float = time.monotonic()
 
     def request_redraw(self) -> None:
         """Schedules a thread-safe redraw for the next main loop iteration."""
@@ -941,6 +1094,7 @@ class CursesTUI:
 
     def draw(self, stdscr: Any) -> None:
         """Draws the complete TUI screen: Header, Transcript, Status, and Bottom Input."""
+        self._advance_spinner()
         if not stdscr:
             return
         with self._draw_lock:
@@ -958,6 +1112,14 @@ class CursesTUI:
             self._draw_autocomplete(stdscr, w, layout)
             self._draw_input(stdscr, w, layout)
             stdscr.refresh()
+
+    def _advance_spinner(self) -> None:
+        """Steps the spinner animation by the time elapsed since the last frame."""
+        now = time.monotonic()
+        elapsed = now - self._last_frame_at
+        self._last_frame_at = now
+        if self.state.turn_active:
+            self.state.advance_spinner(elapsed)
 
     def _draw_header(self, stdscr: Any, w: int) -> None:
         """Draws the title bar and the rule beneath it."""
@@ -1063,7 +1225,12 @@ class CursesTUI:
     def _status_parts(self) -> list[str]:
         """The telemetry fields shown in the status bar, in display order."""
         state = self.state
-        parts: list[str] = [self._model_label()] if self._model_label() else []
+        parts: list[str] = []
+        if state.turn_active:
+            parts.append(f"{state.spinner_char()} running")
+        model_label = self._model_label()
+        if model_label:
+            parts.append(model_label)
         if state.cache_ttl:
             parts.append(f"cache: {state.cache_ttl}")
         if state.reasoning:
@@ -1076,7 +1243,7 @@ class CursesTUI:
         if state.scroll_offset > 0:
             parts.append(f"[scrolled +{state.scroll_offset}]")
         if state.turn_active:
-            parts.append("[running · Esc cancels after current step · Ctrl+C cancels now]")
+            parts.append("[Esc cancels after current step · Ctrl+C cancels now]")
         return parts
 
     def _model_label(self) -> str:
@@ -1168,12 +1335,32 @@ class CursesTUI:
         stdscr.addstr(separator_row + 1, width - 1, "│", curses.A_DIM)
         stdscr.addstr(top + height - 1, 0, ("└" + "─" * (width - 2) + "┘")[:width], curses.A_DIM)
 
+    def _caret_location(self) -> tuple[int, int]:
+        """Returns the caret's line index and its column within that line."""
+        pos = max(0, min(self.state.cursor_pos, len(self.state.input_buffer)))
+        before = self.state.input_buffer[:pos]
+        return before.count("\n"), len(before.split("\n")[-1])
+
+    def _input_window_start(self, line: str, caret_column: int | None, available: int) -> int:
+        """Returns the index of the first character of an input line that gets drawn."""
+        tail_start = max(0, len(line) - available)
+        if caret_column is None or caret_column >= tail_start:
+            return tail_start
+        return max(0, caret_column - available + 1)
+
+    def _input_window_first_line(self, caret_line: int, layout: "ScreenLayout") -> int:
+        """Returns the index of the first input line the box shows, keeping the caret in view."""
+        box_height = layout.input_box_height
+        last_start = max(0, layout.input_lines - box_height)
+        return max(0, min(caret_line - box_height + 1, last_start))
+
     def _draw_input(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
         """Draws the bottom-anchored prompt and places the cursor."""
         prompt, continuation = "> ", "  "
         available = max(5, w - len(prompt) - 2)
         lines = self.state.input_buffer.split("\n")
-        first_line = max(0, layout.input_lines - layout.input_box_height)
+        caret_line, caret_column = self._caret_location()
+        first_line = self._input_window_first_line(caret_line, layout)
 
         try:
             for row in range(layout.input_box_height):
@@ -1182,7 +1369,10 @@ class CursesTUI:
                 label = prompt if index == 0 else continuation
                 y = layout.input_start_row + row
                 stdscr.addstr(y, 0, label, curses.A_BOLD if index == 0 else curses.A_DIM)
-                stdscr.addstr(y, len(label), text[-available:])
+                start = self._input_window_start(
+                    text, caret_column if index == caret_line else None, available
+                )
+                stdscr.addstr(y, len(label), text[start : start + available])
             if (cursor := self._cursor_position(w, layout, available, len(prompt))):
                 stdscr.move(*cursor)
         except curses.error:
@@ -1192,39 +1382,27 @@ class CursesTUI:
         self, w: int, layout: "ScreenLayout", available: int, prompt_width: int
     ) -> tuple[int, int] | None:
         """Where the cursor sits, accounting for the tail of a scrolled input line."""
-        first_line = max(0, layout.input_lines - layout.input_box_height)
-        before = self.state.input_buffer[: self.state.cursor_pos]
-        line_index = before.count("\n")
+        line_index, column = self._caret_location()
+        first_line = self._input_window_first_line(line_index, layout)
         if line_index < first_line:
             return None  # the cursor sits above the visible input box
         line_text = self.state.input_buffer.split("\n")[line_index]
-        column = len(before.split("\n")[-1])
-        offset = max(0, len(line_text) - available)
+        offset = self._input_window_start(line_text, column, available)
         return layout.input_start_row + (line_index - first_line), min(
             w - 1, prompt_width + max(0, column - offset)
         )
 
     def check_cancel_requested(self) -> bool:
-        """Non-blocking check if Escape key was pressed by user during execution."""
+        """Reports whether the user asked to cancel the running turn.
+
+        The keyboard is read by the main thread only, which turns a pressed Esc
+        into the cancel flag. Reading the window from the worker thread races
+        with the main loop and leaves the screen unable to repaint.
+        """
         if self._cancel_requested:
             self._cancel_requested = False
             return True
-        if not self.stdscr:
-            return False
-        try:
-            _set_nodelay(self.stdscr, True)
-            while True:
-                try:
-                    ch = self.stdscr.get_wch()
-                except (curses.error, EOFError, StopIteration):
-                    break
-                except KeyboardInterrupt:
-                    raise
-                if ch in (27, "\x1b") and len(_drain_escape_sequence(self.stdscr)) == 1:
-                    return True
-            return False
-        finally:
-            _set_nodelay(self.stdscr, False)
+        return False
 
     def _complete_command_keeping_value_menu(self) -> None:
         """Completes the selected command, adding a space when it takes an argument.
@@ -1246,14 +1424,24 @@ class CursesTUI:
 
         Returns False if the interactive session should terminate (e.g. /exit), else True.
         """
-        # Decode any terminal escape sequences that represent characters (e.g. Shift+2 -> @)
+        # Arrow keys may arrive as raw escape sequences instead of curses key codes
         if isinstance(ch, str) and ch.startswith("\x1b"):
-            decoded_char = decode_terminal_sequence(ch)
-            if decoded_char:
-                ch = decoded_char
+            if ch not in SHIFT_ENTER_SEQUENCES and (key := RAW_KEY_SEQUENCES.get(ch)) is not None:
+                ch = key
+            else:
+                # Decode any terminal escape sequences that represent characters (e.g. Shift+2 -> @)
+                decoded_char = decode_terminal_sequence(ch)
+                if decoded_char:
+                    ch = decoded_char
 
         file_matches = self.state.get_matching_file_tags()
         cmd_matches = self.state.get_matching_commands()
+
+        # 0. Terminal resize: repaint from scratch, the old rows no longer fit
+        if ch == curses.KEY_RESIZE:
+            if self.stdscr:
+                self.stdscr.clear()
+            return True
 
         # 1. Shift+Enter / Alt+Enter: Insert newline for multiline input
         if ch in SHIFT_ENTER_SEQUENCES:
@@ -1294,23 +1482,42 @@ class CursesTUI:
                 return True
             return True
 
-        # 4. Up / Shift-Tab: Cycle backward or scroll up
-        if ch in (curses.KEY_UP, curses.KEY_BTAB, 353, "\x1b[Z"):
+        # 4. Shift+Up / Shift+Down: Scroll the transcript by one line
+        if ch in (curses.KEY_SR, curses.KEY_SF):
+            if ch == curses.KEY_SR:
+                self.state.scroll_up(1)
+            else:
+                self.state.scroll_down(1)
+            return True
+
+        # 5. Up: Select the previous entry, else move the caret up
+        if ch in (curses.KEY_UP,):
             if file_matches or cmd_matches:
                 self.state.select_prev_command()
                 return True
-            self.state.scroll_up(5)
+            self.state.move_cursor_up()
             return True
 
-        # 5. Down: Cycle forward or scroll down
+        # 6. Down: Select the next entry, else move the caret down
         if ch in (curses.KEY_DOWN,):
             if file_matches or cmd_matches:
                 self.state.select_next_command()
                 return True
-            self.state.scroll_down(5)
+            self.state.move_cursor_down()
             return True
 
-        # 6. Right Arrow: Complete selection
+        # 7. Shift-Tab: Select the previous entry, never scrolls the transcript
+        if ch in (curses.KEY_BTAB, 353, "\x1b[Z"):
+            if file_matches or cmd_matches:
+                self.state.select_prev_command()
+            return True
+
+        # 8. Left Arrow: Move the caret, even while a menu is open
+        if ch in (curses.KEY_LEFT,):
+            self.state.move_cursor_left()
+            return True
+
+        # 9. Right Arrow: Complete selection, else move the caret
         if ch in (curses.KEY_RIGHT,):
             if file_matches:
                 self.state.complete_selected_file_tag()
@@ -1318,6 +1525,22 @@ class CursesTUI:
             if cmd_matches:
                 self._complete_command_keeping_value_menu()
                 return True
+            self.state.move_cursor_right()
+            return True
+
+        # 10. Home / Ctrl+A: Move to the start of the caret's line
+        if ch in (curses.KEY_HOME, 1):
+            self.state.move_cursor_home()
+            return True
+
+        # 11. End / Ctrl+E: Move to the end of the caret's line
+        if ch in (curses.KEY_END, 5):
+            self.state.move_cursor_end()
+            return True
+
+        # 12. Delete: Remove the character under the caret
+        if ch in (curses.KEY_DC,):
+            self.state.delete_forward()
             return True
 
         if ch in (curses.KEY_PPAGE,):
@@ -1328,8 +1551,8 @@ class CursesTUI:
             self.state.scroll_down(5)
             return True
 
-        # 7. Escape: cancel the running turn, else dismiss menu / clear tag query,
-        #    else clear input buffer. NEVER exit when prompt is empty.
+        # 13. Escape: cancel the running turn, else dismiss menu / clear tag query,
+        #     else clear input buffer. NEVER exit when prompt is empty.
         if ch in (27, "\x1b"):
             if self.state.turn_active:
                 self._cancel_requested = True
@@ -1338,8 +1561,7 @@ class CursesTUI:
                 tag_info = self.state.get_current_file_tag_query()
                 if tag_info:
                     at_idx, _ = tag_info
-                    self.state.input_buffer = self.state.input_buffer[:at_idx]
-                    self.state.cursor_pos = at_idx
+                    self.state.truncate_input(at_idx)
                 return True
             if cmd_matches:
                 self.state.clear_input()
@@ -1425,9 +1647,7 @@ class CursesTUI:
                     continue
 
                 if ch in (27, "\x1b"):
-                    _set_nodelay(stdscr, True)
                     seq = _drain_escape_sequence(stdscr)
-                    _set_nodelay(stdscr, False)
                     if len(seq) > 1:
                         ch = seq
 
