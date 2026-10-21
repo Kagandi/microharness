@@ -416,8 +416,9 @@ class TestResolveConnection(unittest.TestCase):
         self.assertEqual(model.provider, connection.provider)
         self.assertEqual(model.api_key, connection.api_key)
 
-    def test_model_under_models_scoped_endpoint_not_overridden_by_top_level_endpoint(self):
-        """Invariant: selecting a provider or model with its own endpoint does not get overridden by top-level endpoint."""
+    def test_model_entry_endpoint_wins_but_profile_yields_to_unattributable_cfg(self):
+        """Invariant: an alias entry with its own endpoint wins; otherwise an
+        unattributable global endpoint wins over the profile endpoint."""
         config = {
             "endpoint": "https://openrouter.ai/api/v1",
             "models": {
@@ -426,11 +427,257 @@ class TestResolveConnection(unittest.TestCase):
             },
         }
         conn_smart = resolve_connection("smart", config=config, registry=self.REGISTRY)
-        self.assertEqual(conn_smart.endpoint, "https://openai/v1")
+        self.assertEqual(conn_smart.endpoint, "https://openrouter.ai/api/v1")
         self.assertEqual(conn_smart.provider, "openai")
 
         conn_local = resolve_connection("local", config=config, registry=self.REGISTRY)
         self.assertEqual(conn_local.endpoint, "http://localhost:1234/v1")
+
+
+class TestWave8EndpointRouting(unittest.TestCase):
+    """Wave 8: a startup dict naming a config alias merges the entry underneath.
+
+    A request endpoint (flag/env, alias entry, or direct) beats everything;
+    otherwise the profile endpoint and the global config endpoint compete after
+    normalization, attributing the config endpoint to decide the winner.
+    """
+
+    REGISTRY = {
+        "openai": {
+            "endpoint": "https://api.openai.com/v1",
+            "default_model": "gpt-4o",
+            "env_keys": ["OPENAI_API_KEY"],
+        },
+        "bedrock": {
+            "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
+            "default_model": "us.openai.gpt-5.6-sol",
+            "env_keys": ["BEDROCK_API_KEY"],
+            "auth": {"scheme": "sigv4", "service": "bedrock"},
+        },
+        "local": {
+            "endpoint": "http://localhost:1234/v1",
+            "default_model": "local-model",
+            "env_keys": [],
+        },
+    }
+
+    @staticmethod
+    def _startup_spec(**overrides: object) -> dict:
+        """Builds a main.py _startup_model_spec-shaped dict (flag/env only)."""
+        spec: dict = {
+            "model": None,
+            "provider": None,
+            "endpoint": None,
+            "api_key": None,
+            "headers": None,
+        }
+        spec.update(overrides)
+        return spec
+
+    def test_bedrock_alias_dict_ignores_global_local_endpoint(self):
+        """Invariant: a bedrock alias dict resolves to the regional URL, not the global local endpoint."""
+        config = {
+            "endpoint": "http://localhost:1234/v1",
+            "models": {"luna": {"model": "us.openai.gpt-5.6-sol", "provider": "bedrock"}},
+        }
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update({"AWS_REGION": "us-east-1"})
+            with patch.dict(os.environ, env, clear=True):
+                conn = resolve_connection(
+                    self._startup_spec(model="luna"),
+                    config=config,
+                    registry=dict(self.REGISTRY),
+                )
+        self.assertEqual(
+            conn.endpoint, "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+        )
+        self.assertEqual(conn.provider, "bedrock")
+        self.assertEqual(conn.model, "us.openai.gpt-5.6-sol")
+
+    def test_unattributable_cfg_endpoint_wins_over_profile(self):
+        """Invariant: a gateway URL no profile claims still wins (no-attribution fallback)."""
+        registry = {"openai": dict(self.REGISTRY["openai"])}
+        config = {"endpoint": "https://gateway.internal/v1"}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "gpt-4o", "provider": "openai"},
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.endpoint, "https://gateway.internal/v1")
+        self.assertEqual(conn.provider, "openai")
+
+    def test_matching_cfg_endpoint_wins_over_profile(self):
+        """Invariant: a cfg endpoint attributed to the selected provider wins."""
+        registry = {"openai": dict(self.REGISTRY["openai"])}
+        config = {"endpoint": "https://api.openai.com/v1/gateway"}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "gpt-4o", "provider": "openai"},
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.endpoint, "https://api.openai.com/v1/gateway")
+        self.assertEqual(conn.provider, "openai")
+
+    def test_foreign_cfg_endpoint_loses_to_profile(self):
+        """Invariant: a cfg endpoint attributed to another provider loses to the profile."""
+        registry = {
+            "openai": dict(self.REGISTRY["openai"]),
+            "local": dict(self.REGISTRY["local"]),
+        }
+        config = {"endpoint": "http://localhost:1234/v1"}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "gpt-4o", "provider": "openai"},
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.endpoint, "https://api.openai.com/v1")
+        self.assertEqual(conn.provider, "openai")
+
+    def test_local_default_from_cfg_is_unchanged(self):
+        """Invariant: a provider-less spec over a global local endpoint stays local and keyless."""
+        config = {
+            "endpoint": "http://localhost:1234/v1",
+            "model": "qwen2.5-coder-7b-instruct",
+        }
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "qwen2.5-coder-7b-instruct"},
+                config=config,
+                registry=dict(self.REGISTRY),
+            )
+        self.assertEqual(conn.endpoint, "http://localhost:1234/v1")
+        self.assertEqual(conn.is_local, True)
+        self.assertEqual(conn.missing_credentials, False)
+
+    def test_flag_endpoint_beats_alias_profile_and_cfg(self):
+        """Invariant: an explicit request endpoint wins over both profile and global endpoints."""
+        config = {
+            "endpoint": "https://gateway.internal/v1",
+            "models": {"luna": {"model": "us.openai.gpt-5.6-sol", "provider": "bedrock"}},
+        }
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update({"AWS_REGION": "us-east-1"})
+            with patch.dict(os.environ, env, clear=True):
+                conn = resolve_connection(
+                    self._startup_spec(model="luna", endpoint="https://flag.example/v1"),
+                    config=config,
+                    registry=dict(self.REGISTRY),
+                )
+        self.assertEqual(conn.endpoint, "https://flag.example/v1")
+        self.assertEqual(conn.provider, "bedrock")
+        self.assertEqual(conn.model, "us.openai.gpt-5.6-sol")
+
+    def test_alias_entry_endpoint_beats_global_endpoint(self):
+        """Invariant: an endpoint on the alias entry wins over the global endpoint."""
+        config = {
+            "endpoint": "https://gateway.internal/v1",
+            "models": {"desk": {"model": "llama-3", "endpoint": "http://localhost:1234/v1"}},
+        }
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                self._startup_spec(model="desk"),
+                config=config,
+                registry=dict(self.REGISTRY),
+            )
+        self.assertEqual(conn.endpoint, "http://localhost:1234/v1")
+        self.assertEqual(conn.model, "llama-3")
+
+    def test_flag_provider_kept_with_entry_model_id(self):
+        """Invariant: --provider X over an alias to Y keeps X but takes the entry model id."""
+        registry = {
+            "openai": dict(self.REGISTRY["openai"]),
+            "providerx": {"endpoint": "https://x.example/v1", "default_model": "x-default"},
+        }
+        config = {"models": {"fast": {"model": "y-model-id", "provider": "openai"}}}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                self._startup_spec(model="fast", provider="providerx"),
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.provider, "providerx")
+        self.assertEqual(conn.model, "y-model-id")
+        self.assertEqual(conn.endpoint, "https://x.example/v1")
+
+    def test_trailing_slash_cfg_endpoint_matches_profile(self):
+        """Invariant: endpoint comparison ignores a trailing slash (profile wins the tie)."""
+        registry = {"openai": dict(self.REGISTRY["openai"])}
+        config = {"endpoint": "https://api.openai.com/v1/"}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "gpt-4o", "provider": "openai"},
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.endpoint, "https://api.openai.com/v1")
+        self.assertEqual(conn.provider, "openai")
+
+    def test_direct_endpoint_with_cfg_provider(self):
+        """Invariant: a provider-less direct endpoint keeps the cfg-pinned provider."""
+        registry = {"openai": dict(self.REGISTRY["openai"])}
+        config = {"provider": "openai"}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                {"model": "gpt-4o", "endpoint": "https://direct.example/v1"},
+                config=config,
+                registry=registry,
+            )
+        self.assertEqual(conn.endpoint, "https://direct.example/v1")
+        self.assertEqual(conn.provider, "openai")
+
+    def test_alias_entry_auth_surfaces_through_startup_dict(self):
+        """Invariant: auth on the alias entry applies to a startup dict naming the alias."""
+        registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "bearer"}}
+        config = {
+            "models": {
+                "fast": {"model": "m", "provider": "custom", "auth": {"scheme": "none"}}
+            }
+        }
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                self._startup_spec(model="fast"), config=config, registry=registry
+            )
+        self.assertEqual(conn.auth_scheme, "none")
+
+    def test_string_alias_entry_sets_model_id(self):
+        """Invariant: a dict spec naming a string alias takes the entry as its model id."""
+        registry = {"openai": dict(self.REGISTRY["openai"])}
+        config = {"provider": "openai", "models": {"fast": "gpt-4o-mini"}}
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(
+                self._startup_spec(model="fast"), config=config, registry=registry
+            )
+        self.assertEqual(conn.model, "gpt-4o-mini")
+        self.assertEqual(conn.provider, "openai")
+        self.assertEqual(conn.endpoint, "https://api.openai.com/v1")
+
+    def test_alias_entry_api_key_and_headers_surface(self):
+        """Invariant: api_key/headers on the alias entry reach the connection; spec headers win ties."""
+        registry = {"custom": {"endpoint": "https://x.example/v1"}}
+        config = {
+            "models": {
+                "fast": {
+                    "model": "m",
+                    "provider": "custom",
+                    "api_key": "entry-key",
+                    "headers": {"X-Entry": "1", "X-Both": "entry"},
+                }
+            }
+        }
+        spec = self._startup_spec(
+            model="fast", headers={"X-Both": "spec", "X-Spec": "2"}
+        )
+        with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+            conn = resolve_connection(spec, config=config, registry=registry)
+        self.assertEqual(conn.api_key, "entry-key")
+        self.assertEqual(conn.headers, {"X-Entry": "1", "X-Both": "spec", "X-Spec": "2"})
+        self.assertEqual(conn.model, "m")
+        self.assertEqual(conn.provider, "custom")
 
 
 class TestBedrockProvider(unittest.TestCase):
@@ -783,6 +1030,26 @@ class TestWave6AuthWiring(unittest.TestCase):
             "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/chat/completions",
         )
         self.assertEqual(model.auth_secrets, {"api_key": "brk-token"})
+
+    def test_global_placeholder_api_key_does_not_trigger_bearer_override(self):
+        """Invariant: config api_key 'none' without BEDROCK_API_KEY keeps SigV4."""
+        with tempfile.TemporaryDirectory() as home:
+            env = _clean_aws_env(home)
+            env.update(
+                {
+                    "AWS_REGION": "us-east-1",
+                    "AWS_ACCESS_KEY_ID": "AKID",
+                    "AWS_SECRET_ACCESS_KEY": "SECRET",
+                }
+            )
+            with patch.dict(os.environ, env, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    config={"api_key": "none"},
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.auth_scheme, "sigv4")
 
     def test_custom_aws_profile_flows_into_auth_options(self):
         """Invariant: config aws_profile is stashed in auth_options for sigv4."""

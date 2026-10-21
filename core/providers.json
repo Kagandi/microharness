@@ -38,7 +38,7 @@
     "endpoint": "https://bedrock-runtime.{region}.amazonaws.com/openai/v1",
     "default_model": "us.openai.gpt-5.6-sol",
     "env_keys": ["BEDROCK_API_KEY"],
-    "reasoning_format": "none",
+    "reasoning_format": "explicit_none",
     "cache_strategy": "openai_breakpoint",
     "auth": {"scheme": "sigv4", "service": "bedrock"}
   },
