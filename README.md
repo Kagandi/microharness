@@ -1,8 +1,30 @@
 # microharness
 
+[![PyPI version](https://img.shields.io/pypi/v/microharness.svg)](https://pypi.org/project/microharness/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Dependencies: 0](https://img.shields.io/badge/dependencies-0-success.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A minimalist, zero-dependency, and fully pluggable AI agent microframework in Python.
 
-Built with **zero external runtime dependencies** (standard library only) to teach the core architectural boundaries of agentic systems. Compatible with modern packaging tools like [`uv`](https://github.com/astral-sh/uv).
+Built with **zero external runtime dependencies** (standard library only) to teach the core architectural boundaries of agentic systems. Compatible with modern packaging tools like [`uv`](https://github.com/astral-sh/uv) and standard `pip`.
+
+---
+
+## Installation
+
+Install directly from PyPI:
+
+```bash
+# Using pip:
+pip install microharness
+
+# Or with uv:
+uv add microharness
+
+# Or run as a standalone CLI tool without installing into your current environment:
+uvx microharness "Inspect the files in this directory"
+```
 
 ---
 
@@ -269,7 +291,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 250+ unit and integration tests run in ~7s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
+*(All 730+ unit and integration tests run in ~5s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
 
 ### 3. Interactive and TUI Sessions
 ```bash
@@ -346,7 +368,7 @@ uvx --from datacurve-pier pier run -p datasets/deep-swe/tasks/aiomonitor-task-sn
 Because components follow minimal Python `Protocols`, you can plug in any Model, Tool, or Evaluator from the outside without touching a single line of harness code:
 
 ```python
-from core.harness import Harness
+from microharness import Harness
 
 # In-place coding agent on your repo with global and project steering:
 harness = Harness(
@@ -419,6 +441,7 @@ microharness/
 │       └── review.md
 ├── .env.example        # Environment variable template
 ├── main.py             # Runnable demonstration & CLI entrypoint
+├── microharness/       # Top-level package exports & entrypoints (__main__.py)
 ├── benchmarks/         # SWE benchmark suites & runners
 │   ├── mini_swe.py     # 5 real-world pure-Python SWE tasks & PristineTestEvaluator
 │   ├── harbor.py       # Harbor / DeepSWE-mini benchmark loader & Docker verifier adapter
