@@ -102,9 +102,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.workspace = Path(tempfile.mkdtemp())
 
     def _resolve(self, explicit: HarnessConfig, global_cfg=None, project_cfg=None):
-        (self.global_dir / "config.json").write_text(
-            json.dumps(global_cfg or {}), encoding="utf-8"
-        )
+        (self.global_dir / "config.json").write_text(json.dumps(global_cfg or {}), encoding="utf-8")
         (self.workspace / ".microharness").mkdir(parents=True, exist_ok=True)
         (self.workspace / ".microharness" / "config.json").write_text(
             json.dumps(project_cfg or {}), encoding="utf-8"
@@ -168,7 +166,9 @@ class TestHarnessConfigCascade(unittest.TestCase):
 
     def test_numeric_strings_are_cast(self):
         """Invariant: string config values are cast to the declared type."""
-        cfg = self._resolve(HarnessConfig(), global_cfg={"max_step_retries": "7", "trigger_ratio": "0.5"})
+        cfg = self._resolve(
+            HarnessConfig(), global_cfg={"max_step_retries": "7", "trigger_ratio": "0.5"}
+        )
         self.assertEqual(cfg.max_step_retries, 7)
         self.assertEqual(cfg.trigger_ratio, 0.5)
 
@@ -296,8 +296,14 @@ class TestNormalizers(unittest.TestCase):
     def test_cache_ttl_aliases(self):
         """Invariant: documented TTL spellings collapse to the two canonical values."""
         for raw, expected in [
-            ("5m", "5m"), ("5min", "5m"), ("300", "5m"), ("300s", "5m"),
-            ("1h", "1h"), ("1hour", "1h"), ("60m", "1h"), ("3600", "1h"),
+            ("5m", "5m"),
+            ("5min", "5m"),
+            ("300", "5m"),
+            ("300s", "5m"),
+            ("1h", "1h"),
+            ("1hour", "1h"),
+            ("60m", "1h"),
+            ("3600", "1h"),
             (" 1H ", "1h"),
         ]:
             self.assertEqual(normalize_cache_ttl(raw), expected, raw)

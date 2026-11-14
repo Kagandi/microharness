@@ -265,6 +265,8 @@ class DockerEnvironment(Environment):
     - Guarantees complete operating system, process, filesystem, and network isolation.
     """
 
+    container_name: str = ""
+
     def __init__(
         self,
         image: str = "python:3.11",

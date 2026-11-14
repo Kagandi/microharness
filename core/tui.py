@@ -20,9 +20,21 @@ from core.memory import format_compact_num
 # spellings, the menu title, and the hint shown before a value is typed.
 SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "skill": (("/skill", "/skills"), " Available Skills ", "Load or inspect a custom skill prompt"),
-    "model": (("/model", "/models"), " Available Models ", "Switch active model or show models from config"),
-    "resume": (("/resume", "/resumes"), " Previous Sessions ", "Show previous sessions or resume with /resume <id>"),
-    "reasoning": (("/reasoning",), " Reasoning / Thinking Effort ", "Switch reasoning effort level"),
+    "model": (
+        ("/model", "/models"),
+        " Available Models ",
+        "Switch active model or show models from config",
+    ),
+    "resume": (
+        ("/resume", "/resumes"),
+        " Previous Sessions ",
+        "Show previous sessions or resume with /resume <id>",
+    ),
+    "reasoning": (
+        ("/reasoning",),
+        " Reasoning / Thinking Effort ",
+        "Switch reasoning effort level",
+    ),
 }
 
 
@@ -61,6 +73,7 @@ def active_subcommand(buf: str) -> tuple[str, str | None] | None:
         if command in spellings:
             return kind, sub.lstrip() if space else None
     return None
+
 
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
@@ -102,6 +115,7 @@ RAW_KEY_SEQUENCES: dict[str, int] = {
 # Braille spinner frames and the seconds each frame is shown.
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 SPINNER_INTERVAL: float = 0.1
+
 
 def compact_path(path_str: str) -> str:
     """Compacts an absolute path with ~ if within the user's home directory."""
@@ -195,7 +209,9 @@ def get_git_branch(workspace: Path | str) -> str:
             text = git_dir.read_text(encoding="utf-8").strip()
             if text.startswith("gitdir:"):
                 target = text[7:].strip()
-                git_dir = (ws_path / target).resolve() if not Path(target).is_absolute() else Path(target)
+                git_dir = (
+                    (ws_path / target).resolve() if not Path(target).is_absolute() else Path(target)
+                )
         if not git_dir.is_dir():
             return ""
         head_file = git_dir / "HEAD"
@@ -288,7 +304,9 @@ def _fitted_widths(desired: list[int], max_width: int, num_cols: int) -> list[in
     return scaled
 
 
-def render_markdown_table(headers: list[str], rows: list[list[str]], max_width: int = 80) -> list[TUILine]:
+def render_markdown_table(
+    headers: list[str], rows: list[list[str]], max_width: int = 80
+) -> list[TUILine]:
     """Renders a parsed markdown table into boxed TUILines that fit within max_width.
 
     Columns are sized by display width (wide CJK characters count as two cells) and,
@@ -402,7 +420,11 @@ def parse_markdown_to_tui_lines(text: str, max_width: int = 80) -> list[TUILine]
             headers = _parse_table_row(line)
             i += 2
             data_rows: list[list[str]] = []
-            while i < n and raw_lines[i].strip().startswith("|") and raw_lines[i].strip().endswith("|"):
+            while (
+                i < n
+                and raw_lines[i].strip().startswith("|")
+                and raw_lines[i].strip().endswith("|")
+            ):
                 data_rows.append(_parse_table_row(raw_lines[i]))
                 i += 1
             table_lines = render_markdown_table(headers, data_rows, max_width=max_width)
@@ -561,7 +583,11 @@ class TUIState:
         Returns (tag_start_idx, query) where tag_start_idx is the index of '@'.
         Returns None if not currently typing an @ tag.
         """
-        pos = min(self.cursor_pos, len(self.input_buffer)) if self.cursor_pos >= 0 else len(self.input_buffer)
+        pos = (
+            min(self.cursor_pos, len(self.input_buffer))
+            if self.cursor_pos >= 0
+            else len(self.input_buffer)
+        )
         sub = self.input_buffer[:pos]
         m = re.search(r"(?:^|\s)@([^\s]*)$", sub)
         if not m:
@@ -607,7 +633,7 @@ class TUIState:
         chosen_tag, _ = matches[idx]  # e.g. "@core/tui.py"
         at_idx, query = tag_info
         before = self.input_buffer[:at_idx]
-        after = self.input_buffer[at_idx + 1 + len(query):]
+        after = self.input_buffer[at_idx + 1 + len(query) :]
         self.input_buffer = f"{before}{chosen_tag} {after}"
         self.cursor_pos = len(before) + len(chosen_tag) + 1
         self._reset_goal_column()
@@ -625,9 +651,7 @@ class TUIState:
             if " " in buf:
                 return []
             return [
-                (cmd, desc)
-                for cmd, desc in self.command_catalog
-                if cmd.lower().startswith(buf)
+                (cmd, desc) for cmd, desc in self.command_catalog if cmd.lower().startswith(buf)
             ]
 
         kind, sub = subcommand
@@ -657,8 +681,7 @@ class TUIState:
             ]
         if kind == "skill":
             return [
-                (name, f"[{getattr(info, 'scope', 'project')}] "
-                       f"{getattr(info, 'summary', name)}")
+                (name, f"[{getattr(info, 'scope', 'project')}] {getattr(info, 'summary', name)}")
                 for name, info in sorted(self.skills.items())
                 if not sub or name.lower().startswith(sub)
             ]
@@ -744,7 +767,9 @@ class TUIState:
                 self.lines.append(TUILine(text=line, tag="system"))
             self.scroll_offset = 0
 
-    def update_status(self, stats: dict[str, Any], cache_stats: dict[str, Any] | None = None) -> None:
+    def update_status(
+        self, stats: dict[str, Any], cache_stats: dict[str, Any] | None = None
+    ) -> None:
         with self._lock:
             self.status_tokens = int(stats.get("estimated_tokens") or 0)
             self.max_tokens = int(stats.get("max_estimated_tokens") or 0)
@@ -771,7 +796,13 @@ class TUIState:
         for line_item in lines_snapshot:
             if not line_item.text:
                 wrapped.append(("", line_item.tag))
-            elif line_item.tag in ("table_border", "table_header", "table_row", "code_border", "code"):
+            elif line_item.tag in (
+                "table_border",
+                "table_header",
+                "table_row",
+                "code_border",
+                "code",
+            ):
                 # Preserve formatted table and code lines without re-wrapping
                 wrapped.append((line_item.text[:eff_width], line_item.tag))
             else:
@@ -914,8 +945,16 @@ class TUIState:
 # Terminals that report shifted number-row keys with a modifier need the
 # character the unshifted key would not produce.
 SHIFTED_NUMBER_KEYS: dict[int, str] = {
-    49: "!", 50: "@", 51: "#", 52: "$", 53: "%",
-    54: "^", 55: "&", 56: "*", 57: "(", 48: ")",
+    49: "!",
+    50: "@",
+    51: "#",
+    52: "$",
+    53: "%",
+    54: "^",
+    55: "&",
+    56: "*",
+    57: "(",
+    48: ")",
 }
 
 # The two encodings a terminal may use for a modified key, each with the capture
@@ -1082,12 +1121,12 @@ class CursesTUI:
             if curses.has_colors():
                 curses.start_color()
                 curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_CYAN, -1)     # User / Heading
-                curses.init_pair(2, curses.COLOR_GREEN, -1)    # Action / Code
-                curses.init_pair(3, curses.COLOR_YELLOW, -1)   # Tool / Thought
-                curses.init_pair(4, curses.COLOR_RED, -1)      # Error
-                curses.init_pair(5, curses.COLOR_BLUE, -1)     # Header / Brand
-                curses.init_pair(6, curses.COLOR_WHITE, -1)    # Agent text
+                curses.init_pair(1, curses.COLOR_CYAN, -1)  # User / Heading
+                curses.init_pair(2, curses.COLOR_GREEN, -1)  # Action / Code
+                curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Tool / Thought
+                curses.init_pair(4, curses.COLOR_RED, -1)  # Error
+                curses.init_pair(5, curses.COLOR_BLUE, -1)  # Header / Brand
+                curses.init_pair(6, curses.COLOR_WHITE, -1)  # Agent text
                 self.has_colors = True
         except curses.error:
             self.has_colors = False
@@ -1146,9 +1185,7 @@ class CursesTUI:
         """Draws the scrollable conversation area above the status cockpit."""
         height = max(1, layout.separator_row - 2)
         italic = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
-        for index, (text, tag) in enumerate(
-            self.state.get_visible_slice(height=height, width=w)
-        ):
+        for index, (text, tag) in enumerate(self.state.get_visible_slice(height=height, width=w)):
             row = 2 + index
             if row >= layout.separator_row:
                 break
@@ -1274,7 +1311,12 @@ class CursesTUI:
             column_width = menu_column_width(menu_kind, box_width, is_file_menu)
             for row, (command, description) in enumerate(visible, start=1):
                 self._draw_menu_row(
-                    stdscr, top + row, box_width, command, description, column_width,
+                    stdscr,
+                    top + row,
+                    box_width,
+                    command,
+                    description,
+                    column_width,
                     row - 1 == selected,
                 )
             self._draw_menu_footer(stdscr, top, box_width, box_height, len(visible))
@@ -1307,8 +1349,14 @@ class CursesTUI:
         stdscr.addstr(top, 0, ("┌─" + title + "─" * dash_count + "┐")[:width], curses.A_DIM)
 
     def _draw_menu_row(
-        self, stdscr: Any, y: int, width: int, command: str, description: str,
-        column_width: int, selected: bool,
+        self,
+        stdscr: Any,
+        y: int,
+        width: int,
+        command: str,
+        description: str,
+        column_width: int,
+        selected: bool,
     ) -> None:
         """Draws one menu entry between the box's vertical rules."""
         prefix = "  > " if selected else "    "
@@ -1323,9 +1371,7 @@ class CursesTUI:
         stdscr.addstr(y, 1, content, attr)
         stdscr.addstr(y, width - 1, "│", curses.A_DIM)
 
-    def _draw_menu_footer(
-        self, stdscr: Any, top: int, width: int, height: int, rows: int
-    ) -> None:
+    def _draw_menu_footer(self, stdscr: Any, top: int, width: int, height: int, rows: int) -> None:
         """Draws the menu's separator, keyboard hint, and bottom border."""
         tip = "   Tab / ↑ / ↓: Navigate  ·  Enter / →: Select  ·  Esc: Dismiss"
         separator_row = top + 1 + rows
@@ -1373,7 +1419,7 @@ class CursesTUI:
                     text, caret_column if index == caret_line else None, available
                 )
                 stdscr.addstr(y, len(label), text[start : start + available])
-            if (cursor := self._cursor_position(w, layout, available, len(prompt))):
+            if cursor := self._cursor_position(w, layout, available, len(prompt)):
                 stdscr.move(*cursor)
         except curses.error:
             pass

@@ -153,7 +153,9 @@ class Harness:
         self.docker_image = cfg.docker_image
         self.auto_discover_tools = cfg.auto_discover_tools
         self.disable_default_tools = cfg.disable_default_tools
-        self.runs_dir = cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
+        self.runs_dir = (
+            cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
+        )
         self.max_tool_tokens = cfg.max_tool_tokens
         self.max_context_tokens = cfg.max_context_tokens
         self.trigger_ratio = cfg.trigger_ratio
@@ -217,7 +219,9 @@ class Harness:
 
     @property
     def workspace_dir(self) -> Path:
-        return self.explicit_workspace_dir if self.explicit_workspace_dir is not None else Path.cwd()
+        return (
+            self.explicit_workspace_dir if self.explicit_workspace_dir is not None else Path.cwd()
+        )
 
     def set_cache_ttl(self, ttl: str | None) -> str | None:
         """Dynamically switches prompt caching duration on the fly ('5m', '1h', or 'off'/None)."""
@@ -608,11 +612,8 @@ class Harness:
             passed = eval_result.passed if eval_result else (finish_reason == "completed")
             score = eval_result.score if eval_result else (1.0 if passed else 0.0)
 
-            usage = summarize_run_usage(
-                (step.usage for step in tracer.steps), c_stats
-            )
+            usage = summarize_run_usage((step.usage for step in tracer.steps), c_stats)
             task_rl_wait = max(0.0, self._rate_limit_wait() - start_rl_wait)
-
 
             return RunResult(
                 task_id=task.id,
@@ -768,8 +769,10 @@ class Harness:
     ) -> Any:
         """Seeds the TUI state with session metadata and autocomplete catalogues."""
         state.provider_name = (
-            self.model.provider if isinstance(self.model, ProviderAwareModel) else ""
-        ) or getattr(self.model, "provider", "") or ""
+            (self.model.provider if isinstance(self.model, ProviderAwareModel) else "")
+            or getattr(self.model, "provider", "")
+            or ""
+        )
         state.model_name = self.active_model_name()
         state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
         reasoning = self.get_reasoning_effort()

@@ -186,9 +186,7 @@ def _aws_profile_name(config: dict[str, Any] | None = None) -> str:
     return os.getenv("AWS_PROFILE") or "default"
 
 
-def _apply_region(
-    endpoint: str | None, config: dict[str, Any] | None = None
-) -> str | None:
+def _apply_region(endpoint: str | None, config: dict[str, Any] | None = None) -> str | None:
     """Substitutes ``{region}`` in a regional endpoint template.
 
     Returns ``None`` (offline) when the template cannot be filled, so no caller
@@ -208,7 +206,9 @@ def _provider_prefix(model: str) -> str | None:
     return provider if separator else None
 
 
-def _entry_from_string(name: str, model: str, registry: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _entry_from_string(
+    name: str, model: str, registry: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     """Builds a listing entry for a bare model id, described by its provider profile."""
     provider_name, profile = resolve_provider(registry, _provider_prefix(model))
     return {
@@ -524,11 +524,9 @@ def resolve_connection(
                 endpoint = cfg_endpoint
             else:
                 attributed, _ = find_provider_by_endpoint(resolved_registry, cfg_endpoint)
-                if (
-                    attributed is None
-                    or _canonical_provider_name(attributed)
-                    == _canonical_provider_name(provider_name)
-                ):
+                if attributed is None or _canonical_provider_name(
+                    attributed
+                ) == _canonical_provider_name(provider_name):
                     endpoint = cfg_endpoint
                 else:
                     endpoint = profile_endpoint
@@ -628,9 +626,7 @@ def build_model_from_spec(
     _, override_profile = resolve_provider(
         registry or load_builtin_providers(), connection.provider
     )
-    bearer_env_set = any(
-        os.getenv(key) for key in (override_profile.get("env_keys") or [])
-    )
+    bearer_env_set = any(os.getenv(key) for key in (override_profile.get("env_keys") or []))
     if connection.auth_scheme == "sigv4" and connection.api_key and bearer_env_set:
         print(
             "SigV4 auth: profile token env var present, using bearer auth override",
@@ -646,9 +642,7 @@ def build_model_from_spec(
         return MockModel([(auth_error, [])])
 
     if effective_scheme == "sigv4":
-        aws_profile = connection.auth_options.get("aws_profile") or _aws_profile_name(
-            config or {}
-        )
+        aws_profile = connection.auth_options.get("aws_profile") or _aws_profile_name(config or {})
         auth_secrets: dict[str, Any] = resolve_aws_credentials(aws_profile) or {}
         auth_secrets["region"] = resolve_aws_region(config or {})
     elif connection.api_key:

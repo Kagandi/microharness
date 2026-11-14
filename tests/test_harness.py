@@ -1529,7 +1529,9 @@ class TestHarnessIntegration(unittest.TestCase):
 
         # Interactive /reasoning slash command switch
         memory = Memory(system_prompt="sys", user_prompt="init")
-        action = harness._dispatch_interactive_input("/reasoning medium", memory, custom_commands={})
+        action = harness._dispatch_interactive_input(
+            "/reasoning medium", memory, custom_commands={}
+        )
         self.assertEqual(action, "skip")
         self.assertEqual(harness.get_reasoning_effort(), "medium")
 
@@ -1541,11 +1543,13 @@ class TestHarnessIntegration(unittest.TestCase):
     def test_harness_run_result_token_telemetry(self):
         """Invariant: RunResult captures prompt, completion, cached tokens and cache hit percentage."""
         mock_model = MockModel([("Done", [])])
-        mock_model._update_usage({
-            "prompt_tokens": 1000,
-            "completion_tokens": 100,
-            "prompt_tokens_details": {"cached_tokens": 750},
-        })
+        mock_model._update_usage(
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "prompt_tokens_details": {"cached_tokens": 750},
+            }
+        )
 
         orig_generate = mock_model.generate
 
@@ -1570,7 +1574,9 @@ class TestHarnessIntegration(unittest.TestCase):
         mock_model = MagicMock()
         mock_model.generate.side_effect = TimeoutError("Task timeout reached during model request")
 
-        harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False, max_step_retries=3)
+        harness = Harness(
+            model=mock_model, runs_dir=self.runs_dir, verbose=False, max_step_retries=3
+        )
         task = Task(id="timeout_task", instruction="Test timeout", timeout_seconds=10.0)
         result = harness.run(task)
 
@@ -1617,11 +1623,13 @@ class TestHarnessIntegration(unittest.TestCase):
     def test_harness_token_telemetry_isolates_per_task_tokens_across_consecutive_tasks(self):
         """Invariant: Harness computes per-task token metrics without cumulative leakage across tasks."""
         mock_model = MockModel([("Task 1 done", [])])
-        mock_model._update_usage({
-            "prompt_tokens": 500,
-            "completion_tokens": 50,
-            "prompt_tokens_details": {"cached_tokens": 250},
-        })
+        mock_model._update_usage(
+            {
+                "prompt_tokens": 500,
+                "completion_tokens": 50,
+                "prompt_tokens_details": {"cached_tokens": 250},
+            }
+        )
 
         harness = Harness(model=mock_model, runs_dir=self.runs_dir, verbose=False)
         task1 = Task(id="task_1", instruction="Run task 1")
@@ -1635,11 +1643,13 @@ class TestHarnessIntegration(unittest.TestCase):
         # Task 2 on the same model/harness with its own step usage
         mock_model._script = [("Task 2 done", [])]
         mock_model._step_idx = 0
-        mock_model._update_usage({
-            "prompt_tokens": 300,
-            "completion_tokens": 30,
-            "prompt_tokens_details": {"cached_tokens": 150},
-        })
+        mock_model._update_usage(
+            {
+                "prompt_tokens": 300,
+                "completion_tokens": 30,
+                "prompt_tokens_details": {"cached_tokens": 150},
+            }
+        )
 
         task2 = Task(id="task_2", instruction="Run task 2")
         result2 = harness.run(task2)
@@ -1652,6 +1662,7 @@ class TestHarnessIntegration(unittest.TestCase):
 
     def test_harness_additive_extra_tools_preserves_default_tools(self):
         """Invariant: Passing extra_tools appends to default tools without erasing bash/file tools."""
+
         class CustomInspectorTool:
             name = "custom_inspect"
             description = "Inspect custom data"
@@ -1790,7 +1801,9 @@ def get_tools(env=None):
 
             g_skill2 = g_dir / "skills" / "deploy-tool"
             g_skill2.mkdir(parents=True)
-            (g_skill2 / "SKILL.md").write_text("# Global Deploy\nGlobal instructions.\n", encoding="utf-8")
+            (g_skill2 / "SKILL.md").write_text(
+                "# Global Deploy\nGlobal instructions.\n", encoding="utf-8"
+            )
 
             # 3. Discovery with shadowing
             discovered = discover_skills(ws_dir, g_dir)
@@ -1859,11 +1872,15 @@ def get_tools(env=None):
             harness = Harness(model=MockModel([("Done", [])]), verbose=False)
             memory = Memory(system_prompt="sys", user_prompt="")
 
-            act = harness._dispatch_interactive_input("/skill", memory, custom_commands={}, skills=discovered)
+            act = harness._dispatch_interactive_input(
+                "/skill", memory, custom_commands={}, skills=discovered
+            )
             self.assertEqual(act, "skip")
             self.assertEqual(len(memory.messages), 1)
 
-            act = harness._dispatch_interactive_input("/skill deploy-tool", memory, custom_commands={}, skills=discovered)
+            act = harness._dispatch_interactive_input(
+                "/skill deploy-tool", memory, custom_commands={}, skills=discovered
+            )
             self.assertEqual(act, "turn")
             self.assertEqual(len(memory.messages), 2)
             self.assertIn("[Active Skill: deploy-tool]", memory.messages[-1].content)
@@ -1890,7 +1907,10 @@ def get_tools(env=None):
             self.assertEqual(act, "turn")
             self.assertEqual(len(memory.messages), 4)
             self.assertIn("[Active Skill: my-linter]", memory.messages[-1].content)
-            self.assertIn("Please follow the instructions from the 'my-linter' skill above.", memory.messages[-1].content)
+            self.assertIn(
+                "Please follow the instructions from the 'my-linter' skill above.",
+                memory.messages[-1].content,
+            )
 
             # 12. Negative test: Unknown slash command returns skip without mutating memory
             act = harness._dispatch_interactive_input(
@@ -2145,7 +2165,10 @@ class HijackedBash:
 
                 # Invariant 1: Warning emitted
                 warning_output = stderr_buf.getvalue()
-                self.assertIn("Warning: Discovered tool plugin 'bash' overrides existing tool 'bash'", warning_output)
+                self.assertIn(
+                    "Warning: Discovered tool plugin 'bash' overrides existing tool 'bash'",
+                    warning_output,
+                )
 
                 # Invariant 2: Built-in bash was replaced by plugin
                 self.assertEqual(registry.get("bash").description, "Custom replacement bash")
@@ -2176,7 +2199,10 @@ class HijackedBash:
 
             # Model calls bash tool
             script = [
-                ("Executing command", [ToolCall(id="c1", name="bash", arguments={"command": "whoami"})]),
+                (
+                    "Executing command",
+                    [ToolCall(id="c1", name="bash", arguments={"command": "whoami"})],
+                ),
                 ("Done", []),
             ]
             mock_model = MockModel(script)
@@ -2264,12 +2290,14 @@ class ProjectWeather:
             cfg_dir = ws / ".microharness"
             cfg_dir.mkdir()
             (cfg_dir / "config.json").write_text(
-                json.dumps({
-                    "models": {
-                        "fast": {"model": "gemini-2.5-flash", "provider": "google"},
-                        "smart": {"model": "claude-3-5-sonnet", "provider": "anthropic"},
+                json.dumps(
+                    {
+                        "models": {
+                            "fast": {"model": "gemini-2.5-flash", "provider": "google"},
+                            "smart": {"model": "claude-3-5-sonnet", "provider": "anthropic"},
+                        }
                     }
-                }),
+                ),
                 encoding="utf-8",
             )
             initial_model = MockModel(script=[("hi", [])])
@@ -2346,15 +2374,17 @@ class ProjectWeather:
             r1_dir = runs_dir / "run_sess_1"
             r1_dir.mkdir()
             (r1_dir / "trace.json").write_text(
-                json.dumps({
-                    "workspace": str(ws_dir.resolve()),
-                    "total_steps": 3,
-                    "task": {"id": "task_1", "instruction": "Initial goal"},
-                    "messages": [
-                        {"role": "user", "content": "Initial user turn"},
-                        {"role": "assistant", "content": "Initial assistant turn"},
-                    ],
-                }),
+                json.dumps(
+                    {
+                        "workspace": str(ws_dir.resolve()),
+                        "total_steps": 3,
+                        "task": {"id": "task_1", "instruction": "Initial goal"},
+                        "messages": [
+                            {"role": "user", "content": "Initial user turn"},
+                            {"role": "assistant", "content": "Initial assistant turn"},
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -2464,9 +2494,18 @@ class ProjectWeather:
             self.assertEqual(memory.get_messages()[-1].content, "skill in coding is required")
 
             # Bare words without arguments trigger command listing
-            self.assertEqual(harness._dispatch_interactive_input("model", memory=memory, custom_commands={}), "skip")
-            self.assertEqual(harness._dispatch_interactive_input("resume", memory=memory, custom_commands={}), "skip")
-            self.assertEqual(harness._dispatch_interactive_input("skill", memory=memory, custom_commands={}), "skip")
+            self.assertEqual(
+                harness._dispatch_interactive_input("model", memory=memory, custom_commands={}),
+                "skip",
+            )
+            self.assertEqual(
+                harness._dispatch_interactive_input("resume", memory=memory, custom_commands={}),
+                "skip",
+            )
+            self.assertEqual(
+                harness._dispatch_interactive_input("skill", memory=memory, custom_commands={}),
+                "skip",
+            )
 
             # 9. Invariant: mid-session resume clears prior tracer steps and pins step index to total_steps + 1 (Findings 4 & 6)
             from core.tracer import Tracer
@@ -2478,7 +2517,13 @@ class ProjectWeather:
                 verbose=False,
             )
             active_tracer.record_step(
-                StepTrace(step_index=1, duration_s=0.1, prompt_messages=[], model_response={"content": "prior turn"}, tool_results=[])
+                StepTrace(
+                    step_index=1,
+                    duration_s=0.1,
+                    prompt_messages=[],
+                    model_response={"content": "prior turn"},
+                    tool_results=[],
+                )
             )
             self.assertEqual(len(active_tracer.steps), 1)
 
@@ -2497,6 +2542,7 @@ class ProjectWeather:
             self.assertEqual(len(active_tracer.steps), 0)
             # Invariant: step_idx strictly pinned to total_steps + 1 (3 + 1 = 4)
             self.assertEqual(step_holder[0], 4)
+
 
 class TestCliContext(unittest.TestCase):
     """main.py's resolved-context plumbing."""
@@ -2520,7 +2566,10 @@ class TestCliContext(unittest.TestCase):
     def test_harness_carries_the_resolved_settings(self):
         """Invariant: settings resolved once by the CLI reach the harness unchanged."""
         context = self._context(
-            cache_ttl="1h", reasoning_effort="high", use_docker=True, docker_image="python:3.12",
+            cache_ttl="1h",
+            reasoning_effort="high",
+            use_docker=True,
+            docker_image="python:3.12",
             trust_project_tools=True,
         )
 
@@ -2569,8 +2618,12 @@ class TestCliContext(unittest.TestCase):
 
         parser = _build_arg_parser()
         choices = set(parser.parse_args(["--benchmark", "mini-swe"]).benchmark.split()) | {
-            "mini-swe", "calculator", "all", "deepswe-mini",
-            "calculator", "greeting",  # --demo choices
+            "mini-swe",
+            "calculator",
+            "all",
+            "deepswe-mini",
+            "calculator",
+            "greeting",  # --demo choices
         }
         for choice in choices:
             self.assertIn(choice, BENCHMARK_RUNNERS, choice)

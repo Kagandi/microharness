@@ -93,14 +93,16 @@ def discover_resources(
 
     for search_dir, scope in search_dirs:
         entries: list[Path] = (
-            sorted(search_dir.glob(file_pattern))
-            if file_pattern
-            else sorted(search_dir.iterdir())
+            sorted(search_dir.glob(file_pattern)) if file_pattern else sorted(search_dir.iterdir())
         )
 
         for entry in entries:
             name_lower = entry.name.lower()
-            if entry.name.startswith(("_", ".")) or name_lower == "readme.md" or name_lower == "__pycache__":
+            if (
+                entry.name.startswith(("_", "."))
+                or name_lower == "readme.md"
+                or name_lower == "__pycache__"
+            ):
                 continue
 
             try:
@@ -227,8 +229,7 @@ def discover_workspace_files(
     collected: list[str] = []
     for root, dirnames, filenames in os.walk(ws, followlinks=False):
         dirnames[:] = [
-            d for d in dirnames
-            if not d.startswith(".") and d not in IGNORED_WORKSPACE_DIRS
+            d for d in dirnames if not d.startswith(".") and d not in IGNORED_WORKSPACE_DIRS
         ]
         dirnames.sort()
 

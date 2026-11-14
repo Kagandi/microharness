@@ -62,10 +62,12 @@ class TestNormalizeUsage(unittest.TestCase):
 class TestAggregation(unittest.TestCase):
     def test_sum_usage_adds_components(self):
         """Invariant: per-step payloads add up field-wise."""
-        total = sum_usage([
-            {"prompt_tokens": 10, "completion_tokens": 2},
-            {"input_tokens": 5, "output_tokens": 1},
-        ])
+        total = sum_usage(
+            [
+                {"prompt_tokens": 10, "completion_tokens": 2},
+                {"input_tokens": 5, "output_tokens": 1},
+            ]
+        )
         self.assertEqual(total, TokenUsage(prompt_tokens=15, completion_tokens=3))
 
     def test_run_summary_prefers_step_level_usage(self):
@@ -123,7 +125,12 @@ class TestUsageTelemetry(unittest.TestCase):
         model._update_usage({"prompt_tokens": 3, "completion_tokens": 1})
         self.assertEqual(
             model.get_last_step_usage(),
-            {"prompt_tokens": 3, "completion_tokens": 1, "cached_tokens": 0, "cache_hit_rate_pct": 0.0},
+            {
+                "prompt_tokens": 3,
+                "completion_tokens": 1,
+                "cached_tokens": 0,
+                "cache_hit_rate_pct": 0.0,
+            },
         )
 
     def test_reset_clears_counters_but_keeps_ttl(self):

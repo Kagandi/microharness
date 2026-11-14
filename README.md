@@ -143,7 +143,7 @@ Check for:
 * **Invocation**: Type `/review src/auth.py` in interactive chat or pass `microharness "/review src/auth.py"`.
 * **Argument Substitution**: `$ARGUMENTS` or `{args}` is substituted with your trailing arguments.
 * **Dynamic Help & Shadowing**: `/help` lists all discovered custom commands with their descriptions and scopes (`[project]` or `[global]`). Project commands shadow global ones.
- 
+
 ### 5. Custom Tool Plugins (`.microharness/tools/*.py`) — Zero-Commit Extensibility
 Add new capabilities to the agent dynamically without modifying harness core code or making git commits:
 * **Global Tools** (`~/.microharness/tools/*.py`): Available across all projects on your machine (always trusted and loaded automatically).
@@ -194,6 +194,7 @@ class DatabaseTool:
     def execute(self, query: str) -> tuple[int, str]:
         # Query local database in self.workspace
         return 0, "Query results..."
+
 
 def get_tools(env=None):
     return [DatabaseTool(env)]
@@ -254,7 +255,7 @@ When you chat with the agent, the harness maintains persistent memory and render
 
 ```text
 ─── Context: 1.4k / 8k (17.8%) ───
-You: 
+You:
 ```
 
 ### Slash Commands (No Model Call)

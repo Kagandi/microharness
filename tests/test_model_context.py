@@ -235,8 +235,7 @@ class TestApplyModelContextTokens(unittest.TestCase):
         harness = _harness_with_models({})
         before = harness.max_context_tokens
         applied = harness.apply_model_context_tokens(
-            {"model": None, "provider": None, "endpoint": None, "api_key": None,
-             "headers": None},
+            {"model": None, "provider": None, "endpoint": None, "api_key": None, "headers": None},
             cfg={},
             registry={},
         )

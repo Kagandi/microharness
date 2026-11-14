@@ -310,7 +310,10 @@ class Tracer:
             if exit_code == 0:
                 print(f"{summary} " + _dim(f"({step.duration_s:.1f}s)"))
             else:
-                print(f"{summary} " + _red(f"❌ (exit {exit_code}: {_preview(_error_excerpt(result))})"))
+                print(
+                    f"{summary} "
+                    + _red(f"❌ (exit {exit_code}: {_preview(_error_excerpt(result))})")
+                )
         if step.compaction_applied:
             print(_dim("🧹 [Context compacted to conserve budget]"))
 
@@ -319,7 +322,10 @@ class Tracer:
         text = step.model_response.get("content") or ""
         tool_calls = step.model_response.get("tool_calls") or []
 
-        divider = _dim(f"─── Step {step.step_index} · {step.duration_s:.2f}s{_token_suffix(step.usage)} " + "─" * 25)
+        divider = _dim(
+            f"─── Step {step.step_index} · {step.duration_s:.2f}s{_token_suffix(step.usage)} "
+            + "─" * 25
+        )
         print(f"\n{divider}")
 
         if text:

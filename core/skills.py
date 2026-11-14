@@ -195,7 +195,9 @@ def _list_skills(skills: dict[str, Skill]) -> str:
         f"  {i}. {name:<14} [{skills[name].scope}] - {skills[name].summary}"
         for i, name in enumerate(names, start=1)
     ]
-    lines.append("\nTo activate a skill into the conversation, type /skill <name|number> [optional instruction]")
+    lines.append(
+        "\nTo activate a skill into the conversation, type /skill <name|number> [optional instruction]"
+    )
     lines.append(f"Example: /skill {names[0]}")
     return "\n".join(lines)
 

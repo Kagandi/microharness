@@ -59,9 +59,7 @@ class TestRegistryLoading(unittest.TestCase):
             )
             self.assertEqual(registry["openai"]["default_model"], "inline-model")
 
-            without_inline = load_provider_registry(
-                global_dir=global_dir, project_dir=project_dir
-            )
+            without_inline = load_provider_registry(global_dir=global_dir, project_dir=project_dir)
             self.assertEqual(without_inline["openai"]["default_model"], "project-model")
 
     def test_layer_override_merges_keys_instead_of_replacing(self):
@@ -92,7 +90,9 @@ class TestRegistryLoading(unittest.TestCase):
             self.assertTrue(seeded.is_file())
             seeded.write_text('{"openai": {"default_model": "mine"}}', encoding="utf-8")
             self.assertIsNone(seed_user_providers(global_dir))
-            self.assertEqual(load_provider_registry(global_dir=global_dir)["openai"]["default_model"], "mine")
+            self.assertEqual(
+                load_provider_registry(global_dir=global_dir)["openai"]["default_model"], "mine"
+            )
 
     def test_seed_without_global_dir_is_a_noop(self):
         """Invariant: seeding is skipped entirely when there is no global directory."""
@@ -101,7 +101,11 @@ class TestRegistryLoading(unittest.TestCase):
 
 class TestProviderResolution(unittest.TestCase):
     REGISTRY = {
-        "google": {"endpoint": "https://google/v1", "default_model": "gemini", "env_keys": ["MY_KEY"]},
+        "google": {
+            "endpoint": "https://google/v1",
+            "default_model": "gemini",
+            "env_keys": ["MY_KEY"],
+        },
         "openai": {"endpoint": "https://openai/v1", "default_model": "gpt"},
     }
 
@@ -137,7 +141,9 @@ class TestProviderResolution(unittest.TestCase):
 
     def test_endpoint_match_requires_a_prefix(self):
         """Invariant: an unrelated host is not attributed to any known provider."""
-        self.assertEqual(find_provider_by_endpoint(self.REGISTRY, "https://evil.example/v1"), (None, {}))
+        self.assertEqual(
+            find_provider_by_endpoint(self.REGISTRY, "https://evil.example/v1"), (None, {})
+        )
 
 
 class TestAvailableModels(unittest.TestCase):
@@ -164,8 +170,16 @@ class TestAvailableModels(unittest.TestCase):
     def test_alias_mapping_to_object(self):
         """Invariant: explicit provider/endpoint/description survive normalization."""
         entries = get_available_models_from_config(
-            {"models": {"fast": {"model": "gemini-2.5-flash", "provider": "google",
-                                 "description": "Fast", "endpoint": "https://x/v1"}}},
+            {
+                "models": {
+                    "fast": {
+                        "model": "gemini-2.5-flash",
+                        "provider": "google",
+                        "description": "Fast",
+                        "endpoint": "https://x/v1",
+                    }
+                }
+            },
             self.REGISTRY,
         )
         self.assertEqual(entries[0]["provider"], "google")
@@ -325,8 +339,11 @@ class TestBuildModelFromSpec(unittest.TestCase):
 
     def test_environment_endpoint_is_used(self):
         """Invariant: MODEL_ENDPOINT enables a run with no config file at all."""
-        env = {"MODEL_ENDPOINT": "https://openai/v1", "MODEL_NAME": "gpt-4o",
-               "OPENAI_API_KEY": "sk-test"}
+        env = {
+            "MODEL_ENDPOINT": "https://openai/v1",
+            "MODEL_NAME": "gpt-4o",
+            "OPENAI_API_KEY": "sk-test",
+        }
         with patch.dict(os.environ, env, clear=True):
             model = build_model_from_spec("gpt-4o", registry=self.registry)
         self.assertEqual(model.model, "gpt-4o")
@@ -489,9 +506,7 @@ class TestWave8EndpointRouting(unittest.TestCase):
                     config=config,
                     registry=dict(self.REGISTRY),
                 )
-        self.assertEqual(
-            conn.endpoint, "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
-        )
+        self.assertEqual(conn.endpoint, "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1")
         self.assertEqual(conn.provider, "bedrock")
         self.assertEqual(conn.model, "us.openai.gpt-5.6-sol")
 
@@ -634,9 +649,7 @@ class TestWave8EndpointRouting(unittest.TestCase):
         """Invariant: auth on the alias entry applies to a startup dict naming the alias."""
         registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "bearer"}}
         config = {
-            "models": {
-                "fast": {"model": "m", "provider": "custom", "auth": {"scheme": "none"}}
-            }
+            "models": {"fast": {"model": "m", "provider": "custom", "auth": {"scheme": "none"}}}
         }
         with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
             conn = resolve_connection(
@@ -669,9 +682,7 @@ class TestWave8EndpointRouting(unittest.TestCase):
                 }
             }
         }
-        spec = self._startup_spec(
-            model="fast", headers={"X-Both": "spec", "X-Spec": "2"}
-        )
+        spec = self._startup_spec(model="fast", headers={"X-Both": "spec", "X-Spec": "2"})
         with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
             conn = resolve_connection(spec, config=config, registry=registry)
         self.assertEqual(conn.api_key, "entry-key")
@@ -830,9 +841,7 @@ class TestBedrockSigV4Wiring(unittest.TestCase):
     def test_builtin_bedrock_uses_sigv4_and_working_default(self):
         """Invariant: the shipped bedrock entry signs SigV4 with a usable default model."""
         registry = load_builtin_providers()
-        self.assertEqual(
-            registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
-        )
+        self.assertEqual(registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"})
         self.assertEqual(registry["bedrock"]["default_model"], "us.openai.gpt-5.6-sol")
 
     def test_no_credentials_reports_auth_error_with_sso_hint(self):
@@ -951,9 +960,7 @@ class TestBedrockSigV4Wiring(unittest.TestCase):
             }
             (global_dir / "providers.json").write_text(json.dumps(stale), encoding="utf-8")
             registry = load_provider_registry(global_dir=global_dir)
-        self.assertEqual(
-            registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
-        )
+        self.assertEqual(registry["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"})
         self.assertEqual(registry["bedrock"]["default_model"], "my-pinned-model")
 
     def test_spec_dict_auth_beats_config_auth_beats_profile_auth(self):
@@ -984,9 +991,7 @@ class TestBedrockSigV4Wiring(unittest.TestCase):
         """Invariant: core/model.py never names bedrock (registry-driven auth only)."""
         from pathlib import Path as _Path
 
-        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(
-            encoding="utf-8"
-        )
+        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(encoding="utf-8")
         self.assertNotIn("bedrock", source.lower())
 
 
@@ -1070,8 +1075,7 @@ class TestWave6AuthWiring(unittest.TestCase):
             aws_dir = Path(home) / ".aws"
             aws_dir.mkdir()
             (aws_dir / "credentials").write_text(
-                "[myprof]\naws_access_key_id = AKID-FILE\n"
-                "aws_secret_access_key = SECRET-FILE\n",
+                "[myprof]\naws_access_key_id = AKID-FILE\naws_secret_access_key = SECRET-FILE\n",
                 encoding="utf-8",
             )
             with patch.dict(os.environ, _clean_aws_env(home), clear=True):
@@ -1132,9 +1136,7 @@ class TestWave6AuthWiring(unittest.TestCase):
         """Invariant: an unknown scheme raises ValueError before any client exists."""
         registry = {"custom": {"endpoint": "https://x.example/v1", "auth": "nope-xyz"}}
         with self.assertRaises(ValueError):
-            build_model_from_spec(
-                {"model": "m", "provider": "custom"}, registry=registry
-            )
+            build_model_from_spec({"model": "m", "provider": "custom"}, registry=registry)
 
     def test_backfill_values_are_deep_copied(self):
         """Invariant: mutating a returned profile auth never touches fresh registries."""
@@ -1158,13 +1160,9 @@ class TestWave6AuthWiring(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp2:
             global_dir2 = Path(tmp2)
-            (global_dir2 / "providers.json").write_text(
-                json.dumps(stale), encoding="utf-8"
-            )
+            (global_dir2 / "providers.json").write_text(json.dumps(stale), encoding="utf-8")
             second = load_provider_registry(global_dir=global_dir2)
-        self.assertEqual(
-            second["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"}
-        )
+        self.assertEqual(second["bedrock"]["auth"], {"scheme": "sigv4", "service": "bedrock"})
 
 
 class TestResolveModelSpec(unittest.TestCase):
@@ -1184,7 +1182,9 @@ class TestResolveModelSpec(unittest.TestCase):
     def test_resolves_a_registry_provider(self):
         """Invariant: a known provider is accepted verbatim as a spec."""
         registry = {"openai": {"endpoint": "https://x"}}
-        self.assertEqual(resolve_model_spec("openai", self.AVAILABLE, registry), (True, "openai", ""))
+        self.assertEqual(
+            resolve_model_spec("openai", self.AVAILABLE, registry), (True, "openai", "")
+        )
 
     def test_resolves_a_provider_qualified_spec(self):
         """Invariant: 'openai/gpt-4o' is accepted when the provider is registered."""

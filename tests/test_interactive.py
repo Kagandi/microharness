@@ -169,8 +169,9 @@ class TestRouterDispatch(RouterTestCase):
 
     def test_compact_reports_freed_tokens(self):
         """Invariant: a compaction that did work reports how much context it freed."""
-        with patch.object(Memory, "compact_if_needed", return_value=True), patch.object(
-            Memory, "estimated_tokens", side_effect=[2000, 1000]
+        with (
+            patch.object(Memory, "compact_if_needed", return_value=True),
+            patch.object(Memory, "estimated_tokens", side_effect=[2000, 1000]),
         ):
             self.assertEqual(self.router.dispatch("/compact"), SKIP)
         self.assertIn("freed ~1,000 tokens", self.ui.all_text)
@@ -226,8 +227,13 @@ class TestRouterDispatch(RouterTestCase):
     def test_resume_without_argument_lists_sessions(self):
         """Invariant: a bare /resume lists recent sessions."""
         self.harness.find_recent_sessions.return_value = [
-            {"run_id": "abc", "run_dir": "/x", "total_steps": 3, "preview": "hello",
-             "matches_workspace": True}
+            {
+                "run_id": "abc",
+                "run_dir": "/x",
+                "total_steps": 3,
+                "preview": "hello",
+                "matches_workspace": True,
+            }
         ]
         self.router.dispatch("/resume")
         self.assertIn("abc", self.ui.all_text)
@@ -358,7 +364,9 @@ class TestRenderers(unittest.TestCase):
 
     def test_session_listing_without_sessions(self):
         """Invariant: an empty runs directory is stated, not rendered as a blank list."""
-        self.assertEqual(render_session_lines([]), ["  No previous sessions found in runs directory."])
+        self.assertEqual(
+            render_session_lines([]), ["  No previous sessions found in runs directory."]
+        )
 
     def test_cache_hits_hidden_until_tokens_are_recorded(self):
         """Invariant: no prompt tokens means no cache line to show."""
@@ -384,7 +392,9 @@ class TestRenderers(unittest.TestCase):
     def test_context_breakdown_reports_disabled_settings(self):
         """Invariant: unset reasoning and caching are shown as OFF, not blank."""
         stats = {
-            "estimated_tokens": 0, "max_estimated_tokens": 100, "usage_pct": 0.0,
+            "estimated_tokens": 0,
+            "max_estimated_tokens": 100,
+            "usage_pct": 0.0,
             "total_messages": 1,
             "by_role": {"system": 1, "user": 0, "assistant": 0, "tool": 0},
         }

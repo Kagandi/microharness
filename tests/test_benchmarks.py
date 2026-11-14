@@ -949,7 +949,10 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertIn("- **Input Tokens:** 1,500", md)
         self.assertIn("- **Cached Tokens:** 1,000 (66.7% hit rate)", md)
         self.assertIn("- **Total Rate Limit Wait:** 2.5s", md)
-        self.assertIn("| `mini_swe_rate_limiter` | PASSED ✅ | 1.00 | 5 | 10.0s | 2.5s | 1,500 / 120 | 66.7% | `trace1.json` |", md)
+        self.assertIn(
+            "| `mini_swe_rate_limiter` | PASSED ✅ | 1.00 | 5 | 10.0s | 2.5s | 1,500 / 120 | 66.7% | `trace1.json` |",
+            md,
+        )
 
         # Invariant: both json and md files are written to output_dir
         json_file = Path(self.tmp_dir) / "mini_swe_report.json"

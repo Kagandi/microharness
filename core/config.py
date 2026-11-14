@@ -126,9 +126,7 @@ class ConfigLayers:
     merged: dict[str, Any]
 
     @classmethod
-    def of(
-        cls, global_config: dict[str, Any], project_config: dict[str, Any]
-    ) -> "ConfigLayers":
+    def of(cls, global_config: dict[str, Any], project_config: dict[str, Any]) -> "ConfigLayers":
         """Builds the layers and their merge once.
 
         Project keys shadow global keys; an empty project file does not mask
@@ -166,8 +164,10 @@ def resolve_project_tool_trust(
     Returns:
         ``(trusted, project_claim_ignored)``
     """
-    trusted = bool(explicit) if explicit is not None else bool(
-        layers.global_config.get("trust_project_tools", False)
+    trusted = (
+        bool(explicit)
+        if explicit is not None
+        else bool(layers.global_config.get("trust_project_tools", False))
     )
     claimed = bool(layers.project_config.get("trust_project_tools")) and not trusted
     return trusted, claimed

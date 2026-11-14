@@ -61,21 +61,25 @@ class BenchmarkReport:
         if self.total_rate_limit_wait_s > 0:
             lines.append(f"- **Total Rate Limit Wait:** {self.total_rate_limit_wait_s:.1f}s")
         if self.total_prompt_tokens > 0 or self.total_completion_tokens > 0:
-            lines.extend([
-                f"- **Input Tokens:** {self.total_prompt_tokens:,}",
-                f"- **Cached Tokens:** {self.total_cached_tokens:,} ({self.cache_hit_rate_pct:.1f}% hit rate)",
-                f"- **Output Tokens:** {self.total_completion_tokens:,}",
-            ])
+            lines.extend(
+                [
+                    f"- **Input Tokens:** {self.total_prompt_tokens:,}",
+                    f"- **Cached Tokens:** {self.total_cached_tokens:,} ({self.cache_hit_rate_pct:.1f}% hit rate)",
+                    f"- **Output Tokens:** {self.total_completion_tokens:,}",
+                ]
+            )
         if self.config:
             lines.append("\n## Configuration\n")
             for k, v in sorted(self.config.items()):
                 lines.append(f"- **{k}:** `{v}`")
 
-        lines.extend([
-            "\n## Task Scorecard\n",
-            "| Task ID | Status | Score | Steps | Duration | RL Wait | Tokens (In / Out) | Cache Hit | Trace |",
-            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
-        ])
+        lines.extend(
+            [
+                "\n## Task Scorecard\n",
+                "| Task ID | Status | Score | Steps | Duration | RL Wait | Tokens (In / Out) | Cache Hit | Trace |",
+                "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+            ]
+        )
         for t in self.tasks:
             status_str = "PASSED ✅" if t.passed else "FAILED ❌"
             trace_short = Path(t.trace_path).name if t.trace_path else "-"
@@ -156,9 +160,7 @@ def _build_report(
     total_prompt = sum(t.prompt_tokens for t in task_reports)
     total_comp = sum(t.completion_tokens for t in task_reports)
     total_cached = sum(t.cached_tokens for t in task_reports)
-    overall_hit_rate = (
-        round(total_cached / total_prompt * 100.0, 1) if total_prompt > 0 else 0.0
-    )
+    overall_hit_rate = round(total_cached / total_prompt * 100.0, 1) if total_prompt > 0 else 0.0
     total_rl_wait = round(sum(t.rate_limit_wait_s for t in task_reports), 2)
 
     return BenchmarkReport(
@@ -187,7 +189,6 @@ def _save_report_json(report: BenchmarkReport, output_dir: Path | str, suite_nam
     md_file = out_path / f"{slug}_report.md"
     md_file.write_text(report.to_markdown(), encoding="utf-8")
     return report_file
-
 
 
 def run_benchmark_suite(
@@ -267,7 +268,9 @@ def run_benchmark_suite(
         if task.id in retained_tasks_map:
             retained = retained_tasks_map[task.id]
             if verbose:
-                status_str = "PASSED" if retained.passed else f"COMPLETED ({retained.finish_reason})"
+                status_str = (
+                    "PASSED" if retained.passed else f"COMPLETED ({retained.finish_reason})"
+                )
                 print(
                     f"\n[{idx}/{len(tasks)}] ⏭️ Task '{task.id}' already {status_str} in previous run (score={retained.score:.2f}). Skipping."
                 )
@@ -306,9 +309,7 @@ def run_benchmark_suite(
                 finish_reason="error",
                 trace_path="",
                 workspace_path="",
-                eval_result=EvalResult(
-                    passed=False, score=0.0, feedback=f"Execution error: {exc}"
-                ),
+                eval_result=EvalResult(passed=False, score=0.0, feedback=f"Execution error: {exc}"),
             )
             halt_reason = f"error: {exc}"
 
@@ -390,7 +391,8 @@ def run_benchmark_suite(
     if output_dir:
         report_file = _save_report_json(report, output_dir, suite_name)
         if verbose:
-            print(f"📄 Benchmark report saved to: {report_file} (and {report_file.with_suffix('.md')})")
+            print(
+                f"📄 Benchmark report saved to: {report_file} (and {report_file.with_suffix('.md')})"
+            )
 
     return report
-

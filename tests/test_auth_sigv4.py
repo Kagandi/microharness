@@ -152,9 +152,7 @@ class TestSigV4Headers(unittest.TestCase):
         )
         self.assertEqual(out["host"], "example.amazonaws.com")
         self.assertEqual(out["x-amz-date"], "20150830T123600Z")
-        self.assertEqual(
-            set(out), {"host", "x-amz-date", "Authorization"}
-        )
+        self.assertEqual(set(out), {"host", "x-amz-date", "Authorization"})
         self.assertNotIn("Host", out)
         self.assertNotIn("X-AMZ-DATE", out)
         self.assertNotIn("X-Amz-Security-Token", out)

@@ -190,7 +190,9 @@ class TestSessionResolution(unittest.TestCase):
     def test_exact_directory_path(self):
         """Invariant: passing a run directory loads exactly that run."""
         Path(self.sessions[0]["run_dir"]).mkdir()
-        target, error = resolve_session_dir(self.runs_dir, self.sessions[0]["run_dir"], self.sessions)
+        target, error = resolve_session_dir(
+            self.runs_dir, self.sessions[0]["run_dir"], self.sessions
+        )
         self.assertEqual(target, Path(self.sessions[0]["run_dir"]))
         self.assertEqual(error, "")
 
@@ -234,7 +236,10 @@ class TestSessionResolution(unittest.TestCase):
         target, error = resolve_session_dir(self.runs_dir, None, [])
         self.assertIsNone(target)
         self.assertEqual(error, "")
-        self.assertEqual(load_session(self.runs_dir, None, None), ([], {"error": "Session not found: no resumable session available"}))
+        self.assertEqual(
+            load_session(self.runs_dir, None, None),
+            ([], {"error": "Session not found: no resumable session available"}),
+        )
 
 
 class TestLoadSession(unittest.TestCase):
@@ -244,13 +249,15 @@ class TestLoadSession(unittest.TestCase):
         run_dir = self.runs_dir / "session_a"
         run_dir.mkdir(parents=True)
         (run_dir / "trace.json").write_text(
-            json.dumps({
-                "task_id": "session_a",
-                "messages": [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "hi"},
-                ],
-            }),
+            json.dumps(
+                {
+                    "task_id": "session_a",
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "hi"},
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -271,6 +278,7 @@ class TestLoadSession(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
 class TestSessionIndex(unittest.TestCase):
     """Scanning a runs directory into the /resume listing."""
 
@@ -283,14 +291,16 @@ class TestSessionIndex(unittest.TestCase):
         entry = self.runs / name
         entry.mkdir()
         (entry / "trace.json").write_text(
-            json.dumps({
-                "task": {"id": name, "instruction": instruction},
-                "total_steps": steps,
-                "workspace": workspace,
-                "finish_reason": "completed",
-                "messages": [],
-                "steps": [],
-            }),
+            json.dumps(
+                {
+                    "task": {"id": name, "instruction": instruction},
+                    "total_steps": steps,
+                    "workspace": workspace,
+                    "finish_reason": "completed",
+                    "messages": [],
+                    "steps": [],
+                }
+            ),
             encoding="utf-8",
         )
         stamp = time.time() - age_days * 86400
@@ -311,8 +321,7 @@ class TestSessionIndex(unittest.TestCase):
         """Invariant: without a workspace filter, recency alone decides the order."""
         self._write_session("older", age_days=2.0)
         self._write_session("newer", age_days=1.0)
-        self.assertEqual([s["run_id"] for s in find_recent_sessions(self.runs)],
-                         ["newer", "older"])
+        self.assertEqual([s["run_id"] for s in find_recent_sessions(self.runs)], ["newer", "older"])
 
     def test_matching_workspace_sorts_ahead_of_newer_sessions(self):
         """Invariant: sessions from this repository outrank newer ones from elsewhere."""
@@ -337,14 +346,16 @@ class TestSessionIndex(unittest.TestCase):
         entry = self.runs / "noinstr"
         entry.mkdir()
         (entry / "trace.json").write_text(
-            json.dumps({
-                "task": {"id": "noinstr", "instruction": "   "},
-                "total_steps": 1,
-                "messages": [
-                    {"role": "system", "content": "sys"},
-                    {"role": "user", "content": "the real ask"},
-                ],
-            }),
+            json.dumps(
+                {
+                    "task": {"id": "noinstr", "instruction": "   "},
+                    "total_steps": 1,
+                    "messages": [
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "the real ask"},
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         self.assertEqual(find_recent_sessions(self.runs)[0]["preview"], "the real ask")
@@ -421,32 +432,44 @@ class TestReconstructMessages(unittest.TestCase):
 
     def test_prompt_plus_assistant_reply(self):
         """Invariant: the last step's prompt and its own response are both restored."""
-        steps = [{
-            "prompt_messages": [{"role": "user", "content": "hi"}],
-            "model_response": {"content": "hello", "tool_calls": []},
-            "tool_results": [],
-        }]
-        self.assertEqual(reconstruct_messages_from_steps(steps), [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ])
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "hi"}],
+                "model_response": {"content": "hello", "tool_calls": []},
+                "tool_results": [],
+            }
+        ]
+        self.assertEqual(
+            reconstruct_messages_from_steps(steps),
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        )
 
     def test_tool_calls_and_results_are_restored_in_order(self):
         """Invariant: an interrupted tool exchange is replayed with its result attached."""
-        steps = [{
-            "prompt_messages": [{"role": "user", "content": "list files"}],
-            "model_response": {
-                "content": "",
-                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
-            },
-            "tool_results": [{"call_id": "c1", "output": "a.py", "raw_log_path": None}],
-        }]
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "list files"}],
+                "model_response": {
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+                },
+                "tool_results": [{"call_id": "c1", "output": "a.py", "raw_log_path": None}],
+            }
+        ]
         messages = reconstruct_messages_from_steps(steps)
-        self.assertEqual(messages[1]["tool_calls"], [{
-            "id": "c1",
-            "type": "function",
-            "function": {"name": "bash", "arguments": '{"command": "ls"}'},
-        }])
+        self.assertEqual(
+            messages[1]["tool_calls"],
+            [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": '{"command": "ls"}'},
+                }
+            ],
+        )
         self.assertEqual(messages[2]["role"], "tool")
         self.assertEqual(messages[2]["tool_call_id"], "c1")
 
@@ -471,35 +494,52 @@ class TestReconstructMessages(unittest.TestCase):
     def test_latest_step_with_state_wins(self):
         """Invariant: reconstruction uses the most recent usable step, not the first."""
         steps = [
-            {"prompt_messages": [{"role": "user", "content": "one"}],
-             "model_response": {"content": "a"}, "tool_results": []},
-            {"prompt_messages": [{"role": "user", "content": "two"}],
-             "model_response": {"content": "b"}, "tool_results": []},
+            {
+                "prompt_messages": [{"role": "user", "content": "one"}],
+                "model_response": {"content": "a"},
+                "tool_results": [],
+            },
+            {
+                "prompt_messages": [{"role": "user", "content": "two"}],
+                "model_response": {"content": "b"},
+                "tool_results": [],
+            },
         ]
         self.assertEqual(reconstruct_messages_from_steps(steps)[0]["content"], "two")
 
     def test_unusable_arguments_are_preserved_as_strings(self):
         """Invariant: non-dict arguments are still replayable after a round trip."""
-        steps = [{
-            "prompt_messages": [{"role": "user", "content": "x"}],
-            "model_response": {"content": "", "tool_calls": [
-                {"id": "1", "name": "bash", "arguments": "not json at all"}
-            ]},
-            "tool_results": [],
-        }]
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "x"}],
+                "model_response": {
+                    "content": "",
+                    "tool_calls": [{"id": "1", "name": "bash", "arguments": "not json at all"}],
+                },
+                "tool_results": [],
+            }
+        ]
         call = reconstruct_messages_from_steps(steps)[1]["tool_calls"][0]
         self.assertEqual(call["function"]["arguments"], "not json at all")
 
     def test_provider_extra_content_is_preserved(self):
         """Invariant: provider-specific call metadata survives a resume."""
-        steps = [{
-            "prompt_messages": [{"role": "user", "content": "x"}],
-            "model_response": {"content": "", "tool_calls": [
-                {"id": "1", "function": {"name": "bash", "arguments": "{}"},
-                 "extra_content": {"provider": "x"}}
-            ]},
-            "tool_results": [],
-        }]
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "x"}],
+                "model_response": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "1",
+                            "function": {"name": "bash", "arguments": "{}"},
+                            "extra_content": {"provider": "x"},
+                        }
+                    ],
+                },
+                "tool_results": [],
+            }
+        ]
         call = reconstruct_messages_from_steps(steps)[1]["tool_calls"][0]
         self.assertEqual(call["extra_content"], {"provider": "x"})
 
@@ -525,11 +565,18 @@ class TestLoadSessionMessagesFallbacks(unittest.TestCase):
         run = self.tmp / "steps_only"
         run.mkdir()
         (run / "trace.json").write_text(
-            json.dumps({
-                "total_steps": 1,
-                "steps": [{"prompt_messages": [{"role": "user", "content": "q"}],
-                           "model_response": {"content": "a"}, "tool_results": []}],
-            }),
+            json.dumps(
+                {
+                    "total_steps": 1,
+                    "steps": [
+                        {
+                            "prompt_messages": [{"role": "user", "content": "q"}],
+                            "model_response": {"content": "a"},
+                            "tool_results": [],
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         messages, _ = load_session_messages(run)
@@ -541,8 +588,13 @@ class TestLoadSessionMessagesFallbacks(unittest.TestCase):
         run.mkdir()
         (run / "trace.json").write_text("{ truncated", encoding="utf-8")
         (run / "trajectory.jsonl").write_text(
-            json.dumps({"prompt_messages": [{"role": "user", "content": "q"}],
-                        "model_response": {"content": "a"}, "tool_results": []}),
+            json.dumps(
+                {
+                    "prompt_messages": [{"role": "user", "content": "q"}],
+                    "model_response": {"content": "a"},
+                    "tool_results": [],
+                }
+            ),
             encoding="utf-8",
         )
         messages, meta = load_session_messages(run)

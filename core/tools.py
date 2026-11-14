@@ -424,6 +424,7 @@ def discover_tool_plugins(
     prevent untrusted host code execution from cloned repositories.
     Project-level tools cleanly shadow global tools sharing the same tool name.
     """
+
     def _loader(path: Path, scope: str):
         if scope == "project" and not trust_project_tools:
             print(
@@ -443,5 +444,3 @@ def discover_tool_plugins(
         file_pattern="*.py",
     )
     return [r.item for r in resources.values()]
-
-

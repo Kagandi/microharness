@@ -31,13 +31,17 @@ class TestDiscovery(unittest.TestCase):
         (workspace_dir / ".skills").mkdir(parents=True)
         (workspace_dir / ".microharness" / "skills").mkdir(parents=True)
 
-        dirs = resolve_search_directories("skills", workspace_dir=workspace_dir, global_dir=global_dir)
+        dirs = resolve_search_directories(
+            "skills", workspace_dir=workspace_dir, global_dir=global_dir
+        )
 
         # Invariant: 3 existing directories found in strict global -> project order
         self.assertEqual(len(dirs), 3)
         self.assertEqual(dirs[0], ((global_dir / "skills").resolve(), "global"))
         self.assertEqual(dirs[1], ((workspace_dir / ".skills").resolve(), "project"))
-        self.assertEqual(dirs[2], ((workspace_dir / ".microharness" / "skills").resolve(), "project"))
+        self.assertEqual(
+            dirs[2], ((workspace_dir / ".microharness" / "skills").resolve(), "project")
+        )
 
         # For "tools", project search is strictly restricted to .microharness/tools
         (global_dir / "tools").mkdir(parents=True)
@@ -45,10 +49,14 @@ class TestDiscovery(unittest.TestCase):
         (workspace_dir / ".tools").mkdir(parents=True)
         (workspace_dir / ".microharness" / "tools").mkdir(parents=True)
 
-        tool_dirs = resolve_search_directories("tools", workspace_dir=workspace_dir, global_dir=global_dir)
+        tool_dirs = resolve_search_directories(
+            "tools", workspace_dir=workspace_dir, global_dir=global_dir
+        )
         self.assertEqual(len(tool_dirs), 2)
         self.assertEqual(tool_dirs[0], ((global_dir / "tools").resolve(), "global"))
-        self.assertEqual(tool_dirs[1], ((workspace_dir / ".microharness" / "tools").resolve(), "project"))
+        self.assertEqual(
+            tool_dirs[1], ((workspace_dir / ".microharness" / "tools").resolve(), "project")
+        )
 
     def test_resolve_search_directories_fallback_when_both_none(self):
         """Invariant: If both workspace_dir and global_dir are None, fallback resolves ~/.microharness."""
