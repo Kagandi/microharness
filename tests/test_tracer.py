@@ -234,9 +234,13 @@ class TestTracer(unittest.TestCase):
             prompt_messages=[],
             model_response={
                 "content": "I will inspect the workspace files now.\nExtra details not needed.",
-                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "git status"}}],
+                "tool_calls": [
+                    {"id": "c1", "name": "bash", "arguments": {"command": "git status"}}
+                ],
             },
-            tool_results=[{"call_id": "c1", "output": "On branch main\nnothing to commit", "exit_code": 0}],
+            tool_results=[
+                {"call_id": "c1", "output": "On branch main\nnothing to commit", "exit_code": 0}
+            ],
             duration_s=0.3,
             usage={"prompt_tokens": 500, "completion_tokens": 40},
         )
@@ -516,12 +520,14 @@ class TestTracer(unittest.TestCase):
             # 4. Crashed session: NO trace.json, only trajectory.jsonl
             dir_crashed = run_dir / "sess_crashed"
             dir_crashed.mkdir()
-            step_line = json.dumps({
-                "step_index": 1,
-                "prompt_messages": [{"role": "user", "content": "crashed turn"}],
-                "model_response": {"content": "in progress", "tool_calls": []},
-                "tool_results": [],
-            })
+            step_line = json.dumps(
+                {
+                    "step_index": 1,
+                    "prompt_messages": [{"role": "user", "content": "crashed turn"}],
+                    "model_response": {"content": "in progress", "tool_calls": []},
+                    "tool_results": [],
+                }
+            )
             (dir_crashed / "trajectory.jsonl").write_text(step_line + "\n", encoding="utf-8")
             msgs, meta = load_session_messages(dir_crashed)
             self.assertEqual(len(msgs), 2)
@@ -545,11 +551,13 @@ class TestTracer(unittest.TestCase):
             s1 = runs_dir / "run_old_other"
             s1.mkdir()
             (s1 / "trace.json").write_text(
-                json.dumps({
-                    "workspace": str(ws_other.resolve()),
-                    "total_steps": 2,
-                    "task": {"id": "t1", "instruction": "Old other instruction"},
-                }),
+                json.dumps(
+                    {
+                        "workspace": str(ws_other.resolve()),
+                        "total_steps": 2,
+                        "task": {"id": "t1", "instruction": "Old other instruction"},
+                    }
+                ),
                 encoding="utf-8",
             )
             os.utime(s1, (1000, 1000))
@@ -558,11 +566,13 @@ class TestTracer(unittest.TestCase):
             s2 = runs_dir / "run_new_other"
             s2.mkdir()
             (s2 / "trace.json").write_text(
-                json.dumps({
-                    "workspace": str(ws_other.resolve()),
-                    "total_steps": 5,
-                    "task": {"id": "t2", "instruction": "New other instruction"},
-                }),
+                json.dumps(
+                    {
+                        "workspace": str(ws_other.resolve()),
+                        "total_steps": 5,
+                        "task": {"id": "t2", "instruction": "New other instruction"},
+                    }
+                ),
                 encoding="utf-8",
             )
             os.utime(s2, (2000, 2000))
@@ -571,11 +581,13 @@ class TestTracer(unittest.TestCase):
             s3 = runs_dir / "run_target"
             s3.mkdir()
             (s3 / "trace.json").write_text(
-                json.dumps({
-                    "workspace": str(ws_target.resolve()),
-                    "total_steps": 1,
-                    "messages": [{"role": "user", "content": "Fix bug in target"}],
-                }),
+                json.dumps(
+                    {
+                        "workspace": str(ws_target.resolve()),
+                        "total_steps": 1,
+                        "messages": [{"role": "user", "content": "Fix bug in target"}],
+                    }
+                ),
                 encoding="utf-8",
             )
             os.utime(s3, (1500, 1500))
@@ -617,7 +629,9 @@ class TestTracer(unittest.TestCase):
                 duration_s=0.5,
                 prompt_messages=[{"role": "user", "content": "hello"}],
                 model_response={"content": "response with object", "obj": CustomObj()},
-                tool_results=[{"call_id": "c1", "output": Path("/tmp/some_file"), "tags": {"a", "b"}}],
+                tool_results=[
+                    {"call_id": "c1", "output": Path("/tmp/some_file"), "tags": {"a", "b"}}
+                ],
             )
             tracer.record_step(step1)
 
@@ -658,7 +672,9 @@ class TestTracer(unittest.TestCase):
             self.assertEqual(traj_lines[0]["model_response"]["obj"], "CustomObjRepr")
             self.assertEqual(traj_lines[0]["tool_results"][0]["output"], "/tmp/some_file")
             self.assertIn("a", traj_lines[0]["tool_results"][0]["tags"])
-            self.assertEqual(traj_lines[1]["prompt_messages"], [{"role": "user", "content": "next"}])
+            self.assertEqual(
+                traj_lines[1]["prompt_messages"], [{"role": "user", "content": "next"}]
+            )
 
     def test_tracer_export_json_survives_non_primitive_values(self):
         """Invariant: a Decimal in usage must not crash finalization (default=str on export)."""
@@ -861,4 +877,3 @@ class TestTracer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

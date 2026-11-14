@@ -76,10 +76,13 @@ class TestBuildSystemPrompt(unittest.TestCase):
             agents_instructions="AGENTS",
             skills_index="SKILLS",
         )
-        self.assertEqual(prompt, "BASE\n\nTOOLS\n\nContext:\nYou are working directly in "
-                                 "an existing project directory at `/ws`.\nInspect existing "
-                                 "files and git history to understand the codebase before "
-                                 "making changes.\n\nAGENTS\n\nSKILLS")
+        self.assertEqual(
+            prompt,
+            "BASE\n\nTOOLS\n\nContext:\nYou are working directly in "
+            "an existing project directory at `/ws`.\nInspect existing "
+            "files and git history to understand the codebase before "
+            "making changes.\n\nAGENTS\n\nSKILLS",
+        )
 
     def test_tool_docs_are_not_duplicated(self):
         """Invariant: a base prompt that already catalogues its tools is left alone."""

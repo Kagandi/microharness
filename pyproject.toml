@@ -42,6 +42,7 @@ mini-harness = "main:main"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=3.7.0",
     "pytest>=8.0.0",
     "ruff>=0.4.0",
 ]

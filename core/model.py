@@ -127,7 +127,6 @@ __all__ = [
 ]
 
 
-
 # Cache TTL and reasoning effort normalization live in core/config.py so the
 # harness cascade and the model clients share one validation path. Re-exported
 # here because they are part of the model-facing surface.
@@ -291,9 +290,7 @@ class HttpChatModel(UsageTelemetry):
                         }
                     ]
                     system_cached = True
-                elif self.cache_strategy == "openai_breakpoint" and isinstance(
-                    msg.content, str
-                ):
+                elif self.cache_strategy == "openai_breakpoint" and isinstance(msg.content, str):
                     msg_dict["content"] = [
                         {
                             "type": "text",
@@ -391,7 +388,9 @@ class HttpChatModel(UsageTelemetry):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(request, timeout=self._request_timeout(attempt)) as resp:
+                with urllib.request.urlopen(
+                    request, timeout=self._request_timeout(attempt)
+                ) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 self._handle_http_error(exc, attempt)
@@ -407,9 +406,7 @@ class HttpChatModel(UsageTelemetry):
             return self.timeout
         remaining = self.deadline - time.time()
         if remaining <= 0:
-            raise TimeoutError(
-                f"Task timeout reached before model request attempt {attempt + 1}"
-            )
+            raise TimeoutError(f"Task timeout reached before model request attempt {attempt + 1}")
         return min(self.timeout, max(remaining, 0.1))
 
     def _handle_http_error(self, exc: urllib.error.HTTPError, attempt: int) -> None:
@@ -425,9 +422,7 @@ class HttpChatModel(UsageTelemetry):
             f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{body}"
         ) from exc
 
-    def _wait_out_rate_limit(
-        self, exc: urllib.error.HTTPError, body: str, attempt: int
-    ) -> None:
+    def _wait_out_rate_limit(self, exc: urllib.error.HTTPError, body: str, attempt: int) -> None:
         """Waits out a 429, or fails immediately on 402 (no credit, no point retrying)."""
         delay = extract_retry_delay(exc.headers)
         if exc.code == PAYMENT_REQUIRED_STATUS:
@@ -470,9 +465,7 @@ class HttpChatModel(UsageTelemetry):
         if timed_out and self.deadline is not None and time.time() >= self.deadline:
             raise TimeoutError("Task timeout reached during model request") from exc
         if self.retry.can_retry(attempt):
-            self._sleep_before_retry(
-                self.retry.backoff(attempt), f" connection error: {reason}"
-            )
+            self._sleep_before_retry(self.retry.backoff(attempt), f" connection error: {reason}")
             return
         raise ConnectionError(
             f"Could not connect to model endpoint at {self.endpoint}.\n"

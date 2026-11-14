@@ -71,9 +71,7 @@ class TestMarkdownTable(unittest.TestCase):
 
     def test_wide_characters_align_to_equal_display_width(self):
         """Invariant: every line of a CJK table has identical display width."""
-        lines = render_markdown_table(
-            ["名前", "Qty"], [["田中太郎", "1"]], max_width=40
-        )
+        lines = render_markdown_table(["名前", "Qty"], [["田中太郎", "1"]], max_width=40)
         widths = {display_width(line.text) for line in lines}
         self.assertEqual(len(widths), 1, f"ragged box, display widths were {widths}")
 
@@ -374,7 +372,9 @@ class TestTUIInterrupt(unittest.TestCase):
         tui.draw(mock_stdscr)
 
         calls = mock_stdscr.addstr.call_args_list
-        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        rendered_texts = [
+            c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
         joined = " ".join(rendered_texts)
         self.assertIn("running", joined)
         # Esc is deferred to the next step boundary, so the hint must not claim otherwise.
@@ -565,7 +565,9 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(state.lines[-1], TUILine(text="> What is microharness?", tag="user"))
 
         state.add_thought("Analyzing codebase")
-        self.assertEqual(state.lines[-1], TUILine(text="Thinking: Analyzing codebase", tag="thought"))
+        self.assertEqual(
+            state.lines[-1], TUILine(text="Thinking: Analyzing codebase", tag="thought")
+        )
 
         state.add_action("bash: git status (0.2s)")
         self.assertEqual(state.lines[-1], TUILine(text="bash: git status (0.2s)", tag="action"))
@@ -576,14 +578,18 @@ class TestTUI(unittest.TestCase):
         state.add_agent("Microharness is an AI agent harness.\nMinimal and pluggable.")
         # Agent response splits lines with dim spacers
         agent_lines = [line.text for line in state.lines if line.tag == "agent"]
-        self.assertEqual(agent_lines, ["Microharness is an AI agent harness.", "Minimal and pluggable."])
+        self.assertEqual(
+            agent_lines, ["Microharness is an AI agent harness.", "Minimal and pluggable."]
+        )
 
     def test_tui_state_wrapping_and_visible_slice(self):
         """Invariant: Lines wrap to width, and visible slice calculates correct window rows."""
         state = TUIState()
         state.add_user("Short message")
         # Line longer than 30 characters
-        state.add_thought("This is a very long thinking line that definitely exceeds thirty columns in terminal")
+        state.add_thought(
+            "This is a very long thinking line that definitely exceeds thirty columns in terminal"
+        )
 
         wrapped = state.get_wrapped_lines(width=30)
         # Verify wrapping occurred (at least 3 wrapped rows for the long line)
@@ -680,7 +686,9 @@ class TestTUI(unittest.TestCase):
             ws_dir = tmp_path / "workspace"
             skill_dir = ws_dir / ".microharness" / "skills" / "deploy-tool"
             skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text("# Deploy Instructions\nRun deployment.\n", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "# Deploy Instructions\nRun deployment.\n", encoding="utf-8"
+            )
 
             mock_model = MockModel(script=[("Deploy in progress", []), ("Hello from agent", [])])
             harness = Harness(
@@ -717,7 +725,9 @@ class TestTUI(unittest.TestCase):
             has_status = any("Context Tokens:" in line.text for line in lines)
             has_help = any("Available commands:" in line.text for line in lines)
             has_skill_list = any("deploy-tool" in line.text for line in lines)
-            has_skill_activation = any("Activated skill: deploy-tool" in line.text for line in lines)
+            has_skill_activation = any(
+                "Activated skill: deploy-tool" in line.text for line in lines
+            )
             has_user = any("> Hi agent" in line.text for line in lines)
             has_agent = any("Hello from agent" in line.text for line in lines)
             self.assertTrue(has_status)
@@ -778,7 +788,9 @@ class TestTUI(unittest.TestCase):
         tags = [line.tag for line in lines]
 
         # Invariant 1: Heading is uppercase and tagged
-        self.assertIn("AGENT EXECUTION REPORT", [entry.text for entry in lines if entry.tag == "heading"])
+        self.assertIn(
+            "AGENT EXECUTION REPORT", [entry.text for entry in lines if entry.tag == "heading"]
+        )
 
         # Invariant 2: Table has border, header, and data rows
         self.assertIn("table_border", tags)
@@ -834,9 +846,7 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(state.input_buffer, "/compact")
 
         # Custom workspace commands
-        state.set_custom_commands(
-            {"review": Command("review", "Review PR", "template", "project")}
-        )
+        state.set_custom_commands({"review": Command("review", "Review PR", "template", "project")})
         state.input_buffer = "/rev"
         r_matches = state.get_matching_commands()
         self.assertEqual(len(r_matches), 1)
@@ -865,7 +875,9 @@ class TestTUI(unittest.TestCase):
         tui.draw(mock_stdscr)
 
         # 1. Path & Git branch in cockpit
-        path_calls = [c for c in mock_stdscr.addstr.call_args_list if "~/Projects/microharness" in str(c)]
+        path_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "~/Projects/microharness" in str(c)
+        ]
         self.assertGreaterEqual(len(path_calls), 1)
         self.assertIn("(feature-ui)", str(path_calls[0]))
 
@@ -1123,7 +1135,11 @@ class TestTUI(unittest.TestCase):
         tui.draw(mock_stdscr)
 
         # 1. The input row is drawn from the window offset that reveals the caret
-        drawn = [c.args[2] for c in mock_stdscr.addstr.call_args_list if len(c.args) >= 3 and c.args[1] == 2]
+        drawn = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and c.args[1] == 2
+        ]
         self.assertEqual(len(drawn), 1)
         self.assertEqual(drawn[0], buffer[5:41])
         self.assertEqual(drawn[0][35], buffer[40])
@@ -1137,7 +1153,11 @@ class TestTUI(unittest.TestCase):
         mock_stdscr.getmaxyx.return_value = (24, 40)
         tui.draw(mock_stdscr)
 
-        drawn = [c.args[2] for c in mock_stdscr.addstr.call_args_list if len(c.args) >= 3 and c.args[1] == 2]
+        drawn = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and c.args[1] == 2
+        ]
         self.assertEqual(len(drawn), 1)
         self.assertEqual(drawn[0], buffer[-36:])
         mock_stdscr.move.assert_called_once_with(23, 38)
@@ -1433,9 +1453,7 @@ class TestTUI(unittest.TestCase):
         state = TUIState(title="t")
         state.input_buffer = "half typed"
         tui = CursesTUI(state)
-        self.assertTrue(
-            tui.handle_key(27, lambda _t: None), "Esc with text must not terminate"
-        )
+        self.assertTrue(tui.handle_key(27, lambda _t: None), "Esc with text must not terminate")
         self.assertEqual(state.input_buffer, "", "Esc with text should clear it instead")
 
     def test_escape_dismisses_menu_without_exiting(self):
@@ -1454,10 +1472,20 @@ class TestTUI(unittest.TestCase):
         skills = {
             name: Skill(name, summary, path, scope, instructions)
             for name, summary, path, scope, instructions in (
-                ("deploy-tool", "Deploy app to production", "skills/deploy/SKILL.md",
-                 "project", "deploy instructions"),
-                ("my-linter", "Lint code with ruff", "skills/lint/SKILL.md",
-                 "global", "lint instructions"),
+                (
+                    "deploy-tool",
+                    "Deploy app to production",
+                    "skills/deploy/SKILL.md",
+                    "project",
+                    "deploy instructions",
+                ),
+                (
+                    "my-linter",
+                    "Lint code with ruff",
+                    "skills/lint/SKILL.md",
+                    "global",
+                    "lint instructions",
+                ),
             )
         }
         state.set_skills(skills)
@@ -1494,9 +1522,13 @@ class TestTUI(unittest.TestCase):
         tui = CursesTUI(state)
         tui.draw(mock_stdscr)
 
-        skill_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Available Skills" in str(c)]
+        skill_border_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "Available Skills" in str(c)
+        ]
         self.assertGreaterEqual(len(skill_border_calls), 1)
-        skill_item_calls = [c for c in mock_stdscr.addstr.call_args_list if "/skill deploy-tool" in str(c)]
+        skill_item_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "/skill deploy-tool" in str(c)
+        ]
         self.assertGreaterEqual(len(skill_item_calls), 1)
 
     def test_direct_skill_slash_command_autocomplete(self):
@@ -1505,10 +1537,20 @@ class TestTUI(unittest.TestCase):
         skills = {
             name: Skill(name, summary, path, scope, instructions)
             for name, summary, path, scope, instructions in (
-                ("deploy-tool", "Deploy app to production", "skills/deploy/SKILL.md",
-                 "project", "deploy instructions"),
-                ("my-linter", "Lint code with ruff", "skills/lint/SKILL.md",
-                 "global", "lint instructions"),
+                (
+                    "deploy-tool",
+                    "Deploy app to production",
+                    "skills/deploy/SKILL.md",
+                    "project",
+                    "deploy instructions",
+                ),
+                (
+                    "my-linter",
+                    "Lint code with ruff",
+                    "skills/lint/SKILL.md",
+                    "global",
+                    "lint instructions",
+                ),
             )
         }
         state.set_skills(skills)
@@ -1561,7 +1603,9 @@ class TestTUI(unittest.TestCase):
         mock_stdscr.getmaxyx.return_value = (24, 80)
         tui = CursesTUI(state)
         tui.draw(mock_stdscr)
-        header_calls = [c for c in mock_stdscr.addstr.call_args_list if "Reasoning / Thinking Effort" in str(c)]
+        header_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "Reasoning / Thinking Effort" in str(c)
+        ]
         self.assertGreaterEqual(len(header_calls), 1)
 
     def test_inline_markdown_parsing_and_styling(self):
@@ -1579,8 +1623,12 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(parse_inline_segments("_italic text_"), [("italic text", "italic")])
 
         # 4. Bold italic combinations
-        self.assertEqual(parse_inline_segments("***bold italic***"), [("bold italic", "bold_italic")])
-        self.assertEqual(parse_inline_segments("___bold italic___"), [("bold italic", "bold_italic")])
+        self.assertEqual(
+            parse_inline_segments("***bold italic***"), [("bold italic", "bold_italic")]
+        )
+        self.assertEqual(
+            parse_inline_segments("___bold italic___"), [("bold italic", "bold_italic")]
+        )
 
         # 5. Inline code
         self.assertEqual(parse_inline_segments("`code snippet`"), [("code snippet", "code")])
@@ -1619,13 +1667,16 @@ class TestTUI(unittest.TestCase):
         calls = mock_stdscr.addstr.call_args_list
 
         # Verify raw ** and * markers are NOT in any text rendered
-        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        rendered_texts = [
+            c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
         for t in rendered_texts:
             self.assertNotIn("**", t)
 
         # Verify that bold text was rendered with curses.A_BOLD
         bold_calls = [
-            c for c in calls
+            c
+            for c in calls
             if len(c.args) >= 4 and (c.args[3] & curses.A_BOLD) and c.args[2] == "strong result"
         ]
         self.assertGreaterEqual(len(bold_calls), 1)
@@ -1633,7 +1684,8 @@ class TestTUI(unittest.TestCase):
         # Verify that italic text was rendered with italic attribute (A_ITALIC or fallback A_UNDERLINE)
         italic_attr = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
         italic_calls = [
-            c for c in calls
+            c
+            for c in calls
             if len(c.args) >= 4 and (c.args[3] & italic_attr) and c.args[2] == "careful note"
         ]
         self.assertGreaterEqual(len(italic_calls), 1)
@@ -1641,12 +1693,14 @@ class TestTUI(unittest.TestCase):
     def test_file_tag_query_detection_and_matching(self):
         """Invariant: TUIState detects @file tag queries and matches workspace files with ranking."""
         state = TUIState()
-        state.set_workspace_files([
-            "core/harness.py",
-            "core/tui.py",
-            "tests/test_tui.py",
-            "README.md",
-        ])
+        state.set_workspace_files(
+            [
+                "core/harness.py",
+                "core/tui.py",
+                "tests/test_tui.py",
+                "README.md",
+            ]
+        )
 
         # 1. Detection at beginning
         state.input_buffer = "@"
@@ -1747,7 +1801,9 @@ class TestTUI(unittest.TestCase):
         calls = mock_stdscr.addstr.call_args_list
 
         # Verify multiline prompt prefix (> and continuation space)
-        rendered_texts = [c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)]
+        rendered_texts = [
+            c.args[2] for c in calls if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
         self.assertIn("> ", rendered_texts)
         self.assertIn("Line 1", rendered_texts)
         self.assertIn("Line 2 @core", rendered_texts)
@@ -1768,12 +1824,14 @@ class TestTUI(unittest.TestCase):
         """Invariant: Shift+2 produces '@' via normal character or decoded escape sequences."""
         # 1. Direct decoder assertions
         self.assertEqual(decode_terminal_sequence("\x1b[27;2;50~"), "@")  # modifyOtherKeys Shift+2
-        self.assertEqual(decode_terminal_sequence("\x1b[50;2u"), "@")     # CSI-u Shift+2
-        self.assertEqual(decode_terminal_sequence("\x1b[64;2u"), "@")     # CSI-u codepoint 64 with shift
-        self.assertEqual(decode_terminal_sequence("\x1b[64u"), "@")       # CSI-u codepoint 64
+        self.assertEqual(decode_terminal_sequence("\x1b[50;2u"), "@")  # CSI-u Shift+2
+        self.assertEqual(
+            decode_terminal_sequence("\x1b[64;2u"), "@"
+        )  # CSI-u codepoint 64 with shift
+        self.assertEqual(decode_terminal_sequence("\x1b[64u"), "@")  # CSI-u codepoint 64
         self.assertEqual(decode_terminal_sequence("\x1b[27;2;49~"), "!")  # Shift+1
         self.assertEqual(decode_terminal_sequence("\x1b[27;2;51~"), "#")  # Shift+3
-        self.assertIsNone(decode_terminal_sequence("\x1b[13;2u"))         # Enter is not character
+        self.assertIsNone(decode_terminal_sequence("\x1b[13;2u"))  # Enter is not character
         self.assertIsNone(decode_terminal_sequence("plain"))
 
         state = TUIState()
@@ -1801,13 +1859,27 @@ class TestTUI(unittest.TestCase):
         """Invariant: /model and /resume provide subcommand autocomplete for models and previous runs."""
         state = TUIState()
         models = [
-            {"name": "fast", "model": "gemini-2.5-flash", "provider": "google", "description": "Fast flash model"},
-            {"name": "smart", "model": "claude-3-5-sonnet", "provider": "anthropic", "description": "Smart sonnet"},
+            {
+                "name": "fast",
+                "model": "gemini-2.5-flash",
+                "provider": "google",
+                "description": "Fast flash model",
+            },
+            {
+                "name": "smart",
+                "model": "claude-3-5-sonnet",
+                "provider": "anthropic",
+                "description": "Smart sonnet",
+            },
         ]
         state.set_available_models(models)
 
         sessions = [
-            {"run_id": "run-2026-10-03-alpha", "total_steps": 5, "preview": "Fix caching bug in harness"},
+            {
+                "run_id": "run-2026-10-03-alpha",
+                "total_steps": 5,
+                "preview": "Fix caching bug in harness",
+            },
             {"run_id": "run-2026-10-02-beta", "total_steps": 12, "preview": "Refactor discovery"},
         ]
         state.set_available_sessions(sessions)
@@ -1882,12 +1954,16 @@ class TestTUI(unittest.TestCase):
         mock_stdscr.getmaxyx.return_value = (30, 100)
         state.input_buffer = "/model "
         tui.draw(mock_stdscr)
-        model_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Available Models" in str(c)]
+        model_border_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "Available Models" in str(c)
+        ]
         self.assertGreaterEqual(len(model_border_calls), 1)
 
         state.input_buffer = "/resume "
         tui.draw(mock_stdscr)
-        resume_border_calls = [c for c in mock_stdscr.addstr.call_args_list if "Previous Sessions" in str(c)]
+        resume_border_calls = [
+            c for c in mock_stdscr.addstr.call_args_list if "Previous Sessions" in str(c)
+        ]
         self.assertGreaterEqual(len(resume_border_calls), 1)
 
     def test_harness_run_tui_resume_continues_step_numbering(self):
@@ -1922,7 +1998,17 @@ class TestTUI(unittest.TestCase):
                 initial_instruction="prior work",
                 initial_files={},
             )
-            script = [("step one", [ToolCall(id="c1", name="write_file", arguments={"path": "a.txt", "content": "x"})]), ("step two", [])]
+            script = [
+                (
+                    "step one",
+                    [
+                        ToolCall(
+                            id="c1", name="write_file", arguments={"path": "a.txt", "content": "x"}
+                        )
+                    ],
+                ),
+                ("step two", []),
+            ]
             seed.model = MockModel(script=script)
             loop.model = seed.model
             for idx in range(2):
@@ -1947,8 +2033,9 @@ class TestTUI(unittest.TestCase):
                 observed_step_indices.append(step_index)
                 return real_step(self, step_index=step_index, **kwargs)
 
-            with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True), patch.object(
-                AgentLoop, "step", recording_step
+            with (
+                patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True),
+                patch.object(AgentLoop, "step", recording_step),
             ):
                 harness.run_tui(resume=prior_run.name)
 
@@ -2015,8 +2102,9 @@ class TestTUI(unittest.TestCase):
                 polls["n"] += 1
                 return polls["n"] % 2 == 0
 
-            with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True), patch(
-                "core.tui.CursesTUI.check_cancel_requested", fake_cancel
+            with (
+                patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True),
+                patch("core.tui.CursesTUI.check_cancel_requested", fake_cancel),
             ):
                 harness.run_tui()
 
@@ -2024,7 +2112,9 @@ class TestTUI(unittest.TestCase):
             lines = [ln.text for ln in captured[0].lines]
 
             announcing = [t for t in lines if "Cancelling" in t]
-            self.assertEqual(len(announcing), 1, f"expected exactly one announcement, got {announcing}")
+            self.assertEqual(
+                len(announcing), 1, f"expected exactly one announcement, got {announcing}"
+            )
             self.assertIn("Ctrl+C cancels immediately", announcing[0])
 
             # The turn was cancelled, not aborted: the session still responds afterwards.
@@ -2032,7 +2122,9 @@ class TestTUI(unittest.TestCase):
                 any("cancelled by user" in t for t in lines),
                 f"expected a cancellation notice, got {lines[-6:]}",
             )
-            self.assertTrue(any("Context Tokens:" in t for t in lines), "session should still be usable")
+            self.assertTrue(
+                any("Context Tokens:" in t for t in lines), "session should still be usable"
+            )
             self.assertFalse(captured[0].turn_active)
             # The probe must be detached once the turn ends.
             self.assertIsNone(model.probe)
@@ -2060,12 +2152,8 @@ class TestCommandCatalog(unittest.TestCase):
         from core.skills import Skill
 
         state = TUIState()
-        state.set_custom_commands(
-            {"review": Command("review", "Review PR", "t", "project")}
-        )
-        state.set_skills(
-            {"deploy": Skill("deploy", "Deploy app", "d/SKILL.md", "project", "body")}
-        )
+        state.set_custom_commands({"review": Command("review", "Review PR", "t", "project")})
+        state.set_skills({"deploy": Skill("deploy", "Deploy app", "d/SKILL.md", "project", "body")})
 
         names = [name for name, _ in state.command_catalog]
         self.assertEqual(names[: len(COMMAND_SPECS)], [s.canonical for s in COMMAND_SPECS])
@@ -2087,9 +2175,7 @@ class TestCommandCatalog(unittest.TestCase):
         state.input_buffer = "/skill "
         matches = dict(state.get_matching_commands())
 
-        self.assertEqual(
-            matches["/skill deploy-tool"], "[global] Deploy app to production"
-        )
+        self.assertEqual(matches["/skill deploy-tool"], "[global] Deploy app to production")
 
     def test_model_menu_reuses_the_shared_description_formatter(self):
         """Invariant: the /model menu describes a model exactly like the /model listing."""
@@ -2107,9 +2193,7 @@ class TestCommandCatalog(unittest.TestCase):
     def test_session_menu_truncates_long_previews(self):
         """Invariant: the /resume menu keeps previews inside its narrow column."""
         state = TUIState()
-        state.set_available_sessions(
-            [{"run_id": "abc", "total_steps": 3, "preview": "x" * 80}]
-        )
+        state.set_available_sessions([{"run_id": "abc", "total_steps": 3, "preview": "x" * 80}])
         state.input_buffer = "/resume abc"
         _, desc = state.get_matching_commands()[0]
         self.assertEqual(desc, "(3 steps) " + "x" * 35)

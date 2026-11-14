@@ -124,7 +124,9 @@ class TuiTurnRunner:
         for call, result in _pair_calls_with_results(tool_calls, step_trace.tool_results):
             self._render_action(call, result, step_trace.duration_s)
 
-    def _render_action(self, call: dict[str, Any] | None, result: dict[str, Any] | None, duration: float) -> None:
+    def _render_action(
+        self, call: dict[str, Any] | None, result: dict[str, Any] | None, duration: float
+    ) -> None:
         """Renders one tool call, surfacing the first output line on failure."""
         summary = _format_action_summary(
             (call or {}).get("name", ""), (call or {}).get("arguments", {}), color=False

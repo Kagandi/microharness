@@ -44,7 +44,9 @@ class TokenUsage:
 
     @property
     def cache_hit_rate_pct(self) -> float:
-        return round(self.cached_tokens / self.prompt_tokens * 100, 1) if self.prompt_tokens else 0.0
+        return (
+            round(self.cached_tokens / self.prompt_tokens * 100, 1) if self.prompt_tokens else 0.0
+        )
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
         return TokenUsage(
@@ -83,9 +85,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> TokenUsage:
         return TokenUsage()
 
     details = usage.get("prompt_tokens_details")
-    nested_cached = (
-        _first_int(details, ("cached_tokens",)) if isinstance(details, dict) else 0
-    )
+    nested_cached = _first_int(details, ("cached_tokens",)) if isinstance(details, dict) else 0
     cached = nested_cached or _first_int(usage, CACHED_TOKEN_KEYS)
     return TokenUsage(
         prompt_tokens=_first_int(usage, PROMPT_TOKEN_KEYS),

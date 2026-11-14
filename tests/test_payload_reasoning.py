@@ -33,9 +33,9 @@ class TestExplicitNoneReasoning(unittest.TestCase):
 
     def test_explicit_none_honors_user_effort(self):
         """Invariant: an explicit user effort wins over the implicit none."""
-        payload = _client(
-            reasoning_format="explicit_none", reasoning_effort="low"
-        )._build_payload([Message(role="user", content="hi")], [TOOL])
+        payload = _client(reasoning_format="explicit_none", reasoning_effort="low")._build_payload(
+            [Message(role="user", content="hi")], [TOOL]
+        )
         self.assertEqual(payload["reasoning_effort"], "low")
         self.assertNotIn("reasoning", payload)
 

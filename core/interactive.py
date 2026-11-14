@@ -278,7 +278,10 @@ def expand_specs(specs: tuple[CommandSpec, ...]) -> tuple[CommandSpec, ...]:
     return tuple(
         replace(
             spec,
-            bare_names=(*(name.lstrip("/") for name in spec.names), *EXTRA_ALIASES.get(spec.key, ())),
+            bare_names=(
+                *(name.lstrip("/") for name in spec.names),
+                *EXTRA_ALIASES.get(spec.key, ()),
+            ),
         )
         for spec in specs
     )
@@ -316,7 +319,8 @@ def render_help_lines(
     if skills:
         lines.append("\nAvailable skills (run /<name> or /skill <name>):")
         lines += [
-            f"  /{name:<10} - {skill.badge}{skill.summary}" for name, skill in sorted(skills.items())
+            f"  /{name:<10} - {skill.badge}{skill.summary}"
+            for name, skill in sorted(skills.items())
         ]
     if footer:
         lines.append(footer)
@@ -505,7 +509,9 @@ class CommandRouter:
         if not arg:
             harness = self.ctx.harness
             self.ctx.ui.info("🤖 Available Models (from config):")
-            for line in render_model_lines(harness.get_available_models(), harness.active_model_name()):
+            for line in render_model_lines(
+                harness.get_available_models(), harness.active_model_name()
+            ):
                 self.ctx.ui.status(line)
             self.ctx.ui.status("Tip: Type /model <name|number> to switch active model.")
             return SKIP
@@ -637,7 +643,9 @@ class CommandRouter:
     def _show_cache(self) -> None:
         stats = self.ctx.harness.get_cache_stats()
         ttl = stats.get("cache_ttl")
-        label = f"{ttl.upper()} ({CACHE_TTL_DESCRIPTIONS.get(ttl, '')})" if ttl else "DISABLED (off)"
+        label = (
+            f"{ttl.upper()} ({CACHE_TTL_DESCRIPTIONS.get(ttl, '')})" if ttl else "DISABLED (off)"
+        )
         self.ctx.ui.info(f"⚡ Prompt Caching: {label}")
         if hits := render_cache_hits(stats):
             self.ctx.ui.status(hits)

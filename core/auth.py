@@ -240,8 +240,7 @@ def load_auth_plugins(global_dir: Path | str | None) -> dict[str, str]:
             name = _normalize(scheme)
             if name in _REGISTRY:
                 print(
-                    f"Warning: Skipping auth plugin '{path}': "
-                    f"scheme {name!r} already registered",
+                    f"Warning: Skipping auth plugin '{path}': scheme {name!r} already registered",
                     file=sys.stderr,
                 )
                 continue

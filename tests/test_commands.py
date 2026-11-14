@@ -31,7 +31,9 @@ class TestDiscoverCommands(unittest.TestCase):
 
     def test_description_comes_from_the_first_non_empty_line(self):
         """Invariant: the first line becomes the one-line description shown in /help."""
-        _write(self.global_dir / "commands" / "explain.md", "# Explain codebase\nExplain $ARGUMENTS")
+        _write(
+            self.global_dir / "commands" / "explain.md", "# Explain codebase\nExplain $ARGUMENTS"
+        )
         commands = discover_commands(self.workspace, self.global_dir)
         self.assertEqual(commands["explain"].description, "Explain codebase")
         self.assertEqual(commands["explain"].scope, "global")
@@ -45,8 +47,10 @@ class TestDiscoverCommands(unittest.TestCase):
     def test_project_command_shadows_global(self):
         """Invariant: a same-named project command cleanly replaces the global one."""
         _write(self.global_dir / "commands" / "review.md", "# Global review\nglobal template")
-        _write(self.workspace / ".microharness" / "commands" / "review.md",
-               "# Project review\nproject template")
+        _write(
+            self.workspace / ".microharness" / "commands" / "review.md",
+            "# Project review\nproject template",
+        )
         commands = discover_commands(self.workspace, self.global_dir)
         self.assertEqual(commands["review"].scope, "project")
         self.assertIn("project template", commands["review"].template)
@@ -138,9 +142,7 @@ class TestResolveSlashInput(unittest.TestCase):
 
     def test_skills_can_be_disabled_for_batch_runs(self):
         """Invariant: batch runs expand custom commands only, leaving skill text alone."""
-        outcome = resolve_slash_input(
-            "/deploy now", self.commands, self.skills, allow_skills=False
-        )
+        outcome = resolve_slash_input("/deploy now", self.commands, self.skills, allow_skills=False)
         self.assertTrue(outcome.is_error)
 
 

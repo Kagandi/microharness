@@ -26,9 +26,7 @@ class TestLoadAuthPlugins(unittest.TestCase):
         """Invariant: None or a missing dir loads nothing without error."""
         self.assertEqual(_load_with_stderr(None)[0], {})
         self.assertEqual(
-            _load_with_stderr(os.path.join(tempfile.gettempdir(), "mh-no-such-dir-xyz"))[
-                0
-            ],
+            _load_with_stderr(os.path.join(tempfile.gettempdir(), "mh-no-such-dir-xyz"))[0],
             {},
         )
 
@@ -64,9 +62,7 @@ class TestLoadAuthPlugins(unittest.TestCase):
                 options={},
                 secrets={"token": "abc"},
             )
-            self.assertEqual(
-                out, {"Content-Type": "application/json", "X-Custom": "yes:abc"}
-            )
+            self.assertEqual(out, {"Content-Type": "application/json", "X-Custom": "yes:abc"})
             self.assertEqual(headers, {"Content-Type": "application/json"})
 
     def test_happy_path_signer_object(self):
@@ -156,9 +152,7 @@ class TestLoadAuthPlugins(unittest.TestCase):
     def test_missing_sign_callable_skipped(self):
         """Invariant: SCHEME_NAME without sign()/SIGNER is skipped with warning."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_path = _write_plugin(
-                tmpdir, "nosign.py", "SCHEME_NAME = 'test-wave2-nosign'\n"
-            )
+            plugin_path = _write_plugin(tmpdir, "nosign.py", "SCHEME_NAME = 'test-wave2-nosign'\n")
             result, stderr = _load_with_stderr(tmpdir)
             self.assertEqual(result, {})
             self.assertIn(plugin_path, stderr)

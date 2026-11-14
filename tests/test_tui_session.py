@@ -251,9 +251,9 @@ class TestAbortTurn(TuiSessionTestCase):
 
     def test_reports_dropped_incomplete_messages(self):
         """Invariant: a half-finished tool exchange is reported so the user is not misled."""
-        self.memory.add_assistant("calling", tool_calls=[
-            ToolCall(id="1", name="bash", arguments={"command": "ls"})
-        ])
+        self.memory.add_assistant(
+            "calling", tool_calls=[ToolCall(id="1", name="bash", arguments={"command": "ls"})]
+        )
         runner = self._runner([])
 
         runner.abort_turn("cancelled by user (Esc)", at_step=2)
@@ -266,9 +266,11 @@ class TestReplayMessages(TuiSessionTestCase):
         """Invariant: a resumed transcript is reconstructed in the same shapes as live turns."""
         messages = [
             Message(role="user", content="do it"),
-            Message(role="assistant", content="on it", tool_calls=[
-                ToolCall(id="1", name="bash", arguments={"command": "ls"})
-            ]),
+            Message(
+                role="assistant",
+                content="on it",
+                tool_calls=[ToolCall(id="1", name="bash", arguments={"command": "ls"})],
+            ),
             Message(role="tool", content="output"),
         ]
 

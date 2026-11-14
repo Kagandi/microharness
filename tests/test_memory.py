@@ -366,18 +366,20 @@ class TestMemory(unittest.TestCase):
         self.assertIsNone(m1.tool_call_id)
 
         # 2. Assistant message with function tool call (JSON string arguments)
-        m2 = Message.from_dict({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": '{"command": "pwd"}'},
-                    "extra_content": "some_extra",
-                }
-            ],
-        })
+        m2 = Message.from_dict(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "pwd"}'},
+                        "extra_content": "some_extra",
+                    }
+                ],
+            }
+        )
         self.assertEqual(m2.role, "assistant")
         self.assertIsNotNone(m2.tool_calls)
         self.assertEqual(len(m2.tool_calls), 1)
@@ -388,30 +390,34 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(tc1.extra_content, "some_extra")
 
         # 3. Direct dictionary arguments (non-standard / alternative format)
-        m3 = Message.from_dict({
-            "role": "assistant",
-            "tool_calls": [
-                {"id": "call_2", "name": "read_file", "arguments": {"path": "a.txt"}}
-            ],
-        })
+        m3 = Message.from_dict(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_2", "name": "read_file", "arguments": {"path": "a.txt"}}
+                ],
+            }
+        )
         self.assertEqual(m3.tool_calls[0].arguments, {"path": "a.txt"})
 
         # 4. Malformed JSON string arguments fallback
-        m4 = Message.from_dict({
-            "role": "assistant",
-            "tool_calls": [
-                {"id": "call_3", "name": "custom", "arguments": "not valid json"}
-            ],
-        })
+        m4 = Message.from_dict(
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_3", "name": "custom", "arguments": "not valid json"}],
+            }
+        )
         self.assertEqual(m4.tool_calls[0].arguments, {"raw": "not valid json"})
 
         # 5. Tool result message with tool_call_id and raw_log_path
-        m5 = Message.from_dict({
-            "role": "tool",
-            "content": "output text",
-            "tool_call_id": "call_1",
-            "raw_log_path": "/tmp/raw.log",
-        })
+        m5 = Message.from_dict(
+            {
+                "role": "tool",
+                "content": "output text",
+                "tool_call_id": "call_1",
+                "raw_log_path": "/tmp/raw.log",
+            }
+        )
         self.assertEqual(m5.role, "tool")
         self.assertEqual(m5.content, "output text")
         self.assertEqual(m5.tool_call_id, "call_1")

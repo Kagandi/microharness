@@ -477,9 +477,7 @@ class TestModel(unittest.TestCase):
         }
 
         def run(model_flag: str | None) -> str:
-            args = argparse.Namespace(
-                endpoint=None, model=model_flag, api_key=None, provider=None
-            )
+            args = argparse.Namespace(endpoint=None, model=model_flag, api_key=None, provider=None)
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 _resolve_model(args, config=config, cache_ttl="off")
@@ -573,7 +571,9 @@ class TestModel(unittest.TestCase):
 
     def test_reasoning_protocol_and_methods(self):
         """Invariant: HttpChatModel and MockModel implement ReasoningAwareModel."""
-        m_http = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="high")
+        m_http = HttpChatModel(
+            base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="high"
+        )
         self.assertTrue(isinstance(m_http, ReasoningAwareModel))
         self.assertEqual(m_http.get_reasoning_effort(), "high")
         m_http.set_reasoning_effort("low")
@@ -592,40 +592,54 @@ class TestModel(unittest.TestCase):
         messages = [Message(role="user", content="Think carefully")]
 
         # Standard OpenAI / Google AI Studio endpoint (uses standard reasoning_effort)
-        m_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="low")
+        m_std = HttpChatModel(
+            base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="low"
+        )
         payload_std = m_std._build_payload(messages, tools=[])
         self.assertEqual(payload_std.get("reasoning_effort"), "low")
         self.assertNotIn("reasoning", payload_std)
 
         # OpenRouter endpoint (uses both standard reasoning_effort and proprietary reasoning dict)
-        m_or = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="low")
+        m_or = HttpChatModel(
+            base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="low"
+        )
         payload_or = m_or._build_payload(messages, tools=[])
         self.assertEqual(payload_or.get("reasoning_effort"), "low")
         self.assertEqual(payload_or.get("reasoning"), {"effort": "low"})
 
         # Numeric token budget on OpenRouter
-        m_num = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="4096")
+        m_num = HttpChatModel(
+            base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="4096"
+        )
         payload_num = m_num._build_payload(messages, tools=[])
         self.assertEqual(payload_num.get("reasoning"), {"max_tokens": 4096})
         self.assertNotIn("reasoning_effort", payload_num)
 
         # xhigh and max on standard (mapped to 'high' for OpenAI portability)
-        m_xhigh_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="xhigh")
+        m_xhigh_std = HttpChatModel(
+            base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="xhigh"
+        )
         payload_xhigh_std = m_xhigh_std._build_payload(messages, tools=[])
         self.assertEqual(payload_xhigh_std.get("reasoning_effort"), "high")
 
-        m_max_std = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="max")
+        m_max_std = HttpChatModel(
+            base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort="max"
+        )
         payload_max_std = m_max_std._build_payload(messages, tools=[])
         self.assertEqual(payload_max_std.get("reasoning_effort"), "high")
 
         # xhigh and max on OpenRouter (passed through as supported)
-        m_xhigh_or = HttpChatModel(base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="xhigh")
+        m_xhigh_or = HttpChatModel(
+            base_url="https://openrouter.ai/api/v1", model="stealth/model", reasoning_effort="xhigh"
+        )
         payload_xhigh_or = m_xhigh_or._build_payload(messages, tools=[])
         self.assertEqual(payload_xhigh_or.get("reasoning_effort"), "xhigh")
         self.assertEqual(payload_xhigh_or.get("reasoning"), {"effort": "xhigh"})
 
         # Off / None
-        m_off = HttpChatModel(base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort=None)
+        m_off = HttpChatModel(
+            base_url="https://api.openai.com/v1", model="o3-mini", reasoning_effort=None
+        )
         payload_off = m_off._build_payload(messages, tools=[])
         self.assertNotIn("reasoning", payload_off)
         self.assertNotIn("reasoning_effort", payload_off)
@@ -635,11 +649,13 @@ class TestModel(unittest.TestCase):
         m = HttpChatModel(base_url="https://api.openai.com/v1", model="test")
 
         # 1. OpenAI / OpenRouter format
-        m._update_usage({
-            "prompt_tokens": 1000,
-            "completion_tokens": 200,
-            "prompt_tokens_details": {"cached_tokens": 750},
-        })
+        m._update_usage(
+            {
+                "prompt_tokens": 1000,
+                "completion_tokens": 200,
+                "prompt_tokens_details": {"cached_tokens": 750},
+            }
+        )
         step_usage = m.get_last_step_usage()
         self.assertEqual(step_usage["prompt_tokens"], 1000)
         self.assertEqual(step_usage["completion_tokens"], 200)
@@ -647,11 +663,13 @@ class TestModel(unittest.TestCase):
         self.assertEqual(step_usage["cache_hit_rate_pct"], 75.0)
 
         # 2. Anthropic format
-        m._update_usage({
-            "input_tokens": 2000,
-            "output_tokens": 150,
-            "cache_read_input_tokens": 1200,
-        })
+        m._update_usage(
+            {
+                "input_tokens": 2000,
+                "output_tokens": 150,
+                "cache_read_input_tokens": 1200,
+            }
+        )
         step_usage2 = m.get_last_step_usage()
         self.assertEqual(step_usage2["prompt_tokens"], 2000)
         self.assertEqual(step_usage2["completion_tokens"], 150)
@@ -659,11 +677,13 @@ class TestModel(unittest.TestCase):
         self.assertEqual(step_usage2["cache_hit_rate_pct"], 60.0)
 
         # 3. Google AI Studio / Gemini format
-        m._update_usage({
-            "promptTokenCount": 500,
-            "candidatesTokenCount": 50,
-            "cachedContentTokenCount": 200,
-        })
+        m._update_usage(
+            {
+                "promptTokenCount": 500,
+                "candidatesTokenCount": 50,
+                "cachedContentTokenCount": 200,
+            }
+        )
         step_usage3 = m.get_last_step_usage()
         self.assertEqual(step_usage3["prompt_tokens"], 500)
         self.assertEqual(step_usage3["completion_tokens"], 50)
@@ -754,7 +774,7 @@ class TestModel(unittest.TestCase):
             # 3. Inline config: config.json 'providers'
             inline = {
                 "google": {"default_model": "gemini-inline"},
-                "inline-only": {"endpoint": "https://inline.example.com/v1"}
+                "inline-only": {"endpoint": "https://inline.example.com/v1"},
             }
 
             registry = load_provider_registry(
@@ -814,7 +834,9 @@ class TestModel(unittest.TestCase):
         name, prof = find_provider_by_endpoint(registry, "https://openrouter.ai/api/v1")
         self.assertEqual(name, "openrouter")
 
-        name_slash, prof_slash = find_provider_by_endpoint(registry, "https://openrouter.ai/api/v1/")
+        name_slash, prof_slash = find_provider_by_endpoint(
+            registry, "https://openrouter.ai/api/v1/"
+        )
         self.assertEqual(name_slash, "openrouter")
 
         name_chat, prof_chat = find_provider_by_endpoint(
@@ -903,7 +925,9 @@ class TestModel(unittest.TestCase):
 
     @patch("time.sleep")
     @patch("urllib.request.urlopen")
-    def test_send_request_falls_back_to_backoff_without_delay_headers(self, mock_urlopen, mock_sleep):
+    def test_send_request_falls_back_to_backoff_without_delay_headers(
+        self, mock_urlopen, mock_sleep
+    ):
         """Invariant: a 429 with no delay header uses exponential backoff, not a guessed delay."""
         import urllib.error
 
@@ -922,7 +946,11 @@ class TestModel(unittest.TestCase):
 
         mock_urlopen.side_effect = [err, success_resp]
 
-        m = HttpChatModel(base_url="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini", api_key="test-key")
+        m = HttpChatModel(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            model="gemini",
+            api_key="test-key",
+        )
         result = m._send_request(payload={"model": "gemini"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
@@ -1049,6 +1077,7 @@ class TestModel(unittest.TestCase):
     def test_send_request_http_402_fails_immediately(self, mock_urlopen, mock_sleep):
         """Invariant: HTTP 402 (Insufficient credits) fails immediately without retry loop."""
         import urllib.error
+
         err_body = b'{"error": {"code": 402, "message": "Insufficient credits"}}'
         err = urllib.error.HTTPError(
             url="https://openrouter.ai/api/v1/chat/completions",
@@ -1087,7 +1116,9 @@ class TestModel(unittest.TestCase):
 
         mock_urlopen.side_effect = [err, success_resp]
 
-        m = HttpChatModel(base_url="https://api.example.com", model="test-model", api_key="test-key")
+        m = HttpChatModel(
+            base_url="https://api.example.com", model="test-model", api_key="test-key"
+        )
         result = m._send_request(payload={"prompt": "hi"}, headers={})
 
         self.assertEqual(result["choices"][0]["message"]["content"], "recovered")
@@ -1127,6 +1158,7 @@ class TestModel(unittest.TestCase):
     def test_in_flight_timeout_bounds_model_request(self):
         """Invariant: HttpChatModel bounds socket requests against deadline and raises TimeoutError when expired."""
         import time
+
         model = HttpChatModel(
             base_url="https://api.example.com",
             model="test-model",
@@ -1141,8 +1173,11 @@ class TestModel(unittest.TestCase):
     def test_send_request_clamps_socket_timeout_to_remaining_deadline(self, mock_urlopen):
         """Invariant: In-flight socket timeout is clamped to remaining task deadline when deadline < timeout."""
         import time
+
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.__exit__.return_value = None
         mock_urlopen.return_value = mock_resp
@@ -1169,8 +1204,11 @@ class TestModel(unittest.TestCase):
     def test_send_request_clamps_socket_timeout_when_remaining_exceeds_timeout(self, mock_urlopen):
         """Invariant: In-flight socket timeout is clamped to self.timeout when remaining deadline > timeout."""
         import time
+
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.__exit__.return_value = None
         mock_urlopen.return_value = mock_resp
@@ -1194,8 +1232,11 @@ class TestModel(unittest.TestCase):
     def test_send_request_clamps_socket_timeout_minimum_floor(self, mock_urlopen):
         """Invariant: In-flight socket timeout enforces a 0.1s minimum floor when remaining deadline is near zero."""
         import time
+
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": "ok"}}]}
+        ).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
         mock_resp.__exit__.return_value = None
         mock_urlopen.return_value = mock_resp
@@ -1462,9 +1503,7 @@ class TestWave6SigningFreshness(unittest.TestCase):
             fp=MagicMock(read=MagicMock(return_value=b'{"error": "bad key"}')),
         )
         mock_urlopen.side_effect = err
-        m = HttpChatModel(
-            base_url="https://api.example.com/v1", model="m", api_key=secret
-        )
+        m = HttpChatModel(base_url="https://api.example.com/v1", model="m", api_key=secret)
         with self.assertRaises(RuntimeError) as ctx:
             m.generate([Message(role="user", content="hi")], [])
         self.assertNotIn(secret, str(ctx.exception))
@@ -1472,4 +1511,3 @@ class TestWave6SigningFreshness(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

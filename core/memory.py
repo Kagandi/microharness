@@ -213,9 +213,7 @@ class Memory:
         if last_assistant is None:
             return 0
 
-        answered = {
-            m.tool_call_id for m in self.messages[last_assistant + 1 :] if m.role == "tool"
-        }
+        answered = {m.tool_call_id for m in self.messages[last_assistant + 1 :] if m.role == "tool"}
         expected = {tc.id for tc in (self.messages[last_assistant].tool_calls or [])}
         if expected <= answered:
             return 0
@@ -254,4 +252,3 @@ def format_compact_num(n: int | float | None) -> str:
         scaled = round(val / 1_000, 1)
         return f"{scaled:g}k"
     return str(int(val)) if isinstance(n, int) or val.is_integer() else f"{val:.1f}"
-

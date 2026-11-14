@@ -169,9 +169,7 @@ class TestHeaderSigner(unittest.TestCase):
             secrets={},
         )
         self.assertEqual(out, {"X-Api-Key": "abc:def"})
-        self.assertEqual(
-            options, {"name": "X-Api-Key", "value_source": "literal:abc:def"}
-        )
+        self.assertEqual(options, {"name": "X-Api-Key", "value_source": "literal:abc:def"})
 
     def test_env_value_source(self):
         """Invariant: env:VAR reads the process environment."""
@@ -200,9 +198,7 @@ class TestHeaderSigner(unittest.TestCase):
             options={"name": "X-Api-Key", "value_source": "config:token"},
             secrets=secrets,
         )
-        self.assertEqual(
-            out, {"Content-Type": "application/json", "X-Api-Key": "cfg-secret"}
-        )
+        self.assertEqual(out, {"Content-Type": "application/json", "X-Api-Key": "cfg-secret"})
         self.assertEqual(headers, {"Content-Type": "application/json"})
         self.assertEqual(secrets, {"token": "cfg-secret"})
 

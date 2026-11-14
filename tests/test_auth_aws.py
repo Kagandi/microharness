@@ -72,9 +72,7 @@ class TestResolveAwsRegion(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.dict(os.environ, _clear_aws_env(home), clear=True):
-                self.assertEqual(
-                    resolve_aws_region({"aws_profile": "myprof"}), "eu-central-1"
-                )
+                self.assertEqual(resolve_aws_region({"aws_profile": "myprof"}), "eu-central-1")
 
     def test_aws_profile_env_selects_the_section(self):
         """Invariant: AWS_PROFILE names the config section when cfg has no aws_profile."""
@@ -159,9 +157,7 @@ class TestResolveAwsCredentials(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as home:
             env = _clear_aws_env(home)
-            env.update(
-                {"AWS_ACCESS_KEY_ID": "AKID", "AWS_SECRET_ACCESS_KEY": "SECRET"}
-            )
+            env.update({"AWS_ACCESS_KEY_ID": "AKID", "AWS_SECRET_ACCESS_KEY": "SECRET"})
             with patch.dict(os.environ, env, clear=True):
                 creds = resolve_aws_credentials()
                 self.assertIsNotNone(creds)
@@ -210,9 +206,7 @@ class TestResolveAwsCredentials(unittest.TestCase):
                 },
             )
             with patch.dict(os.environ, _clear_aws_env(home), clear=True):
-                with patch(
-                    "urllib.request.urlopen", return_value=_role_response()
-                ) as mock_urlopen:
+                with patch("urllib.request.urlopen", return_value=_role_response()) as mock_urlopen:
                     creds = resolve_aws_credentials("sso-prof")
         self.assertEqual(
             creds,
@@ -242,9 +236,7 @@ class TestResolveAwsCredentials(unittest.TestCase):
                 },
             )
             with patch.dict(os.environ, _clear_aws_env(home), clear=True):
-                with patch(
-                    "urllib.request.urlopen", return_value=_role_response()
-                ) as mock_urlopen:
+                with patch("urllib.request.urlopen", return_value=_role_response()) as mock_urlopen:
                     creds = resolve_aws_credentials("sso-prof")
         self.assertIsNotNone(creds)
         (request,), _ = mock_urlopen.call_args
@@ -337,9 +329,7 @@ class TestResolveAwsCredentials(unittest.TestCase):
         self.assertEqual(creds["access_key"], "AKID-SSO")
         self.assertEqual(mock_urlopen.call_count, 2)
         (second_request,), _ = mock_urlopen.call_args
-        self.assertEqual(
-            second_request.get_header("X-amz-sso_bearer_token"), "TOKEN-SECOND"
-        )
+        self.assertEqual(second_request.get_header("X-amz-sso_bearer_token"), "TOKEN-SECOND")
 
     def test_sso_first_payload_malformed_falls_through_to_next(self):
         """Invariant: a role response without roleCredentials tries the next token."""
@@ -369,9 +359,7 @@ class TestResolveAwsCredentials(unittest.TestCase):
         self.assertEqual(creds["access_key"], "AKID-SSO")
         self.assertEqual(mock_urlopen.call_count, 2)
         (second_request,), _ = mock_urlopen.call_args
-        self.assertEqual(
-            second_request.get_header("X-amz-sso_bearer_token"), "TOKEN-SECOND"
-        )
+        self.assertEqual(second_request.get_header("X-amz-sso_bearer_token"), "TOKEN-SECOND")
 
 
 if __name__ == "__main__":

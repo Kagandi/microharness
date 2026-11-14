@@ -25,15 +25,13 @@ class TestExtractSummary(unittest.TestCase):
 
     def test_quoted_description_is_unquoted(self):
         """Invariant: surrounding quotes in the YAML value are stripped."""
-        content = "---\ndescription: \"Quoted summary\"\n---\nbody"
+        content = '---\ndescription: "Quoted summary"\n---\nbody'
         self.assertEqual(extract_skill_summary(content, "fallback"), "Quoted summary")
 
     def test_folded_block_scalar(self):
         """Invariant: a '>' block scalar is folded onto a single line."""
         content = "---\ndescription: >\n  first part\n  second part\n---\n# H"
-        self.assertEqual(
-            extract_skill_summary(content, "fallback"), "first part second part"
-        )
+        self.assertEqual(extract_skill_summary(content, "fallback"), "first part second part")
 
     def test_literal_block_scalar(self):
         """Invariant: a '|' block scalar is joined with spaces."""
@@ -56,7 +54,9 @@ class TestExtractSummary(unittest.TestCase):
 
     def test_falls_back_to_first_prose_line(self):
         """Invariant: a document without headings still gets its first line as summary."""
-        self.assertEqual(extract_skill_summary("Plain description.\nmore", "fb"), "Plain description.")
+        self.assertEqual(
+            extract_skill_summary("Plain description.\nmore", "fb"), "Plain description."
+        )
 
     def test_empty_document_uses_the_default(self):
         """Invariant: an empty skill file yields the caller-supplied fallback name."""
@@ -83,8 +83,10 @@ class TestDiscovery(unittest.TestCase):
 
     def test_finds_project_skill_with_relative_path(self):
         """Invariant: a workspace skill is indexed by a path the agent can actually read."""
-        _write(self.workspace / ".microharness" / "skills" / "run-tests" / "SKILL.md",
-               "---\ndescription: Run tests\n---\nbody")
+        _write(
+            self.workspace / ".microharness" / "skills" / "run-tests" / "SKILL.md",
+            "---\ndescription: Run tests\n---\nbody",
+        )
         skills = discover_skills(self.workspace, self.global_dir)
         self.assertEqual(list(skills), ["run-tests"])
         self.assertEqual(skills["run-tests"].scope, "project")
@@ -101,8 +103,10 @@ class TestDiscovery(unittest.TestCase):
     def test_project_skill_shadows_global_skill(self):
         """Invariant: a same-named project skill cleanly replaces the global one."""
         _write(self.global_dir / "skills" / "deploy" / "SKILL.md", "# Global deploy\nglobal body")
-        _write(self.workspace / ".microharness" / "skills" / "deploy" / "SKILL.md",
-               "---\ndescription: Project deploy\n---\nproject body")
+        _write(
+            self.workspace / ".microharness" / "skills" / "deploy" / "SKILL.md",
+            "---\ndescription: Project deploy\n---\nproject body",
+        )
         skills = discover_skills(self.workspace, self.global_dir)
         self.assertEqual(len(skills), 1)
         self.assertEqual(skills["deploy"].scope, "project")
@@ -139,7 +143,9 @@ class TestRenderIndex(unittest.TestCase):
 
     def test_scope_badges_shown_when_scopes_are_mixed(self):
         """Invariant: mixing scopes makes provenance visible per entry."""
-        index = render_skills_index({"a": self._skill("a", "project"), "b": self._skill("b", "global")})
+        index = render_skills_index(
+            {"a": self._skill("a", "project"), "b": self._skill("b", "global")}
+        )
         self.assertIn("[project] a", index)
         self.assertIn("[global] b", index)
 
@@ -214,7 +220,9 @@ class TestResolveSkillCommand(unittest.TestCase):
         result = resolve_skill_command("/skill nope", self.skills)
         self.assertEqual(result.action, "skip")
         self.assertTrue(result.is_error)
-        self.assertEqual(result.message, "Skill 'nope' not found. Type /skill to view available skills.")
+        self.assertEqual(
+            result.message, "Skill 'nope' not found. Type /skill to view available skills."
+        )
 
     def test_out_of_range_number_is_an_error(self):
         """Invariant: an index past the end reports the valid range."""
