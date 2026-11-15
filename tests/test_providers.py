@@ -1598,15 +1598,15 @@ class TestGlobalAuthStorePrecedenceAndInspection(unittest.TestCase):
         or_status = statuses["openrouter"]
         self.assertTrue(or_status["configured"])
         self.assertEqual(or_status["effective_source"], "env (OPENROUTER_API_KEY)")
-        self.assertEqual(or_status["effective_masked"], "sk-o...3456")
+        self.assertEqual(or_status["effective_masked"], "****")
         self.assertTrue(or_status["has_auth_json"])
-        self.assertEqual(or_status["auth_json_masked"], "sk-o...4321")
+        self.assertEqual(or_status["auth_json_masked"], "****")
         self.assertEqual(or_status["other_sources"], ["auth.json", "config"])
 
         vercel_status = statuses["vercel"]
         self.assertTrue(vercel_status["configured"])
         self.assertEqual(vercel_status["effective_source"], "auth.json")
-        self.assertEqual(vercel_status["effective_masked"], "vck-...9999")
+        self.assertEqual(vercel_status["effective_masked"], "****")
         self.assertEqual(vercel_status["other_sources"], ["config"])
 
         lm_status = statuses["lmstudio"]
@@ -1617,6 +1617,9 @@ class TestGlobalAuthStorePrecedenceAndInspection(unittest.TestCase):
         self.assertNotIn(secret_env, serialized)
         self.assertNotIn(secret_store, serialized)
         self.assertNotIn(secret_vercel, serialized)
+        self.assertNotIn("sk-o", serialized)
+        self.assertNotIn("3456", serialized)
+        self.assertNotIn("9999", serialized)
 
 
 if __name__ == "__main__":

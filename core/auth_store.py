@@ -27,15 +27,10 @@ def get_auth_store_path(global_dir: Path | str | None) -> Path | None:
 
 
 def mask_secret(secret: str | None) -> str:
-    """Returns a redacted preview of a secret suitable for terminal/UI output."""
-    if not secret:
+    """Returns a fixed redacted placeholder when a secret is present without exposing any characters."""
+    if not secret or not isinstance(secret, str) or not secret.strip():
         return ""
-    clean = secret.strip()
-    if not clean:
-        return ""
-    if len(clean) < 12:
-        return "****"
-    return f"{clean[:4]}...{clean[-4:]}"
+    return "****"
 
 
 def _default_aliases() -> Mapping[str, str]:

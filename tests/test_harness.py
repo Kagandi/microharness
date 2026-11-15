@@ -2293,7 +2293,7 @@ class ProjectWeather:
                 json.dumps(
                     {
                         "models": {
-                            "fast": {"model": "gemini-2.5-flash", "provider": "google"},
+                            "fast": {"model": "gemini-2.5-flash", "provider": "google-ai-studio"},
                             "smart": {"model": "claude-3-5-sonnet", "provider": "anthropic"},
                         }
                     }
@@ -2304,6 +2304,7 @@ class ProjectWeather:
             harness = Harness(
                 model=initial_model,
                 workspace_dir=ws,
+                global_dir=ws / "global",
                 runs_dir=self.runs_dir,
                 verbose=False,
             )

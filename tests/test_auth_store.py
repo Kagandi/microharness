@@ -51,8 +51,10 @@ class TestAuthStorePrimitives(unittest.TestCase):
         self.assertEqual(mask_secret(None), "")
         self.assertEqual(mask_secret("   "), "")
         self.assertEqual(mask_secret("short-key"), "****")
-        self.assertEqual(mask_secret("sk-or-v1-1234567890abcdef"), "sk-o...cdef")
+        self.assertEqual(mask_secret("sk-or-v1-1234567890abcdef"), "****")
         self.assertNotIn("1234567890", mask_secret("sk-or-v1-1234567890abcdef"))
+        self.assertNotIn("sk-o", mask_secret("sk-or-v1-1234567890abcdef"))
+        self.assertNotIn("cdef", mask_secret("sk-or-v1-1234567890abcdef"))
 
     def test_save_creates_owner_only_atomic_file_and_canonicalizes_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -256,8 +258,10 @@ class TestCliAuthCommands(unittest.TestCase):
                         ]
                     )
                 list_text = list_out.getvalue()
-                self.assertIn("vercel             auth.json (vck-...9876)", list_text)
+                self.assertIn("vercel             auth.json (****)", list_text)
                 self.assertNotIn(secret, list_text)
+                self.assertNotIn("vck-", list_text)
+                self.assertNotIn("9876", list_text)
 
                 # 3. Logout removes stored entry
                 logout_out = io.StringIO()

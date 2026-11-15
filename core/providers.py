@@ -674,7 +674,7 @@ def login_provider_credential(
     return (
         True,
         canonical,
-        f"Saved credentials for '{canonical}' to {dest} ({mask_secret(clean_key)}){note}",
+        f"Saved credentials for '{canonical}' to {dest}{note}",
     )
 
 
