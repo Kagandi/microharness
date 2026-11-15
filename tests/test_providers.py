@@ -29,7 +29,7 @@ class TestRegistryLoading(unittest.TestCase):
     def test_builtin_registry_has_the_expected_providers(self):
         """Invariant: the committed providers.json seeds the well-known endpoints."""
         registry = load_builtin_providers()
-        for name in ("google", "openrouter", "openai", "anthropic", "bedrock"):
+        for name in ("google", "openrouter", "vercel", "openai", "anthropic", "bedrock"):
             self.assertIn(name, registry)
             self.assertTrue(registry[name]["endpoint"].startswith("https://"))
         for name in ("lmstudio", "vllm", "llamacpp", "ollama", "local"):
@@ -1210,6 +1210,187 @@ class TestResolveModelSpec(unittest.TestCase):
         """Invariant: with nothing configured the error says so instead of showing a blank list."""
         _, _, error = resolve_model_spec("gpt-4o", [], {})
         self.assertIn("none configured", error)
+
+
+class TestVercelAIGatewayProvider(unittest.TestCase):
+    """Vercel AI Gateway ships as an OpenAI-compatible multi-provider gateway."""
+
+    def test_builtin_registry_registers_vercel(self):
+        """Invariant: vercel is a built-in provider with the official AI Gateway profile."""
+        registry = load_builtin_providers()
+        self.assertIn("vercel", registry)
+        self.assertEqual(
+            registry["vercel"],
+            {
+                "endpoint": "https://ai-gateway.vercel.sh/v1",
+                "default_model": "anthropic/claude-sonnet-5.5",
+                "env_keys": [
+                    "AI_GATEWAY_API_KEY",
+                    "VERCEL_AI_GATEWAY_API_KEY",
+                    "VERCEL_OIDC_TOKEN",
+                ],
+                "headers": {
+                    "HTTP-Referer": "https://github.com/microharness",
+                    "X-Title": "microharness",
+                },
+                "reasoning_format": "gateway",
+                "cache_strategy": "gateway_auto",
+            },
+        )
+
+    def test_aliases_map_to_vercel(self):
+        """Invariant: friendly Vercel AI Gateway aliases resolve to the canonical 'vercel' key."""
+        registry = load_builtin_providers()
+        for alias in (
+            "vercel",
+            "vercel-ai-gateway",
+            "vercel_ai_gateway",
+            "vercel-gateway",
+            "vercel_gateway",
+            "ai-gateway",
+            "aigateway",
+            "Vercel-AI-Gateway",
+        ):
+            name, profile = resolve_provider(registry, alias)
+            self.assertEqual(name, "vercel")
+            self.assertEqual(profile["endpoint"], "https://ai-gateway.vercel.sh/v1")
+
+    def test_provider_prefixed_model_preserves_creator_prefix(self):
+        """Invariant: 'vercel/<creator>/<model>' strips only the outer gateway prefix."""
+        registry = load_builtin_providers()
+        req = parse_model_spec("vercel/anthropic/claude-sonnet-5.5", {}, registry)
+        self.assertEqual(
+            req,
+            ModelRequest(model="anthropic/claude-sonnet-5.5", provider="vercel"),
+        )
+        req_alias = parse_model_spec("vercel-ai-gateway/openai/gpt-4o", {}, registry)
+        self.assertEqual(
+            req_alias,
+            ModelRequest(model="openai/gpt-4o", provider="vercel"),
+        )
+
+    def test_resolve_model_spec_accepts_vercel_and_aliases(self):
+        """Invariant: /model accepts vercel, its aliases, and gateway-prefixed models."""
+        registry = load_builtin_providers()
+        self.assertEqual(
+            resolve_model_spec("vercel/openai/gpt-4o", [], registry),
+            (True, "vercel/openai/gpt-4o", ""),
+        )
+        self.assertEqual(
+            resolve_model_spec("vercel-ai-gateway/openai/gpt-4o", [], registry),
+            (True, "vercel-ai-gateway/openai/gpt-4o", ""),
+        )
+        self.assertEqual(
+            resolve_model_spec("vercel-ai-gateway", [], registry),
+            (True, "vercel-ai-gateway", ""),
+        )
+        ok, _, err = resolve_model_spec("unknown-gateway/openai/gpt-4o", [], registry)
+        self.assertFalse(ok)
+        self.assertIn("Unknown model", err)
+
+    def test_endpoint_match_maps_vercel_url(self):
+        """Invariant: Vercel AI Gateway base and completions URLs attribute to 'vercel'; lookalikes do not."""
+        registry = load_builtin_providers()
+        name, prof = find_provider_by_endpoint(registry, "https://ai-gateway.vercel.sh/v1")
+        self.assertEqual(name, "vercel")
+        self.assertEqual(prof["cache_strategy"], "gateway_auto")
+
+        name_full, _ = find_provider_by_endpoint(
+            registry, "https://ai-gateway.vercel.sh/v1/chat/completions"
+        )
+        self.assertEqual(name_full, "vercel")
+
+        self.assertEqual(
+            find_provider_by_endpoint(registry, "https://ai-gateway.evil.sh/v1"),
+            (None, {}),
+        )
+
+    def test_env_key_precedence_and_oidc_isolation(self):
+        """Invariant: AI_GATEWAY_API_KEY > VERCEL_AI_GATEWAY_API_KEY > VERCEL_OIDC_TOKEN, and OIDC never leaks to other providers."""
+        registry = load_builtin_providers()
+        profile = registry["vercel"]
+        self.assertIn("AI_GATEWAY_API_KEY", FALLBACK_ENV_KEYS)
+        self.assertIn("VERCEL_AI_GATEWAY_API_KEY", FALLBACK_ENV_KEYS)
+        self.assertNotIn("VERCEL_OIDC_TOKEN", FALLBACK_ENV_KEYS)
+
+        with patch.dict(
+            os.environ,
+            {
+                "AI_GATEWAY_API_KEY": "gw-key",
+                "VERCEL_AI_GATEWAY_API_KEY": "v-gw-key",
+                "VERCEL_OIDC_TOKEN": "oidc-tok",
+            },
+            clear=True,
+        ):
+            self.assertEqual(resolve_api_key(ModelRequest(), profile, {}), "gw-key")
+
+        with patch.dict(
+            os.environ,
+            {"VERCEL_AI_GATEWAY_API_KEY": "v-gw-key", "VERCEL_OIDC_TOKEN": "oidc-tok"},
+            clear=True,
+        ):
+            self.assertEqual(resolve_api_key(ModelRequest(), profile, {}), "v-gw-key")
+
+        with patch.dict(os.environ, {"VERCEL_OIDC_TOKEN": "oidc-tok"}, clear=True):
+            self.assertEqual(resolve_api_key(ModelRequest(), profile, {}), "oidc-tok")
+            self.assertIsNone(
+                resolve_api_key(ModelRequest(), registry["openai"], {})
+            )
+
+    def test_builds_http_client_and_missing_credentials_gate(self):
+        """Invariant: vercel specs build a gateway-configured HttpChatModel and enforce bearer credentials."""
+        registry = load_builtin_providers()
+        with patch.dict(os.environ, {}, clear=True):
+            offline_conn = resolve_connection("vercel/openai/gpt-4o", registry=registry)
+        self.assertTrue(offline_conn.missing_credentials)
+        self.assertEqual(offline_conn.endpoint, "https://ai-gateway.vercel.sh/v1")
+        self.assertEqual(offline_conn.model, "openai/gpt-4o")
+
+        with patch.dict(os.environ, {"AI_GATEWAY_API_KEY": "vck-test"}, clear=True):
+            conn = resolve_connection(
+                {"provider": "vercel-ai-gateway", "model": "openai/gpt-4o"},
+                registry=registry,
+            )
+            self.assertFalse(conn.missing_credentials)
+            model = build_model_from_spec(
+                "vercel-ai-gateway/openai/gpt-4o",
+                registry=registry,
+                cache_ttl="5m",
+                reasoning_effort="xhigh",
+            )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.endpoint, "https://ai-gateway.vercel.sh/v1/chat/completions")
+        self.assertEqual(model.model, "openai/gpt-4o")
+        self.assertEqual(model.provider, "vercel")
+        self.assertEqual(model.api_key, "vck-test")
+        self.assertEqual(model.reasoning_format, "gateway")
+        self.assertEqual(model.cache_strategy, "gateway_auto")
+        self.assertEqual(
+            model.extra_headers,
+            {"HTTP-Referer": "https://github.com/microharness", "X-Title": "microharness"},
+        )
+
+    def test_default_model_is_offered_in_discovery(self):
+        """Invariant: the vercel default appears in /model discovery."""
+        entries = get_available_models_from_config({}, load_builtin_providers())
+        by_name = {e["name"]: e for e in entries}
+        self.assertIn("vercel/anthropic/claude-sonnet-5.5", by_name)
+        self.assertEqual(
+            by_name["vercel/anthropic/claude-sonnet-5.5"]["provider"], "vercel"
+        )
+        self.assertEqual(
+            by_name["vercel/anthropic/claude-sonnet-5.5"]["model"],
+            "anthropic/claude-sonnet-5.5",
+        )
+
+    def test_model_module_never_names_vercel(self):
+        """Invariant: core/model.py stays provider-agnostic (no hardcoded vercel branch)."""
+        from pathlib import Path as _Path
+
+        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("vercel", source.lower())
 
 
 if __name__ == "__main__":

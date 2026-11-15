@@ -196,5 +196,77 @@ class TestOpenAIBreakpointCache(unittest.TestCase):
         self.assertNotIn("prompt_cache_breakpoint", json.dumps(payload))
 
 
+class TestGatewayAutoCache(unittest.TestCase):
+    def test_gateway_auto_injects_provider_options_exact_payload(self):
+        m = _client("gateway_auto", "5m")
+        messages = [
+            Message(role="system", content="System guidelines"),
+            Message(role="user", content="Fix the bug"),
+        ]
+        tools = [{"type": "function", "function": {"name": "bash"}}]
+        payload = m._build_payload(messages, tools)
+        self.assertEqual(
+            payload,
+            {
+                "model": "test",
+                "messages": [
+                    {"role": "system", "content": "System guidelines"},
+                    {"role": "user", "content": "Fix the bug"},
+                ],
+                "providerOptions": {"gateway": {"caching": "auto"}},
+                "tools": [{"type": "function", "function": {"name": "bash"}}],
+                "tool_choice": "auto",
+            },
+        )
+        # Normalized 1h also enables gateway auto caching without emitting Anthropic/OpenRouter headers.
+        m_hour = _client("gateway_auto", "1h")
+        self.assertEqual(
+            m_hour._build_payload(messages, tools),
+            payload,
+        )
+        self.assertEqual(m_hour._build_headers(), {"Content-Type": "application/json"})
+
+    def test_gateway_auto_absent_when_ttl_off(self):
+        m = _client("gateway_auto", "off")
+        messages = [
+            Message(role="system", content="System guidelines"),
+            Message(role="user", content="Hello"),
+        ]
+        payload = m._build_payload(messages, [])
+        self.assertEqual(
+            payload,
+            {
+                "model": "test",
+                "messages": [
+                    {"role": "system", "content": "System guidelines"},
+                    {"role": "user", "content": "Hello"},
+                ],
+            },
+        )
+        self.assertNotIn("providerOptions", payload)
+
+    def test_gateway_auto_applied_from_vercel_endpoint_without_explicit_flags(self):
+        m = HttpChatModel(
+            base_url="https://ai-gateway.vercel.sh/v1",
+            model="openai/gpt-4o",
+            api_key="vck-test",
+            cache_ttl="5m",
+        )
+        self.assertEqual(m.provider, "vercel")
+        self.assertEqual(m.cache_strategy, "gateway_auto")
+        self.assertEqual(m.reasoning_format, "gateway")
+        payload = m._build_payload([Message(role="user", content="hi")], [])
+        self.assertEqual(payload["providerOptions"], {"gateway": {"caching": "auto"}})
+        self.assertEqual(
+            m._build_headers(),
+            {
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/microharness",
+                "X-Title": "microharness",
+                "Authorization": "Bearer vck-test",
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

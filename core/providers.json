@@ -17,6 +17,17 @@
     "reasoning_format": "openrouter",
     "cache_strategy": "anthropic_block"
   },
+  "vercel": {
+    "endpoint": "https://ai-gateway.vercel.sh/v1",
+    "default_model": "anthropic/claude-sonnet-5.5",
+    "env_keys": ["AI_GATEWAY_API_KEY", "VERCEL_AI_GATEWAY_API_KEY", "VERCEL_OIDC_TOKEN"],
+    "headers": {
+      "HTTP-Referer": "https://github.com/microharness",
+      "X-Title": "microharness"
+    },
+    "reasoning_format": "gateway",
+    "cache_strategy": "gateway_auto"
+  },
   "openai": {
     "endpoint": "https://api.openai.com/v1",
     "default_model": "gpt-4o",
