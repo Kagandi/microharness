@@ -8,6 +8,8 @@ one of three actions for the caller to act on (:data:`EXIT`, :data:`TURN`, or
 
 from __future__ import annotations
 
+import getpass
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -97,9 +99,26 @@ class NullUI:
 class TuiUI:
     """Sink backed by a :class:`~core.tui.TUIState`."""
 
-    def __init__(self, state: Any, redraw: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        state: Any,
+        redraw: Callable[[], None] | None = None,
+        secret_prompter: Callable[[str], str | None] | None = None,
+    ):
         self.state = state
         self._redraw = redraw or (lambda: None)
+        self._secret_prompter = secret_prompter
+
+    @property
+    def supports_secret_prompt(self) -> bool:
+        """True when a masked interactive prompt callback is attached."""
+        return self._secret_prompter is not None
+
+    def prompt_secret(self, prompt: str) -> str | None:
+        """Prompts for a masked secret string via the attached TUI callback."""
+        if self._secret_prompter is not None:
+            return self._secret_prompter(prompt)
+        return None
 
     def info(self, text: str) -> None:
         self.state.add_system(text)
@@ -251,6 +270,22 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         takes_args=True,
     ),
     CommandSpec(
+        "login",
+        ("/login",),
+        "/login [provider]",
+        "Configure or update a provider API key in auth.json",
+        "_cmd_login",
+        takes_args=True,
+    ),
+    CommandSpec(
+        "logout",
+        ("/logout",),
+        "/logout [provider]",
+        "Remove stored credentials for a provider from auth.json",
+        "_cmd_logout",
+        takes_args=True,
+    ),
+    CommandSpec(
         "exit",
         ("/exit", "/quit"),
         "/exit",
@@ -370,6 +405,18 @@ def render_session_lines(sessions: list[dict[str, Any]]) -> list[str]:
         f"{' [this repo]' if session.get('matches_workspace') else ''} "
         f"- {format_session_desc(session)}"
         for index, session in enumerate(sessions, start=1)
+    ]
+
+
+def render_provider_auth_lines(statuses: list[dict[str, Any]]) -> list[str]:
+    """Renders provider credential status lines without exposing full secrets."""
+    if not statuses:
+        return ["  (no providers configured)"]
+    from core.providers import format_provider_auth_line
+
+    return [
+        format_provider_auth_line(entry, index=index)
+        for index, entry in enumerate(statuses, start=1)
     ]
 
 
@@ -650,3 +697,124 @@ class CommandRouter:
         if hits := render_cache_hits(stats):
             self.ctx.ui.status(hits)
         self.ctx.ui.status(CACHE_USAGE)
+
+    def _refresh_tui_providers(self) -> None:
+        state = getattr(self.ctx.ui, "state", None)
+        setter = getattr(state, "set_available_providers", None) if state is not None else None
+        if callable(setter):
+            setter(self.ctx.harness.get_auth_statuses())
+
+    def _prompt_api_key(self, canonical: str) -> tuple[bool, str | None]:
+        """Obtains an API key from UI secret prompt or getpass.
+
+        Returns ``(handled, api_key)`` where ``handled=False`` means no
+        interactive prompt mechanism was available.
+        """
+        prompt_fn = getattr(self.ctx.ui, "prompt_secret", None)
+        supports_prompt = getattr(self.ctx.ui, "supports_secret_prompt", True)
+        if callable(prompt_fn) and supports_prompt:
+            secret = prompt_fn(f"API key for {canonical} (Enter to save, Esc to cancel): ")
+            return True, secret
+        if sys.stdin.isatty():
+            try:
+                return True, getpass.getpass(f"API key for {canonical}: ")
+            except (EOFError, KeyboardInterrupt):
+                return True, None
+        return False, None
+
+    def _cmd_login(self, arg: str) -> str:
+        harness = self.ctx.harness
+        if not arg:
+            self.ctx.ui.info("🔑 Provider Credentials:")
+            for line in render_provider_auth_lines(harness.get_auth_statuses()):
+                self.ctx.ui.status(line)
+            self.ctx.ui.status(
+                "Tip: Type /login <provider|number> to configure a provider key in auth.json."
+            )
+            self.ctx.ui.refresh()
+            return SKIP
+
+        from core.providers import PROVIDER_ALIASES
+
+        clean_arg = arg.strip()
+        lowered_arg = clean_arg.lower()
+        matched_alias = next(
+            (
+                alias
+                for alias in sorted(PROVIDER_ALIASES, key=len, reverse=True)
+                if lowered_arg == alias
+                or lowered_arg.startswith(f"{alias} ")
+                or lowered_arg.startswith(f"{alias}\t")
+            ),
+            None,
+        )
+        if matched_alias is not None:
+            provider_spec = clean_arg[: len(matched_alias)]
+            rest = clean_arg[len(matched_alias) :].strip()
+            inline_key = rest or None
+        else:
+            parts = clean_arg.split(None, 1)
+            provider_spec = parts[0]
+            inline_key = parts[1].strip() if len(parts) > 1 else None
+
+        ok, canonical, error = harness.resolve_auth_provider(provider_spec)
+        if not ok:
+            self.ctx.ui.error(error)
+            self.ctx.ui.refresh()
+            return SKIP
+
+        if inline_key is not None:
+            api_key: str | None = inline_key
+        else:
+            handled, api_key = self._prompt_api_key(canonical)
+            if not handled:
+                self.ctx.ui.error(
+                    "Cannot prompt for API key in non-interactive mode. "
+                    "Use /login <provider> <key> or 'microharness auth login <provider>'."
+                )
+                self.ctx.ui.refresh()
+                return SKIP
+            if api_key is None:
+                self.ctx.ui.info("Login cancelled.")
+                self.ctx.ui.refresh()
+                return SKIP
+
+        if not api_key.strip():
+            self.ctx.ui.error("Aborted: API key cannot be empty.")
+            self.ctx.ui.refresh()
+            return SKIP
+
+        saved, message = harness.login_provider(canonical, api_key)
+        if saved:
+            self.ctx.ui.success(message)
+            self._refresh_tui_providers()
+        else:
+            self.ctx.ui.error(message)
+        self.ctx.ui.refresh()
+        return SKIP
+
+    def _cmd_logout(self, arg: str) -> str:
+        harness = self.ctx.harness
+        if not arg:
+            stored = [s for s in harness.get_auth_statuses() if s.get("has_auth_json")]
+            if not stored:
+                self.ctx.ui.info("ℹ️ No credentials currently stored in auth.json.")
+            else:
+                self.ctx.ui.info("🔑 Stored Credentials (auth.json):")
+                for index, entry in enumerate(stored, start=1):
+                    masked = entry.get("auth_json_masked") or "****"
+                    self.ctx.ui.status(f"  {index}. {entry['provider']:<18} ({masked})")
+                self.ctx.ui.status(
+                    "Tip: Type /logout <provider|number> to remove stored credentials."
+                )
+            self.ctx.ui.refresh()
+            return SKIP
+
+        ok, message = harness.logout_provider(arg)
+        if ok:
+            self.ctx.ui.success(message)
+            self._refresh_tui_providers()
+        else:
+            self.ctx.ui.error(message)
+        self.ctx.ui.refresh()
+        return SKIP

@@ -6,6 +6,7 @@ Instructions and project conventions for AI agents operating on `microharness`.
 - **Zero Runtime Dependencies**: The core harness must only rely on Python's standard library. Do not add runtime dependencies to `pyproject.toml`.
 - **Pluggability**: Components must implement minimal protocols (`Model`, `Tool`, `Evaluator`). Never introduce provider-specific subclasses or hardcoded branching.
 - **Testing Standard**: Every feature must include rigorous unit tests in `tests/`. Never write tautological "pass-through" assertions (`assertIn(result, [A, B, C])`). Always use strict equality and test negative failure cases.
+- **Version Bumping**: Bump the package version (SemVer patch/minor/major as appropriate) when making user-facing or functional changes, keeping `pyproject.toml`, `microharness/__init__.py`, `core/__init__.py`, `tests/test_package.py`, and `uv.lock` (via `uv lock`) in sync.
 - **Verification**: Run `uv run pytest` and verify formatting/linting with `uv run ruff check .` and `uv run ruff format --check .` (or `uv run pre-commit run --all-files`) before concluding any changes.
 
 ## CI & Quality Automation

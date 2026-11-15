@@ -59,7 +59,7 @@ Configure your baseline model, endpoint, API key, and limits globally or overrid
   "models": {
     "fast": {
       "model": "gemini-2.5-flash",
-      "provider": "google",
+      "provider": "google-ai-studio",
       "description": "Fast flash model"
     },
     "smart": {
@@ -84,10 +84,30 @@ To preserve prior behavior, set `max_tool_tokens`/`max_context_tokens` explicitl
 
 #### Precedence Hierarchy:
 1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
-2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`)
-3. **Project Config** (`.microharness/config.json`) — *Project overrides*
-4. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
-5. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`, or provider keys like `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `AI_GATEWAY_API_KEY`)
+3. **Global Credential Store** (`~/.microharness/auth.json`) — *Per-provider API keys via `microharness auth login` or `/login`*
+4. **Project Config** (`.microharness/config.json`) — *Project overrides*
+5. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
+6. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+
+#### Provider Credentials (`~/.microharness/auth.json` & `microharness auth`)
+Store API keys once per provider in `~/.microharness/auth.json` instead of duplicating secrets in `config.json`:
+
+```bash
+# Store or update a provider API key interactively (masked prompt, written with 0600 permissions):
+uv run microharness auth login openrouter
+
+# Or pick from an interactive numbered list of known providers:
+uv run microharness auth login
+
+# Inspect configured providers and effective credential sources (secrets are masked):
+uv run microharness auth list
+
+# Remove a stored provider credential from auth.json:
+uv run microharness auth logout openrouter
+```
+
+Pass `--global-dir <dir>` (or `-d <project-dir>`) to any `microharness auth` subcommand to target a custom configuration directory. Credentials are stored per canonical provider name (for example `openrouter`, `google-ai-studio`, `vercel`, `openai`, `anthropic`) and resolve in this order: explicit CLI/model-spec key $\to$ provider environment variables (`env_keys`) $\to$ `~/.microharness/auth.json` $\to$ `providers.json` `api_key` (literal or `env:VAR`) $\to$ fallback environment variables $\to$ top-level `config.json` `"api_key"`.
 
 #### Amazon Bedrock
 `bedrock` is a built-in provider that targets Bedrock's official OpenAI-compatible endpoint.
@@ -262,6 +282,8 @@ You:
 You can inspect or control the harness runtime directly:
 
 * **`/model [name|number]`**: Inspect available models or switch active model dynamically on the fly (e.g. `/model fast` or `/model 2`). In TUI mode, Tab autocompletes configured model names. A name is matched against the `models` aliases in `config.json`, their underlying model ids, and the provider registry (`openai` or `openai/gpt-4o` both work). An unrecognized name is **rejected with the list of valid models** rather than silently constructing a client for a model that does not exist. The `--model` startup flag applies the same recognition rules but only warns on stderr, so it remains usable for endpoints whose provider is not in the registry.
+* **`/login [provider|number] [key]`**: List providers and their effective credential sources without exposing secrets, or store/update an API key for a provider in `~/.microharness/auth.json` (prompts with masked input when the key is omitted; Tab autocompletes providers in TUI mode).
+* **`/logout [provider|number]`**: List providers with keys stored in `~/.microharness/auth.json`, or remove stored credentials for a provider.
 * **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place. Discovery reads only the newest sessions first and falls back to a full scan when your repository has no recent session, so an older session for the same repo stays reachable.
 * **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
 * **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
@@ -292,7 +314,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 730+ unit and integration tests run in ~5s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
+*(All 770+ unit and integration tests run in ~5s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
 
 ### 3. Interactive and TUI Sessions
 ```bash
@@ -457,6 +479,7 @@ microharness/
 │   ├── protocols.py    # Model protocol, capability protocols (cache, deadline, cancel) & cancellation
 │   ├── usage.py        # Token normalization, per-model telemetry & run-level totals
 │   ├── providers.py    # Provider registry, model-spec resolution & client construction
+│   ├── auth_store.py   # Per-provider global credential store (~/.microharness/auth.json)
 │   ├── model.py        # Generic HttpChatModel & MockModel clients
 │   ├── config.py       # Cascading configuration, JSONC reading & setting resolution
 │   ├── skills.py       # Progressive-disclosure skills (discovery, summaries, activation)
@@ -471,6 +494,7 @@ microharness/
 │   ├── tui_session.py  # TUI turn driver: step rendering & cooperative cancellation
 │   └── harness.py      # Harness orchestrator wiring the chassis together
 └── tests/
+    ├── test_auth_store.py  # Global auth.json storage, permissions & masking tests
     ├── test_benchmarks.py  # Mini-SWE baseline failure, anti-cheating & reference tests
     ├── test_harbor.py      # Harbor task parsing, Docker image validation & evaluator tests
     ├── test_environment.py # Path sandboxing & bash timeout tests

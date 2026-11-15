@@ -7,7 +7,10 @@ from core.types import RunResult, Task, ToolCall
 
 class TestPackageExports(unittest.TestCase):
     def test_package_metadata(self):
-        self.assertEqual(microharness.__version__, "0.1.0")
+        import core
+
+        self.assertEqual(microharness.__version__, "0.1.1")
+        self.assertEqual(core.__version__, "0.1.1")
         self.assertEqual(
             microharness.__all__, ["Harness", "Task", "ToolCall", "RunResult", "__version__"]
         )

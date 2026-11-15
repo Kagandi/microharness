@@ -46,10 +46,17 @@ from core.model import (
 )
 from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt, load_agents_instructions
 from core.providers import (
+    ModelRequest,
     build_model_from_spec,
     get_available_models_from_config,
+    inspect_provider_auth_statuses,
+    login_provider_credential,
+    logout_provider_credential,
+    resolve_api_key,
+    resolve_auth_provider,
     resolve_model_context_tokens,
     resolve_model_spec,
+    resolve_provider,
 )
 from core.session import (
     find_recent_sessions,
@@ -338,6 +345,7 @@ class Harness:
                 registry=self.provider_registry,
                 cache_ttl=self.cache_ttl,
                 reasoning_effort=self.reasoning_effort,
+                global_dir=self.global_dir,
             )
         except Exception as exc:
             return False, f"Failed to switch model to '{spec}': {exc}", self.model
@@ -364,6 +372,73 @@ class Harness:
         suffix = f" [{provider}]" if provider else ""
         name = self.active_model_name() or str(target_spec)
         return True, f"Switched model to {name}{suffix}", new_model
+
+    def get_auth_statuses(self) -> list[dict[str, Any]]:
+        """Returns per-provider credential statuses without exposing full secrets."""
+        return inspect_provider_auth_statuses(
+            self.provider_registry,
+            self.merged_config,
+            self.global_dir,
+        )
+
+    def resolve_auth_provider(self, spec: str) -> tuple[bool, str, str]:
+        """Resolves a provider name, alias, or 1-based index into a canonical provider."""
+        return resolve_auth_provider(
+            spec,
+            self.provider_registry,
+            self.merged_config,
+            self.global_dir,
+        )
+
+    def _refresh_active_model_api_key(self, canonical: str) -> None:
+        """Syncs the active model's in-memory bearer key with current credentials."""
+        active_provider, _ = resolve_provider(
+            self.provider_registry, getattr(self.model, "provider", None)
+        )
+        if active_provider != canonical or getattr(self.model, "auth_scheme", "bearer") != "bearer":
+            return
+        profile = self.provider_registry.get(canonical, {})
+        effective = resolve_api_key(
+            ModelRequest(),
+            profile,
+            self.merged_config,
+            provider=canonical,
+            global_dir=self.global_dir,
+        )
+        if hasattr(self.model, "api_key"):
+            self.model.api_key = effective
+        if isinstance(getattr(self.model, "auth_secrets", None), dict):
+            if effective is None:
+                self.model.auth_secrets.pop("api_key", None)
+            else:
+                self.model.auth_secrets["api_key"] = effective
+
+    def login_provider(self, provider: str, api_key: str) -> tuple[bool, str]:
+        """Saves an API key for ``provider`` to ``<global_dir>/auth.json``."""
+        ok, canonical, message = login_provider_credential(
+            provider,
+            api_key,
+            registry=self.provider_registry,
+            config=self.merged_config,
+            global_dir=self.global_dir,
+        )
+        if not ok:
+            return False, message
+
+        self._refresh_active_model_api_key(canonical)
+        return True, message
+
+    def logout_provider(self, provider: str) -> tuple[bool, str]:
+        """Removes stored credentials for ``provider`` from ``<global_dir>/auth.json``."""
+        ok, removed, canonical, message = logout_provider_credential(
+            provider,
+            registry=self.provider_registry,
+            config=self.merged_config,
+            global_dir=self.global_dir,
+        )
+        if ok and removed and canonical:
+            self._refresh_active_model_api_key(canonical)
+        return (ok and removed), message
 
     def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
         """Finds recent runs in runs_dir with workspace affinity."""
@@ -723,7 +798,11 @@ class Harness:
         turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
         tui = CursesTUI(state)
-        ui = TuiUI(state, redraw=lambda: tui.request_redraw() if tui.stdscr else None)
+        ui = TuiUI(
+            state,
+            redraw=lambda: tui.request_redraw() if tui.stdscr else None,
+            secret_prompter=tui.request_secret,
+        )
         router = self._make_router(
             memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=True
         )
@@ -786,6 +865,7 @@ class Harness:
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.set_available_models(self.get_available_models())
         state.set_available_sessions(self.find_recent_sessions(limit=15))
+        state.set_available_providers(self.get_auth_statuses())
         return state
 
     def _replay_resumed_session(self, state: Any, memory: Memory, resume: Any) -> int:

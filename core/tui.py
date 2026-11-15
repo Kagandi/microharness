@@ -35,6 +35,16 @@ SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
         " Reasoning / Thinking Effort ",
         "Switch reasoning effort level",
     ),
+    "login": (
+        ("/login",),
+        " Provider Login ",
+        "Store or update an API key for a provider",
+    ),
+    "logout": (
+        ("/logout",),
+        " Provider Logout ",
+        "Remove stored credentials for a provider",
+    ),
 }
 
 
@@ -46,6 +56,8 @@ MENU_COLUMN_BOUNDS: dict[str, tuple[int, int]] = {
     "model": (20, 36),
     "resume": (26, 38),
     "reasoning": (12, 16),
+    "login": (18, 28),
+    "logout": (18, 28),
 }
 FILE_MENU_COLUMN_BOUNDS = (24, 42)
 
@@ -519,6 +531,7 @@ class TUIState:
         self.skills: dict[str, Any] = {}
         self.available_models: list[dict[str, Any]] = []
         self.available_sessions: list[dict[str, Any]] = []
+        self.available_providers: list[dict[str, Any]] = []
         self.workspace_files: list[str] = []
         self.selected_command_idx: int = 0
         self.turn_active: bool = False
@@ -543,6 +556,10 @@ class TUIState:
     def set_available_sessions(self, sessions: list[dict[str, Any]]) -> None:
         """Loads available previous sessions for /resume autocomplete."""
         self.available_sessions = list(sessions)
+
+    def set_available_providers(self, providers: list[dict[str, Any]]) -> None:
+        """Loads available providers and auth statuses for /login and /logout autocomplete."""
+        self.available_providers = list(providers)
 
     def set_workspace_files(self, files: list[str]) -> None:
         """Loads workspace relative file paths for @ file tagging and autocomplete."""
@@ -692,6 +709,22 @@ class TUIState:
                 if not sub
                 or model.get("name", "").lower().startswith(sub)
                 or (model.get("model") or "").lower().startswith(sub)
+            ]
+        if kind == "login":
+            return [
+                (p.get("provider", ""), f"[{p.get('effective_source', 'not configured')}]")
+                for p in self.available_providers
+                if not sub or p.get("provider", "").lower().startswith(sub.lower())
+            ]
+        if kind == "logout":
+            return [
+                (
+                    p.get("provider", ""),
+                    f"[auth.json: {p.get('auth_json_masked') or '****'}]",
+                )
+                for p in self.available_providers
+                if p.get("has_auth_json")
+                and (not sub or p.get("provider", "").lower().startswith(sub.lower()))
             ]
         return [
             (session.get("run_id", ""), format_session_desc(session, preview_limit=35))
@@ -1111,10 +1144,42 @@ class CursesTUI:
         self._draw_lock = threading.Lock()
         self.worker_thread: threading.Thread | None = None
         self._last_frame_at: float = time.monotonic()
+        self._secret_lock = threading.Lock()
+        self._secret_prompt: str | None = None
+        self._secret_buffer: str = ""
+        self._secret_event: threading.Event | None = None
+        self._secret_result: str | None = None
 
     def request_redraw(self) -> None:
         """Schedules a thread-safe redraw for the next main loop iteration."""
         self._redraw_requested = True
+
+    def request_secret(self, prompt: str) -> str | None:
+        """Prompts for masked secret input in the TUI input bar from a worker thread."""
+        if self.stdscr is None:
+            return None
+        event = threading.Event()
+        with self._secret_lock:
+            self._secret_prompt = prompt
+            self._secret_buffer = ""
+            self._secret_result = None
+            self._secret_event = event
+        self.request_redraw()
+        event.wait()
+        with self._secret_lock:
+            result = self._secret_result
+            self._secret_result = None
+            self._secret_event = None
+        return result
+
+    def _finish_secret_prompt(self, value: str | None) -> None:
+        with self._secret_lock:
+            self._secret_result = value
+            self._secret_prompt = None
+            self._secret_buffer = ""
+            event = self._secret_event
+        if event is not None:
+            event.set()
 
     def _init_colors(self) -> None:
         try:
@@ -1148,7 +1213,8 @@ class CursesTUI:
             layout = self._screen_layout(h)
             self._draw_transcript(stdscr, w, layout)
             self._draw_status(stdscr, w, layout)
-            self._draw_autocomplete(stdscr, w, layout)
+            if self._secret_prompt is None:
+                self._draw_autocomplete(stdscr, w, layout)
             self._draw_input(stdscr, w, layout)
             stdscr.refresh()
 
@@ -1402,6 +1468,22 @@ class CursesTUI:
 
     def _draw_input(self, stdscr: Any, w: int, layout: "ScreenLayout") -> None:
         """Draws the bottom-anchored prompt and places the cursor."""
+        if self._secret_prompt is not None:
+            raw_prompt = self._secret_prompt
+            max_prompt = max(4, w - 8)
+            label = raw_prompt if len(raw_prompt) <= max_prompt else raw_prompt[:max_prompt]
+            available = max(5, w - len(label) - 1)
+            masked = "*" * len(self._secret_buffer)
+            visible = masked[-available:] if len(masked) > available else masked
+            y = layout.input_start_row
+            try:
+                stdscr.addstr(y, 0, label, curses.A_BOLD)
+                stdscr.addstr(y, len(label), visible)
+                stdscr.move(y, min(w - 1, len(label) + len(visible)))
+            except curses.error:
+                pass
+            return
+
         prompt, continuation = "> ", "  "
         available = max(5, w - len(prompt) - 2)
         lines = self.state.input_buffer.split("\n")
@@ -1465,6 +1547,31 @@ class CursesTUI:
             self.state.input_buffer = f"{completed} "
             self.state.cursor_pos = len(self.state.input_buffer)
 
+    def _handle_secret_key(self, ch: str | int) -> bool:
+        """Processes one keystroke while a masked secret prompt is active."""
+        if ch == curses.KEY_RESIZE:
+            if self.stdscr:
+                self.stdscr.clear()
+            return True
+        if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
+            with self._secret_lock:
+                value = self._secret_buffer
+            self._finish_secret_prompt(value)
+            return True
+        if ch in (27, "\x1b"):
+            self._finish_secret_prompt(None)
+            return True
+        if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08", 127):
+            with self._secret_lock:
+                if self._secret_buffer:
+                    self._secret_buffer = self._secret_buffer[:-1]
+            return True
+        if isinstance(ch, str) and ch.isprintable():
+            with self._secret_lock:
+                self._secret_buffer += ch
+            return True
+        return True
+
     def handle_key(self, ch: str | int, on_user_submit: Callable[[str], None]) -> bool:
         """Processes a single keystroke event.
 
@@ -1479,6 +1586,9 @@ class CursesTUI:
                 decoded_char = decode_terminal_sequence(ch)
                 if decoded_char:
                     ch = decoded_char
+
+        if self._secret_prompt is not None:
+            return self._handle_secret_key(ch)
 
         file_matches = self.state.get_matching_file_tags()
         cmd_matches = self.state.get_matching_commands()
@@ -1680,6 +1790,10 @@ class CursesTUI:
                 try:
                     ch = stdscr.get_wch()
                 except (KeyboardInterrupt, EOFError):
+                    if self._secret_prompt is not None:
+                        self._finish_secret_prompt(None)
+                        self.draw(stdscr)
+                        continue
                     if self.state.turn_active:
                         self._cancel_requested = True
                         self.state.add_system("⚠️ Cancellation requested...")
@@ -1701,6 +1815,7 @@ class CursesTUI:
                     break
                 self.draw(stdscr)
 
+            self._finish_secret_prompt(None)
             if self.worker_thread and self.worker_thread.is_alive():
                 self._cancel_requested = True
                 self.worker_thread.join(timeout=5.0)

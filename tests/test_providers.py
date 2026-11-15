@@ -5,15 +5,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from core.auth_store import save_auth_credential
 from core.model import HttpChatModel, MockModel
 from core.providers import (
     FALLBACK_ENV_KEYS,
     LAST_RESORT_MODEL,
+    PROVIDER_ALIASES,
     Connection,
     ModelRequest,
     build_model_from_spec,
     find_provider_by_endpoint,
     get_available_models_from_config,
+    inspect_provider_auth_statuses,
     load_builtin_providers,
     load_provider_registry,
     parse_model_spec,
@@ -29,7 +32,14 @@ class TestRegistryLoading(unittest.TestCase):
     def test_builtin_registry_has_the_expected_providers(self):
         """Invariant: the committed providers.json seeds the well-known endpoints."""
         registry = load_builtin_providers()
-        for name in ("google", "openrouter", "vercel", "openai", "anthropic", "bedrock"):
+        for name in (
+            "google-ai-studio",
+            "openrouter",
+            "vercel",
+            "openai",
+            "anthropic",
+            "bedrock",
+        ):
             self.assertIn(name, registry)
             self.assertTrue(registry[name]["endpoint"].startswith("https://"))
         for name in ("lmstudio", "vllm", "llamacpp", "ollama", "local"):
@@ -101,7 +111,7 @@ class TestRegistryLoading(unittest.TestCase):
 
 class TestProviderResolution(unittest.TestCase):
     REGISTRY = {
-        "google": {
+        "google-ai-studio": {
             "endpoint": "https://google/v1",
             "default_model": "gemini",
             "env_keys": ["MY_KEY"],
@@ -110,9 +120,13 @@ class TestProviderResolution(unittest.TestCase):
     }
 
     def test_alias_maps_to_canonical_name(self):
-        """Invariant: friendly aliases resolve to the registry's canonical key."""
-        self.assertEqual(resolve_provider(self.REGISTRY, "gemini")[0], "google")
+        """Invariant: friendly spelling aliases resolve to canonical key while google/gemini/gcp stay distinct."""
+        self.assertEqual(resolve_provider(self.REGISTRY, "google ai studio")[0], "google-ai-studio")
+        self.assertEqual(resolve_provider(self.REGISTRY, "google_ai_studio")[0], "google-ai-studio")
         self.assertEqual(resolve_provider(self.REGISTRY, "open-router")[0], "openrouter")
+        self.assertEqual(resolve_provider(self.REGISTRY, "gemini"), ("gemini", {}))
+        self.assertEqual(resolve_provider(self.REGISTRY, "google"), ("google", {}))
+        self.assertEqual(resolve_provider(self.REGISTRY, "gcp"), ("gcp", {}))
 
     def test_resolution_is_case_insensitive_and_returns_a_copy(self):
         """Invariant: callers cannot mutate the registry through a resolved profile."""
@@ -148,7 +162,7 @@ class TestProviderResolution(unittest.TestCase):
 
 class TestAvailableModels(unittest.TestCase):
     REGISTRY = {
-        "google": {"default_model": "gemini-2.5-pro", "description": "Google"},
+        "google-ai-studio": {"default_model": "gemini-2.5-pro", "description": "Google AI Studio"},
         "openai": {"default_model": "gpt-4o", "description": "OpenAI"},
     }
 
@@ -174,7 +188,7 @@ class TestAvailableModels(unittest.TestCase):
                 "models": {
                     "fast": {
                         "model": "gemini-2.5-flash",
-                        "provider": "google",
+                        "provider": "google-ai-studio",
                         "description": "Fast",
                         "endpoint": "https://x/v1",
                     }
@@ -182,16 +196,18 @@ class TestAvailableModels(unittest.TestCase):
             },
             self.REGISTRY,
         )
-        self.assertEqual(entries[0]["provider"], "google")
+        self.assertEqual(entries[0]["provider"], "google-ai-studio")
         self.assertEqual(entries[0]["description"], "Fast")
         self.assertEqual(entries[0]["endpoint"], "https://x/v1")
 
     def test_provider_is_inferred_from_a_prefixed_id(self):
-        """Invariant: 'google/gemini-2.5-flash' resolves its provider from the prefix."""
+        """Invariant: 'google-ai-studio/gemini-2.5-pro' resolves its provider without hijacking 'google/...'."""
         entries = get_available_models_from_config(
-            {"models": ["google/gemini-2.5-flash"]}, self.REGISTRY
+            {"models": ["google-ai-studio/gemini-2.5-pro", "google/gemini-2.5-flash"]},
+            self.REGISTRY,
         )
-        self.assertEqual(entries[0]["provider"], "google")
+        self.assertEqual(entries[0]["provider"], "google-ai-studio")
+        self.assertEqual(entries[1]["provider"], "google")
 
     def test_list_object_uses_name_alias_over_model(self):
         """Invariant: a display name in the config wins over the raw model id."""
@@ -218,7 +234,7 @@ class TestAvailableModels(unittest.TestCase):
     def test_fallback_lists_configured_model_then_provider_defaults(self):
         """Invariant: with no models key, the active model and provider defaults are offered."""
         entries = get_available_models_from_config(
-            {"model": "my-model", "provider": "google"}, self.REGISTRY
+            {"model": "my-model", "provider": "google-ai-studio"}, self.REGISTRY
         )
         self.assertEqual(entries[0]["name"], "my-model")
         self.assertEqual([e["model"] for e in entries[1:]], ["gemini-2.5-pro", "gpt-4o"])
@@ -231,12 +247,18 @@ class TestAvailableModels(unittest.TestCase):
 
 
 class TestParseModelSpec(unittest.TestCase):
-    REGISTRY = {"google": {"endpoint": "https://google/v1"}}
+    REGISTRY = {"google-ai-studio": {"endpoint": "https://google/v1"}}
 
     def test_provider_prefixed_spec(self):
-        """Invariant: 'google/gemini' splits into provider and model."""
-        request = parse_model_spec("google/gemini-2.5-flash", {}, self.REGISTRY)
-        self.assertEqual(request, ModelRequest(model="gemini-2.5-flash", provider="google"))
+        """Invariant: 'google-ai-studio/gemini' splits into provider and model while 'google/...' does not."""
+        request_canon = parse_model_spec("google-ai-studio/gemini-2.5-flash", {}, self.REGISTRY)
+        self.assertEqual(
+            request_canon, ModelRequest(model="gemini-2.5-flash", provider="google-ai-studio")
+        )
+        request_unaliased = parse_model_spec("google/gemini-2.5-flash", {}, self.REGISTRY)
+        self.assertEqual(
+            request_unaliased, ModelRequest(model="google/gemini-2.5-flash", provider=None)
+        )
 
     def test_unknown_prefix_stays_part_of_the_model_id(self):
         """Invariant: a slash that is not a known provider does not split the model id."""
@@ -1385,6 +1407,219 @@ class TestVercelAIGatewayProvider(unittest.TestCase):
 
         source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(encoding="utf-8")
         self.assertNotIn("vercel", source.lower())
+
+
+class TestGlobalAuthStorePrecedenceAndInspection(unittest.TestCase):
+    def test_resolve_api_key_six_tier_precedence(self):
+        """Invariant: explicit > profile env_keys > auth.json > profile api_key > fallback env > config api_key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            save_auth_credential(
+                global_dir, "openrouter", "auth-json-key", aliases=PROVIDER_ALIASES
+            )
+
+            profile_with_env = {
+                "name": "openrouter",
+                "env_keys": ["OPENROUTER_API_KEY"],
+                "api_key": "profile-literal-key",
+            }
+            config = {"api_key": "config-key"}
+
+            # 1. Explicit request wins over everything
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "env-key"}, clear=True):
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(api_key="explicit-key"),
+                        profile_with_env,
+                        config,
+                        provider="openrouter",
+                        global_dir=global_dir,
+                    ),
+                    "explicit-key",
+                )
+
+                # 2. Provider env_keys win over auth.json, profile api_key, config
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        profile_with_env,
+                        config,
+                        provider="openrouter",
+                        global_dir=global_dir,
+                    ),
+                    "env-key",
+                )
+
+            # 3. auth.json wins over profile api_key (literal or env:VAR) and config
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        profile_with_env,
+                        config,
+                        provider="openrouter",
+                        global_dir=global_dir,
+                    ),
+                    "auth-json-key",
+                )
+
+            # 4. Profile api_key (literal and env:VAR) wins over fallback env and config
+            profile_env_ref = {"name": "custom", "api_key": "env:CUSTOM_PROFILE_TOKEN"}
+            with patch.dict(
+                os.environ,
+                {"CUSTOM_PROFILE_TOKEN": "from-env-ref", "GEMINI_API_KEY": "fallback-gemini"},
+                clear=True,
+            ):
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        profile_env_ref,
+                        config,
+                        provider="custom",
+                        global_dir=global_dir,
+                    ),
+                    "from-env-ref",
+                )
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "fallback-gemini"}, clear=True):
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        {"name": "custom", "api_key": "literal-key"},
+                        config,
+                        provider="custom",
+                        global_dir=global_dir,
+                    ),
+                    "literal-key",
+                )
+
+                # 5. Fallback env applies when profile declares no env_keys
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        {"name": "custom"},
+                        config,
+                        provider="custom",
+                        global_dir=global_dir,
+                    ),
+                    "fallback-gemini",
+                )
+
+            # 6. Top-level config.api_key is last resort
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    resolve_api_key(
+                        ModelRequest(),
+                        {"name": "custom"},
+                        config,
+                        provider="custom",
+                        global_dir=global_dir,
+                    ),
+                    "config-key",
+                )
+
+    def test_unrelated_provider_env_var_does_not_hijack_provider_with_env_keys(self):
+        """Invariant: GEMINI_API_KEY in env never leaks into openrouter when auth.json is absent or present."""
+        registry = load_builtin_providers()
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "gem-only"}, clear=True):
+                conn_missing = resolve_connection(
+                    "openrouter/openai/gpt-4o", registry=registry, global_dir=global_dir
+                )
+                self.assertTrue(conn_missing.missing_credentials)
+                self.assertIsNone(conn_missing.api_key)
+
+                save_auth_credential(
+                    global_dir, "openrouter", "or-stored", aliases=PROVIDER_ALIASES
+                )
+                conn_stored = resolve_connection(
+                    "openrouter/openai/gpt-4o", registry=registry, global_dir=global_dir
+                )
+                self.assertFalse(conn_stored.missing_credentials)
+                self.assertEqual(conn_stored.api_key, "or-stored")
+
+    def test_alias_canonicalization_loads_credential_via_build_model_from_spec(self):
+        """Invariant: vercel-ai-gateway reads credentials stored under canonical 'vercel'."""
+        registry = load_builtin_providers()
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            save_auth_credential(global_dir, "vercel", "vck-stored-9999", aliases=PROVIDER_ALIASES)
+            with patch.dict(os.environ, {}, clear=True):
+                model = build_model_from_spec(
+                    "vercel-ai-gateway/openai/gpt-4o",
+                    registry=registry,
+                    global_dir=global_dir,
+                )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.provider, "vercel")
+        self.assertEqual(model.api_key, "vck-stored-9999")
+
+    def test_bedrock_stored_auth_json_key_triggers_bearer_override(self):
+        """Invariant: storing a Bedrock bearer key in auth.json switches SigV4 to bearer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            save_auth_credential(
+                global_dir, "bedrock", "brk-stored-token", aliases=PROVIDER_ALIASES
+            )
+            env = _clean_aws_env(tmp)
+            env["AWS_REGION"] = "us-east-1"
+            with patch.dict(os.environ, env, clear=True):
+                model = build_model_from_spec(
+                    "bedrock/us.openai.gpt-5.6-sol",
+                    registry={k: dict(v) for k, v in SIGV4_REGISTRY.items()},
+                    global_dir=global_dir,
+                )
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.auth_scheme, "bearer")
+        self.assertEqual(model.auth_secrets, {"api_key": "brk-stored-token"})
+
+    def test_inspect_provider_auth_statuses_reports_sources_and_masks_secrets(self):
+        """Invariant: inspect_provider_auth_statuses reports effective and shadowed sources without raw keys."""
+        registry = load_builtin_providers()
+        secret_env = "sk-or-env-secret-123456"
+        secret_store = "sk-or-store-secret-654321"
+        secret_vercel = "vck-store-secret-999999"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            global_dir = Path(tmp)
+            save_auth_credential(global_dir, "openrouter", secret_store, aliases=PROVIDER_ALIASES)
+            save_auth_credential(global_dir, "vercel", secret_vercel, aliases=PROVIDER_ALIASES)
+
+            env = _clean_aws_env(tmp)
+            env["OPENROUTER_API_KEY"] = secret_env
+            with patch.dict(os.environ, env, clear=True):
+                statuses = {
+                    s["provider"]: s
+                    for s in inspect_provider_auth_statuses(
+                        registry, config={"api_key": "cfg-shadowed-key-0000"}, global_dir=global_dir
+                    )
+                }
+
+        or_status = statuses["openrouter"]
+        self.assertTrue(or_status["configured"])
+        self.assertEqual(or_status["effective_source"], "env (OPENROUTER_API_KEY)")
+        self.assertEqual(or_status["effective_masked"], "****")
+        self.assertTrue(or_status["has_auth_json"])
+        self.assertEqual(or_status["auth_json_masked"], "****")
+        self.assertEqual(or_status["other_sources"], ["auth.json", "config"])
+
+        vercel_status = statuses["vercel"]
+        self.assertTrue(vercel_status["configured"])
+        self.assertEqual(vercel_status["effective_source"], "auth.json")
+        self.assertEqual(vercel_status["effective_masked"], "****")
+        self.assertEqual(vercel_status["other_sources"], ["config"])
+
+        lm_status = statuses["lmstudio"]
+        self.assertTrue(lm_status["configured"])
+        self.assertEqual(lm_status["effective_source"], "local (no key needed)")
+
+        serialized = json.dumps(statuses)
+        self.assertNotIn(secret_env, serialized)
+        self.assertNotIn(secret_store, serialized)
+        self.assertNotIn(secret_vercel, serialized)
+        self.assertNotIn("sk-o", serialized)
+        self.assertNotIn("3456", serialized)
+        self.assertNotIn("9999", serialized)
 
 
 if __name__ == "__main__":

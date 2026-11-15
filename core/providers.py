@@ -19,12 +19,19 @@ from typing import Any
 
 from core.auth import get_signer, resolve_auth
 from core.auth_sigv4 import resolve_aws_credentials, resolve_aws_region
+from core.auth_store import (
+    get_auth_credential,
+    get_auth_store_path,
+    load_auth_store,
+    remove_auth_credential,
+    save_auth_credential,
+)
 from core.config import read_jsonc
 from core.protocols import Model
 
 PROVIDER_ALIASES: dict[str, str] = {
-    "gemini": "google",
-    "google-ai-studio": "google",
+    "google_ai_studio": "google-ai-studio",
+    "google ai studio": "google-ai-studio",
     "open-router": "openrouter",
     "lm-studio": "lmstudio",
     "llama-cpp": "llamacpp",
@@ -421,18 +428,311 @@ def parse_model_spec(
     return ModelRequest(model=raw)
 
 
+def _resolve_profile_api_key(profile: dict[str, Any]) -> str | None:
+    """Resolves a provider profile's ``api_key`` (literal or ``env:VAR``)."""
+    raw = profile.get("api_key")
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("env:"):
+        var_name = stripped[len("env:") :].strip()
+        if not var_name:
+            return None
+        value = (os.getenv(var_name) or "").strip()
+        return value or None
+    return stripped
+
+
+def _profile_source_label(profile: dict[str, Any]) -> str | None:
+    """Returns a non-secret source label when the profile configures a credential."""
+    raw = profile.get("api_key")
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("env:"):
+        return "providers.json (env)" if _resolve_profile_api_key(profile) else None
+    return "providers.json"
+
+
 def resolve_api_key(
     request: ModelRequest,
     profile: dict[str, Any],
     config: dict[str, Any],
+    provider: str | None = None,
+    global_dir: Path | str | None = None,
 ) -> str | None:
-    """Finds an API key: explicit spec, then provider env vars, then well-known env vars."""
+    """Finds an API key across explicit request, env, auth.json, profile, fallback env, and config.
+
+    Precedence:
+    1. Explicit request (``--api-key``, ``MODEL_API_KEY``, or per-model mapping ``api_key``)
+    2. Provider environment variables (``profile["env_keys"]``)
+    3. Global credential store (``<global_dir>/auth.json[canonical_provider]``)
+    4. Provider profile ``api_key`` in ``providers.json`` (literal or ``env:VAR``)
+    5. Well-known fallback environment variables (``FALLBACK_ENV_KEYS``, when profile names no ``env_keys``)
+    6. Top-level ``config.get("api_key")``
+    """
     if request.api_key:
         return request.api_key
-    for env_key in [*(profile.get("env_keys") or []), *FALLBACK_ENV_KEYS]:
+
+    profile_env_keys = profile.get("env_keys") or []
+    for env_key in profile_env_keys:
         if value := os.getenv(env_key):
             return value
+
+    canonical = _canonical_provider_name(provider or profile.get("name"))
+    if global_dir and canonical:
+        if stored := get_auth_credential(global_dir, canonical, aliases=PROVIDER_ALIASES):
+            return stored
+
+    profile_key = _resolve_profile_api_key(profile)
+    if profile_key:
+        return profile_key
+
+    if not profile_env_keys:
+        for env_key in FALLBACK_ENV_KEYS:
+            if value := os.getenv(env_key):
+                return value
+
     return config.get("api_key")
+
+
+def inspect_provider_auth_statuses(
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any] | None = None,
+    global_dir: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    """Returns per-provider credential status and source without exposing full secrets."""
+    cfg = dict(config or {})
+    store = load_auth_store(global_dir, aliases=PROVIDER_ALIASES) if global_dir else {}
+    config_key = cfg.get("api_key")
+    has_config_key = isinstance(config_key, str) and bool(config_key.strip())
+
+    canonical_profiles: dict[str, dict[str, Any]] = {}
+    for name, profile in registry.items():
+        canon = _canonical_provider_name(name) or name
+        canonical_profiles[canon] = dict(profile)
+    for name in store:
+        canonical_profiles.setdefault(name, {})
+
+    statuses: list[dict[str, Any]] = []
+    for provider in sorted(canonical_profiles):
+        profile = canonical_profiles[provider]
+        env_var_name: str | None = None
+        for candidate in profile.get("env_keys") or []:
+            if (os.getenv(candidate) or "").strip():
+                env_var_name = candidate
+                break
+
+        has_stored_key = (
+            bool(get_auth_credential(global_dir, provider, aliases=PROVIDER_ALIASES))
+            if global_dir
+            else False
+        )
+        profile_source = _profile_source_label(profile)
+
+        try:
+            auth_scheme, _ = resolve_auth(profile)
+        except Exception:
+            auth_scheme = "bearer"
+        is_local = _is_local_endpoint(profile.get("endpoint"))
+
+        other_sources: list[str] = []
+        if env_var_name:
+            effective_source = f"env ({env_var_name})"
+            effective_masked = "****"
+            configured = True
+            if has_stored_key:
+                other_sources.append("auth.json")
+            if profile_source:
+                other_sources.append(profile_source)
+            if has_config_key:
+                other_sources.append("config")
+        elif has_stored_key:
+            effective_source = "auth.json"
+            effective_masked = "****"
+            configured = True
+            if profile_source:
+                other_sources.append(profile_source)
+            if has_config_key:
+                other_sources.append("config")
+        elif profile_source:
+            effective_source = profile_source
+            effective_masked = "****"
+            configured = True
+            if has_config_key:
+                other_sources.append("config")
+        elif auth_scheme == "sigv4":
+            aws_ok = resolve_aws_credentials(_aws_profile_name(cfg)) is not None
+            effective_source = "sigv4 (aws)" if aws_ok else "sigv4 (not configured)"
+            effective_masked = ""
+            configured = aws_ok
+        elif auth_scheme == "none" or is_local:
+            effective_source = "local (no key needed)" if is_local else "none"
+            effective_masked = ""
+            configured = True
+        elif has_config_key:
+            effective_source = "config"
+            effective_masked = "****"
+            configured = True
+        else:
+            effective_source = "not configured"
+            effective_masked = ""
+            configured = False
+
+        statuses.append(
+            {
+                "provider": provider,
+                "configured": configured,
+                "effective_source": effective_source,
+                "effective_masked": effective_masked,
+                "has_auth_json": has_stored_key,
+                "auth_json_masked": "****" if has_stored_key else "",
+                "env_key": env_var_name,
+                "has_profile_key": bool(profile_source),
+                "has_config_key": has_config_key,
+                "is_local": is_local,
+                "auth_scheme": auth_scheme,
+                "other_sources": other_sources,
+            }
+        )
+    return statuses
+
+
+def format_provider_auth_line(entry: dict[str, Any], *, index: int | None = None) -> str:
+    """Formats one provider status entry without exposing full secrets."""
+    source = entry.get("effective_source") or "not configured"
+    masked = entry.get("effective_masked") or ""
+    preview = f" ({masked})" if masked else ""
+    others = entry.get("other_sources") or []
+    extra = f" [also in {', '.join(others)}]" if others else ""
+    if index is None:
+        return f"  {entry['provider']:<18} {source}{preview}{extra}"
+    return f"  {index}. {entry['provider']:<18} - {source}{preview}{extra}"
+
+
+def resolve_auth_provider(
+    spec: str,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any] | None = None,
+    global_dir: Path | str | None = None,
+    *,
+    statuses: list[dict[str, Any]] | None = None,
+) -> tuple[bool, str, str]:
+    """Resolves a provider name, alias, or 1-based index into a canonical provider."""
+    clean = str(spec or "").strip()
+    if not clean:
+        return False, "", "Provider name cannot be empty."
+    resolved_statuses = (
+        inspect_provider_auth_statuses(registry, config, global_dir)
+        if statuses is None
+        else statuses
+    )
+    if clean.isdigit():
+        idx = int(clean) - 1
+        if 0 <= idx < len(resolved_statuses):
+            return True, resolved_statuses[idx]["provider"], ""
+        return (
+            False,
+            "",
+            f"Invalid provider selection '{clean}' (1-{len(resolved_statuses)}).",
+        )
+    canonical, profile = resolve_provider(registry, clean)
+    if not canonical or not profile:
+        known = ", ".join(s["provider"] for s in resolved_statuses) or "none"
+        return False, "", f"Unknown provider '{clean}'. Available providers: {known}"
+    return True, canonical, ""
+
+
+def login_provider_credential(
+    provider: str,
+    api_key: str,
+    *,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any] | None = None,
+    global_dir: Path | str | None = None,
+) -> tuple[bool, str, str]:
+    """Validates and saves a provider API key to ``<global_dir>/auth.json``.
+
+    Returns ``(ok, canonical_provider, message)``.
+    """
+    ok, canonical, error = resolve_auth_provider(provider, registry, config, global_dir)
+    if not ok:
+        return False, "", error
+    clean_key = str(api_key or "").strip()
+    if not clean_key:
+        return False, canonical, "API key cannot be empty."
+    try:
+        dest = save_auth_credential(global_dir, canonical, clean_key, aliases=PROVIDER_ALIASES)
+    except Exception as exc:
+        return False, canonical, f"Failed to save credentials for '{canonical}': {exc}"
+
+    profile = registry.get(canonical, {})
+    note = ""
+    for env_key in profile.get("env_keys") or []:
+        if os.getenv(env_key):
+            note = f" (Note: {env_key} in environment overrides auth.json)"
+            break
+    return (
+        True,
+        canonical,
+        f"Saved credentials for '{canonical}' to {dest}{note}",
+    )
+
+
+def logout_provider_credential(
+    provider: str,
+    *,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any] | None = None,
+    global_dir: Path | str | None = None,
+) -> tuple[bool, bool, str, str]:
+    """Removes stored credentials for ``provider`` from ``<global_dir>/auth.json``.
+
+    Returns ``(ok, removed, canonical_provider, message)`` where ``ok=False``
+    indicates invalid input or a storage failure, and ``removed`` indicates
+    whether an entry existed.
+    """
+    clean = str(provider or "").strip()
+    if not clean:
+        return False, False, "", "Provider name cannot be empty."
+    if clean.isdigit():
+        stored = [
+            s
+            for s in inspect_provider_auth_statuses(registry, config, global_dir)
+            if s.get("has_auth_json")
+        ]
+        idx = int(clean) - 1
+        if not (0 <= idx < len(stored)):
+            msg = (
+                f"Invalid stored provider index {clean} (1-{len(stored)})."
+                if stored
+                else "No stored credentials found in auth.json."
+            )
+            return False, False, "", msg
+        canonical = stored[idx]["provider"]
+    else:
+        canonical, _ = resolve_provider(registry, clean)
+        if not canonical:
+            return False, False, "", "Provider name cannot be empty."
+
+    try:
+        removed = remove_auth_credential(global_dir, canonical, aliases=PROVIDER_ALIASES)
+    except Exception as exc:
+        return False, False, canonical, f"Failed to remove credentials for '{canonical}': {exc}"
+
+    if not removed:
+        return True, False, canonical, f"No stored credentials found for '{canonical}'."
+    auth_path = get_auth_store_path(global_dir) or "auth.json"
+    return (
+        True,
+        True,
+        canonical,
+        f"Removed stored credentials for '{canonical}' from {auth_path}.",
+    )
 
 
 @dataclass(frozen=True)
@@ -496,6 +796,7 @@ def resolve_connection(
     spec: str | dict[str, Any],
     config: dict[str, Any] | None = None,
     registry: dict[str, dict[str, Any]] | None = None,
+    global_dir: Path | str | None = None,
 ) -> Connection:
     """Resolves a model specification into concrete connection settings.
 
@@ -583,6 +884,7 @@ def resolve_connection(
                 f"Run `aws sso login` (or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)."
             )
 
+    resolved_provider = provider_name or profile.get("name")
     return Connection(
         model=(
             request.model
@@ -593,8 +895,14 @@ def resolve_connection(
             or profile.get("default_model", LAST_RESORT_MODEL)
         ),
         endpoint=_apply_region(endpoint, cfg),
-        provider=provider_name or profile.get("name"),
-        api_key=resolve_api_key(request, profile, cfg),
+        provider=resolved_provider,
+        api_key=resolve_api_key(
+            request,
+            profile,
+            cfg,
+            provider=resolved_provider,
+            global_dir=global_dir,
+        ),
         headers=headers,
         reasoning_format=profile.get("reasoning_format", "standard"),
         cache_strategy=profile.get("cache_strategy", "implicit"),
@@ -610,6 +918,7 @@ def build_model_from_spec(
     registry: dict[str, dict[str, Any]] | None = None,
     cache_ttl: str | None = None,
     reasoning_effort: str | None = None,
+    global_dir: Path | str | None = None,
 ) -> Model:
     """Instantiates a :class:`~core.protocols.Model` from a name, alias, or mapping specification."""
     # Imported here because core.model re-exports this module's helpers; a module-level
@@ -621,7 +930,7 @@ def build_model_from_spec(
     if not isinstance(spec, (str, dict)):
         raise ValueError(f"Expected model spec as str or dict, got {type(spec).__name__}")
 
-    connection = resolve_connection(spec, config, registry)
+    connection = resolve_connection(spec, config, registry, global_dir=global_dir)
     if connection.is_offline:
         message = "Mock response (offline mode)"
         profile = resolve_provider(registry or load_builtin_providers(), connection.provider)[1]
@@ -631,16 +940,25 @@ def build_model_from_spec(
     effective_scheme = connection.auth_scheme
     auth_error = connection.auth_error
     # Bearer override only when the profile's own token env var is set (e.g.
-    # BEDROCK_API_KEY). A resolved api_key alone is not proof: global configs
-    # commonly carry api_key "none" for keyless local endpoints, which must
-    # never flip SigV4 to bearer.
+    # BEDROCK_API_KEY) or stored in auth.json. A resolved api_key alone is not
+    # proof: global configs commonly carry api_key "none" for keyless local
+    # endpoints, which must never flip SigV4 to bearer.
     _, override_profile = resolve_provider(
         registry or load_builtin_providers(), connection.provider
     )
     bearer_env_set = any(os.getenv(key) for key in (override_profile.get("env_keys") or []))
-    if connection.auth_scheme == "sigv4" and connection.api_key and bearer_env_set:
+    bearer_stored = bool(
+        global_dir
+        and connection.provider
+        and get_auth_credential(global_dir, connection.provider, aliases=PROVIDER_ALIASES)
+    )
+    if (
+        connection.auth_scheme == "sigv4"
+        and connection.api_key
+        and (bearer_env_set or bearer_stored)
+    ):
         print(
-            "SigV4 auth: profile token env var present, using bearer auth override",
+            "SigV4 auth: profile token present, using bearer auth override",
             file=sys.stderr,
         )
         effective_scheme = "bearer"
