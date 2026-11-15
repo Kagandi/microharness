@@ -1,5 +1,5 @@
 {
-  "google": {
+  "google-ai-studio": {
     "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
     "default_model": "gemini-2.5-flash",
     "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],

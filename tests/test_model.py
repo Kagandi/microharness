@@ -419,8 +419,8 @@ class TestModel(unittest.TestCase):
         # Tool definition must not have cache_control
         self.assertNotIn("cache_control", payload["tools"][0])
 
-    def test_resolve_model_provider_gemini_defaults(self):
-        """Invariant: Setting provider='gemini' in config or CLI defaults to Google AI Studio."""
+    def test_resolve_model_provider_google_ai_studio_defaults(self):
+        """Invariant: Setting provider='google-ai-studio' in config or CLI defaults to Google AI Studio."""
         import argparse
 
         from main import _resolve_model
@@ -429,7 +429,7 @@ class TestModel(unittest.TestCase):
             endpoint=None,
             model=None,
             api_key=None,
-            provider="gemini",
+            provider="google-ai-studio",
         )
         model = _resolve_model(args, config={}, cache_ttl="off")
         self.assertIsInstance(model, HttpChatModel)
@@ -767,7 +767,7 @@ class TestModel(unittest.TestCase):
         """Invariant: Built-in providers.json loads correctly and defines standard providers."""
         builtin = load_builtin_providers()
         self.assertIsInstance(builtin, dict)
-        self.assertIn("google", builtin)
+        self.assertIn("google-ai-studio", builtin)
         self.assertIn("openrouter", builtin)
         self.assertIn("openai", builtin)
         self.assertIn("anthropic", builtin)
@@ -777,9 +777,9 @@ class TestModel(unittest.TestCase):
         self.assertIn("vercel", builtin)
 
         # Check strict equality of properties
-        self.assertEqual(builtin["google"]["default_model"], "gemini-2.5-flash")
-        self.assertEqual(builtin["google"]["reasoning_format"], "standard")
-        self.assertEqual(builtin["google"]["cache_strategy"], "implicit")
+        self.assertEqual(builtin["google-ai-studio"]["default_model"], "gemini-2.5-flash")
+        self.assertEqual(builtin["google-ai-studio"]["reasoning_format"], "standard")
+        self.assertEqual(builtin["google-ai-studio"]["cache_strategy"], "implicit")
         self.assertEqual(builtin["openrouter"]["reasoning_format"], "openrouter")
         self.assertEqual(builtin["openrouter"]["cache_strategy"], "anthropic_block")
         self.assertEqual(builtin["vercel"]["endpoint"], "https://ai-gateway.vercel.sh/v1")
@@ -807,12 +807,12 @@ class TestModel(unittest.TestCase):
             global_dir = Path(tmp_global)
             proj_dir = Path(tmp_proj)
 
-            # 1. Global override: customize google default model and add a custom proxy
+            # 1. Global override: customize google-ai-studio default model and add a custom proxy
             global_file = global_dir / "providers.json"
             global_file.write_text(
                 """// Comment test
 {
-  "google": {
+  "google-ai-studio": {
     "default_model": "gemini-custom-global"
   },
   "custom-proxy": {
@@ -832,7 +832,7 @@ class TestModel(unittest.TestCase):
             (proj_micro / "providers.json").write_text(
                 """# Project comment
 {
-  "google": {
+  "google-ai-studio": {
     "default_model": "gemini-custom-project"
   }
 }
@@ -842,7 +842,7 @@ class TestModel(unittest.TestCase):
 
             # 3. Inline config: config.json 'providers'
             inline = {
-                "google": {"default_model": "gemini-inline"},
+                "google-ai-studio": {"default_model": "gemini-inline"},
                 "inline-only": {"endpoint": "https://inline.example.com/v1"},
             }
 
@@ -852,11 +852,11 @@ class TestModel(unittest.TestCase):
                 inline_providers=inline,
             )
 
-            # Inline should win for google default_model
-            self.assertEqual(registry["google"]["default_model"], "gemini-inline")
-            # Google endpoint from built-in should be preserved
+            # Inline should win for google-ai-studio default_model
+            self.assertEqual(registry["google-ai-studio"]["default_model"], "gemini-inline")
+            # Google AI Studio endpoint from built-in should be preserved
             self.assertEqual(
-                registry["google"]["endpoint"],
+                registry["google-ai-studio"]["endpoint"],
                 "https://generativelanguage.googleapis.com/v1beta/openai",
             )
             # Custom proxy from global is retained
@@ -865,26 +865,35 @@ class TestModel(unittest.TestCase):
             self.assertEqual(registry["inline-only"]["endpoint"], "https://inline.example.com/v1")
 
     def test_resolve_provider_aliases_and_case_insensitivity(self):
-        """Invariant: Provider names resolve aliases and case-insensitivity cleanly."""
+        """Invariant: Provider names resolve spelling aliases and case-insensitivity without conflating google/gemini."""
         registry = load_builtin_providers()
 
         # Exact match
-        name, prof = resolve_provider(registry, "google")
-        self.assertEqual(name, "google")
+        name, prof = resolve_provider(registry, "google-ai-studio")
+        self.assertEqual(name, "google-ai-studio")
         self.assertEqual(prof["default_model"], "gemini-2.5-flash")
 
-        # Alias: gemini -> google
-        name_gemini, prof_gemini = resolve_provider(registry, "gemini")
-        self.assertEqual(name_gemini, "google")
-        self.assertEqual(prof_gemini["default_model"], "gemini-2.5-flash")
+        # Spelling aliases -> google-ai-studio
+        name_spaced, prof_spaced = resolve_provider(registry, "Google AI Studio")
+        self.assertEqual(name_spaced, "google-ai-studio")
+        self.assertEqual(prof_spaced["default_model"], "gemini-2.5-flash")
+
+        name_underscore, _ = resolve_provider(registry, "google_ai_studio")
+        self.assertEqual(name_underscore, "google-ai-studio")
 
         # Alias: open-router -> openrouter
         name_or, prof_or = resolve_provider(registry, "open-router")
         self.assertEqual(name_or, "openrouter")
 
         # Case-insensitivity
-        name_case, prof_case = resolve_provider(registry, "GoOgLe")
-        self.assertEqual(name_case, "google")
+        name_case, _ = resolve_provider(registry, "GoOgLe-Ai-StUdIo")
+        self.assertEqual(name_case, "google-ai-studio")
+
+        # 'google', 'gemini', and 'gcp' remain distinct (not silently aliased to google-ai-studio)
+        for distinct in ("google", "gemini", "gcp"):
+            d_name, d_prof = resolve_provider(registry, distinct)
+            self.assertEqual(d_name, distinct)
+            self.assertEqual(d_prof, {})
 
         # Unknown provider returns canonical with empty dict
         unk_name, unk_prof = resolve_provider(registry, "unknown-vendor")
@@ -911,7 +920,7 @@ class TestModel(unittest.TestCase):
         name_chat, prof_chat = find_provider_by_endpoint(
             registry, "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
         )
-        self.assertEqual(name_chat, "google")
+        self.assertEqual(name_chat, "google-ai-studio")
 
         # Negative case: unknown endpoint
         unk_name, unk_prof = find_provider_by_endpoint(registry, "https://unknown.ai/v1")
@@ -1200,7 +1209,7 @@ class TestModel(unittest.TestCase):
             non_existent_global = Path(tmp_dir) / "sub_global"
             self.assertFalse(non_existent_global.exists())
             reg = load_provider_registry(global_dir=non_existent_global)
-            self.assertIn("google", reg)
+            self.assertIn("google-ai-studio", reg)
             self.assertIn("openrouter", reg)
             self.assertFalse(non_existent_global.exists())
 

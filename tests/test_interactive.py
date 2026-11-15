@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ from core.interactive import (
     render_context_breakdown,
     render_help_lines,
     render_model_lines,
+    render_provider_auth_lines,
     render_session_lines,
 )
 from core.memory import Memory
@@ -30,13 +32,16 @@ COMMAND = Command("review", "Review PR", "Review $ARGUMENTS", "project")
 class RecordingUI:
     """SessionUI sink that keeps its output instead of printing it."""
 
-    def __init__(self):
+    def __init__(self, *, supports_secret_prompt: bool = False, secret_reply: str | None = None):
         self.infos: list[str] = []
         self.successes: list[str] = []
         self.errors: list[str] = []
         self.statuses: list[str] = []
         self.echoes: list[str] = []
+        self.prompts: list[str] = []
         self.refreshes = 0
+        self.supports_secret_prompt = supports_secret_prompt
+        self.secret_reply = secret_reply
 
     def info(self, text):
         self.infos.append(text)
@@ -55,6 +60,10 @@ class RecordingUI:
 
     def refresh(self):
         self.refreshes += 1
+
+    def prompt_secret(self, prompt: str) -> str | None:
+        self.prompts.append(prompt)
+        return self.secret_reply
 
     def render_context(self, stats, reasoning, cache):
         return render_context_breakdown(stats, reasoning, cache)
@@ -81,6 +90,35 @@ class RouterTestCase(unittest.TestCase):
         self.harness.get_cache_stats.return_value = {"cache_ttl": "5m"}
         self.harness.switch_model.return_value = (True, "Switched model to gemini", MagicMock())
         self.harness.load_session.return_value = ([], {"error": "Session not found"})
+        self.harness.get_auth_statuses.return_value = [
+            {
+                "provider": "openrouter",
+                "configured": True,
+                "effective_source": "auth.json",
+                "effective_masked": "sk-o...1234",
+                "has_auth_json": True,
+                "auth_json_masked": "sk-o...1234",
+                "other_sources": [],
+            },
+            {
+                "provider": "vercel",
+                "configured": False,
+                "effective_source": "not configured",
+                "effective_masked": "",
+                "has_auth_json": False,
+                "auth_json_masked": "",
+                "other_sources": [],
+            },
+        ]
+        self.harness.resolve_auth_provider.return_value = (True, "vercel", "")
+        self.harness.login_provider.return_value = (
+            True,
+            "Saved credentials for 'vercel' to /tmp/auth.json (vck-...9999)",
+        )
+        self.harness.logout_provider.return_value = (
+            True,
+            "Removed stored credentials for 'openrouter' from auth.json.",
+        )
         self.router = self._router()
 
     def _router(self, commands=None, skills=None, allow_bare_words=True):
@@ -342,6 +380,93 @@ class TestRouterDispatch(RouterTestCase):
         self.assertEqual(router.dispatch("status"), TURN)
         self.assertEqual(router.dispatch("/status"), SKIP)
 
+    def test_login_lists_providers_when_no_arg(self):
+        """Invariant: /login with no args prints provider auth statuses without touching memory."""
+        self.assertEqual(self.router.dispatch("/login"), SKIP)
+        self.assertIn("openrouter", self.ui.all_text)
+        self.assertIn("auth.json (sk-o...1234)", self.ui.all_text)
+        self.assertIn("vercel", self.ui.all_text)
+        self.assertEqual(len(self.memory.messages), 1)
+
+    def test_login_uses_ui_secret_prompt_and_refreshes_tui_state(self):
+        """Invariant: /login <provider> prompts masked input via UI, calls login_provider, and updates TUI state."""
+        self.ui = RecordingUI(supports_secret_prompt=True, secret_reply="vck-prompted-1234")
+        mock_state = MagicMock()
+        self.ui.state = mock_state
+        router = self._router()
+
+        self.assertEqual(router.dispatch("/login vercel-ai-gateway"), SKIP)
+        self.harness.resolve_auth_provider.assert_called_once_with("vercel-ai-gateway")
+        self.harness.login_provider.assert_called_once_with("vercel", "vck-prompted-1234")
+        self.assertEqual(self.ui.prompts, ["API key for vercel (Enter to save, Esc to cancel): "])
+        self.assertIn("Saved credentials for 'vercel'", self.ui.successes[0])
+        mock_state.set_available_providers.assert_called_once()
+
+    def test_login_cancel_empty_and_non_interactive_errors(self):
+        """Invariant: cancelling or supplying empty/non-interactive input does not call login_provider."""
+        # Cancelled secret prompt (Esc -> None)
+        self.ui = RecordingUI(supports_secret_prompt=True, secret_reply=None)
+        router = self._router()
+        self.assertEqual(router.dispatch("/login vercel"), SKIP)
+        self.assertIn("Login cancelled.", self.ui.infos)
+        self.harness.login_provider.assert_not_called()
+
+        # Empty secret rejected
+        self.ui = RecordingUI(supports_secret_prompt=True, secret_reply="   ")
+        router = self._router()
+        self.assertEqual(router.dispatch("/login vercel"), SKIP)
+        self.assertEqual(self.ui.errors, ["Aborted: API key cannot be empty."])
+        self.harness.login_provider.assert_not_called()
+
+        # Non-interactive without prompt_secret falls back cleanly to actionable error
+        self.ui = RecordingUI(supports_secret_prompt=False)
+        router = self._router()
+        with patch("sys.stdin.isatty", return_value=False):
+            self.assertEqual(router.dispatch("/login vercel"), SKIP)
+        self.assertIn("Cannot prompt for API key in non-interactive mode", self.ui.errors[0])
+
+    def test_login_inline_key_and_unknown_provider(self):
+        """Invariant: inline /login <provider> <key> works; unknown provider errors immediately."""
+        self.assertEqual(self.router.dispatch("/login vercel vck-inline-secret"), SKIP)
+        self.harness.login_provider.assert_called_once_with("vercel", "vck-inline-secret")
+
+        self.harness.resolve_auth_provider.return_value = (False, "", "Unknown provider 'bogus'")
+        self.assertEqual(self.router.dispatch("/login bogus"), SKIP)
+        self.assertEqual(self.ui.errors[-1], "Unknown provider 'bogus'")
+
+    def test_logout_lists_stored_and_removes_provider(self):
+        """Invariant: /logout lists auth.json entries when no arg, and removes when specified."""
+        self.assertEqual(self.router.dispatch("/logout"), SKIP)
+        self.assertIn("openrouter", self.ui.all_text)
+        self.assertNotIn("vercel", "\n".join(self.ui.statuses))
+
+        mock_state = MagicMock()
+        self.ui.state = mock_state
+        self.assertEqual(self.router.dispatch("/logout openrouter"), SKIP)
+        self.harness.logout_provider.assert_called_once_with("openrouter")
+        self.assertIn("Removed stored credentials for 'openrouter'", self.ui.successes[0])
+        mock_state.set_available_providers.assert_called_once()
+
+        self.harness.logout_provider.return_value = (
+            False,
+            "No stored credentials found for 'vercel'.",
+        )
+        self.assertEqual(self.router.dispatch("/logout vercel"), SKIP)
+        self.assertEqual(self.ui.errors[-1], "No stored credentials found for 'vercel'.")
+
+    def test_login_handles_spaced_provider_alias_google_ai_studio(self):
+        """Invariant: '/login google ai studio' resolves full alias without treating 'ai studio' as inline key."""
+        self.ui = RecordingUI(supports_secret_prompt=True, secret_reply="AIza-secret-1234")
+        self.harness.resolve_auth_provider.return_value = (True, "google-ai-studio", "")
+        self.harness.login_provider.return_value = (
+            True,
+            "Saved credentials for 'google-ai-studio' to /tmp/auth.json (AIza...1234)",
+        )
+        router = self._router()
+        self.assertEqual(router.dispatch("/login google ai studio"), SKIP)
+        self.harness.resolve_auth_provider.assert_called_once_with("google ai studio")
+        self.harness.login_provider.assert_called_once_with("google-ai-studio", "AIza-secret-1234")
+
 
 class TestRenderers(unittest.TestCase):
     def test_help_footer_is_appended_when_requested(self):
@@ -366,6 +491,33 @@ class TestRenderers(unittest.TestCase):
         """Invariant: an empty runs directory is stated, not rendered as a blank list."""
         self.assertEqual(
             render_session_lines([]), ["  No previous sessions found in runs directory."]
+        )
+
+    def test_provider_auth_listing_formats_sources_and_masks(self):
+        """Invariant: render_provider_auth_lines shows status, masked preview, and shadowed sources."""
+        self.assertEqual(render_provider_auth_lines([]), ["  (no providers configured)"])
+        lines = render_provider_auth_lines(
+            [
+                {
+                    "provider": "openrouter",
+                    "effective_source": "env (OPENROUTER_API_KEY)",
+                    "effective_masked": "sk-o...1234",
+                    "other_sources": ["auth.json"],
+                },
+                {
+                    "provider": "vercel",
+                    "effective_source": "not configured",
+                    "effective_masked": "",
+                    "other_sources": [],
+                },
+            ]
+        )
+        self.assertEqual(
+            lines,
+            [
+                "  1. openrouter         - env (OPENROUTER_API_KEY) (sk-o...1234) [also in auth.json]",
+                "  2. vercel             - not configured",
+            ],
         )
 
     def test_cache_hits_hidden_until_tokens_are_recorded(self):
@@ -415,9 +567,67 @@ class TestRealMemoryIntegration(RouterTestCase):
 
     def test_skip_commands_never_touch_memory(self):
         """Invariant: session-control commands leave the conversation untouched."""
-        for command in ("/help", "/status", "/compact", "/new", "/model", "/resume"):
+        for command in (
+            "/help",
+            "/status",
+            "/compact",
+            "/new",
+            "/model",
+            "/resume",
+            "/login",
+            "/logout",
+        ):
             self.router.dispatch(command)
         self.assertEqual([m.content for m in self.memory.messages], ["sys"])
+
+
+class TestHarnessAuthIntegration(unittest.TestCase):
+    def test_harness_login_switch_model_and_logout_with_real_auth_store(self):
+        """Invariant: Harness.login_provider persists to global_dir/auth.json, switch_model uses it, and active model updates."""
+        from core.harness import Harness
+        from core.model import HttpChatModel, MockModel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            global_dir = root / "global"
+            workspace_dir = root / "workspace"
+            runs_dir = root / "runs"
+            global_dir.mkdir()
+            workspace_dir.mkdir()
+            runs_dir.mkdir()
+
+            with patch.dict(os.environ, {}, clear=True):
+                harness = Harness(
+                    model=MockModel([]),
+                    workspace_dir=workspace_dir,
+                    global_dir=global_dir,
+                    runs_dir=runs_dir,
+                    sandbox=False,
+                    verbose=False,
+                )
+
+                ok, msg = harness.login_provider("vercel-ai-gateway", "vck-live-key-123456")
+                self.assertTrue(ok)
+                self.assertIn("Saved credentials for 'vercel'", msg)
+                self.assertNotIn("vck-live-key-123456", msg)
+
+                switched, switch_msg, new_model = harness.switch_model("vercel/openai/gpt-4o")
+                self.assertTrue(switched, switch_msg)
+                self.assertIsInstance(new_model, HttpChatModel)
+                self.assertEqual(new_model.provider, "vercel")
+                self.assertEqual(new_model.api_key, "vck-live-key-123456")
+
+                # Rotating credentials updates the already-active HttpChatModel in place.
+                ok2, _ = harness.login_provider("vercel", "vck-rotated-key-999999")
+                self.assertTrue(ok2)
+                self.assertEqual(harness.model.api_key, "vck-rotated-key-999999")
+                self.assertEqual(harness.model.auth_secrets["api_key"], "vck-rotated-key-999999")
+
+                removed, rm_msg = harness.logout_provider("vercel-ai-gateway")
+                self.assertTrue(removed)
+                self.assertIn("Removed stored credentials for 'vercel'", rm_msg)
+                removed_again, _ = harness.logout_provider("vercel")
+                self.assertFalse(removed_again)
 
 
 if __name__ == "__main__":

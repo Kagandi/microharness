@@ -2197,3 +2197,107 @@ class TestCommandCatalog(unittest.TestCase):
         state.input_buffer = "/resume abc"
         _, desc = state.get_matching_commands()[0]
         self.assertEqual(desc, "(3 steps) " + "x" * 35)
+
+    def test_login_and_logout_subcommand_menus(self):
+        """Invariant: /login offers all providers with source status; /logout offers only auth.json entries."""
+        state = TUIState()
+        state.set_available_providers(
+            [
+                {
+                    "provider": "openrouter",
+                    "effective_source": "auth.json",
+                    "has_auth_json": True,
+                    "auth_json_masked": "sk-o...1234",
+                },
+                {
+                    "provider": "vercel",
+                    "effective_source": "not configured",
+                    "has_auth_json": False,
+                    "auth_json_masked": "",
+                },
+            ]
+        )
+
+        state.input_buffer = "/login "
+        self.assertEqual(
+            state.get_matching_commands(),
+            [
+                ("/login openrouter", "[auth.json]"),
+                ("/login vercel", "[not configured]"),
+            ],
+        )
+
+        state.input_buffer = "/login ver"
+        self.assertEqual(state.get_matching_commands(), [("/login vercel", "[not configured]")])
+
+        state.input_buffer = "/logout "
+        self.assertEqual(
+            state.get_matching_commands(),
+            [("/logout openrouter", "[auth.json: sk-o...1234]")],
+        )
+
+        state.input_buffer = "/logout ver"
+        self.assertEqual(state.get_matching_commands(), [])
+
+    def test_curses_tui_masked_secret_prompt_lifecycle(self):
+        """Invariant: masked secret prompt buffers typed chars, hides plaintext in draw, and handles Esc/Enter."""
+        import curses
+        import threading
+        import time
+
+        state = TUIState()
+        tui = CursesTUI(state)
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui.stdscr = mock_stdscr
+
+        results: list[str | None] = []
+        worker = threading.Thread(
+            target=lambda: results.append(tui.request_secret("API key for vercel: ")),
+            daemon=True,
+        )
+        worker.start()
+
+        # Wait briefly until prompt is active
+        deadline = time.monotonic() + 2.0
+        while tui._secret_prompt is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(tui._secret_prompt, "API key for vercel: ")
+
+        submitted: list[str] = []
+        for ch in "secX":
+            tui.handle_key(ch, submitted.append)
+        tui.handle_key(curses.KEY_BACKSPACE, submitted.append)
+        tui.handle_key("r", submitted.append)
+
+        # Draw while prompting: must show asterisks, never plaintext secret
+        tui.draw(mock_stdscr)
+        drawn_texts = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
+        self.assertIn("API key for vercel: ", drawn_texts)
+        self.assertIn("****", drawn_texts)
+        self.assertFalse(any("sec" in t for t in drawn_texts))
+
+        tui.handle_key("\n", submitted.append)
+        worker.join(timeout=2.0)
+        self.assertEqual(results, ["secr"])
+        self.assertEqual(submitted, [])
+        self.assertIsNone(tui._secret_prompt)
+
+        # Esc cancels prompt with None
+        results.clear()
+        worker2 = threading.Thread(
+            target=lambda: results.append(tui.request_secret("API key: ")),
+            daemon=True,
+        )
+        worker2.start()
+        deadline = time.monotonic() + 2.0
+        while tui._secret_prompt is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        tui.handle_key("a", submitted.append)
+        tui.handle_key(27, submitted.append)
+        worker2.join(timeout=2.0)
+        self.assertEqual(results, [None])

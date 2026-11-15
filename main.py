@@ -14,12 +14,14 @@ Demonstrates:
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from core.auth_store import get_auth_store_path
 from core.config import ConfigLayers, resolve_project_tool_trust
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import Harness, get_default_global_dir
@@ -33,9 +35,14 @@ from core.providers import (
     PROVIDER_ALIASES,
     Connection,
     build_model_from_spec,
+    format_provider_auth_line,
     get_available_models_from_config,
+    inspect_provider_auth_statuses,
     load_provider_registry,
+    login_provider_credential,
+    logout_provider_credential,
     parse_model_spec,
+    resolve_auth_provider,
     resolve_connection,
 )
 from core.types import RunResult, Task, ToolCall
@@ -224,7 +231,7 @@ def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         default=None,
-        help="Provider preset (e.g. 'google', 'openrouter', 'vercel', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', or custom from providers.json)",
+        help="Provider preset (e.g. 'google-ai-studio', 'openrouter', 'vercel', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', or custom from providers.json)",
     )
     parser.add_argument(
         "--endpoint",
@@ -300,6 +307,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="microharness: Interactive AI coding agent microframework for existing projects or benchmarks.",
         usage="%(prog)s [instruction] [-d DIR] [--sandbox] [--batch] [--demo {calculator,greeting}] [options]",
+        epilog="Credential management: %(prog)s auth {login,list,logout} --help",
     )
     _add_run_arguments(parser)
     _add_model_arguments(parser)
@@ -396,7 +404,7 @@ def _resolve_model(
             inline_providers=config.get("providers"),
         )
     spec: dict[str, Any] = _startup_model_spec(args, config, registry)
-    connection = resolve_connection(spec, config, registry)
+    connection = resolve_connection(spec, config, registry, global_dir=global_dir)
 
     if connection.is_offline:
         print("🎓 Running with deterministic MockModel (offline, no endpoint configured).")
@@ -421,6 +429,7 @@ def _resolve_model(
         registry=registry,
         cache_ttl=cache_ttl,
         reasoning_effort=reasoning_effort,
+        global_dir=global_dir,
     )
 
 
@@ -712,10 +721,179 @@ def _run_single_task(context: CliContext, parser: argparse.ArgumentParser) -> No
     _print_run_summary(harness.run(task))
 
 
+def _build_auth_arg_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--global-dir",
+        default=argparse.SUPPRESS,
+        help="Global configuration and credentials directory (default: ~/.microharness)",
+    )
+    common.add_argument(
+        "-d",
+        "--dir",
+        default=argparse.SUPPRESS,
+        help="Target project directory for project providers.json (default: '.')",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="microharness auth",
+        description="Manage global per-provider API credentials in ~/.microharness/auth.json.",
+        parents=[common],
+    )
+    subparsers = parser.add_subparsers(dest="auth_command", metavar="command")
+
+    login_parser = subparsers.add_parser(
+        "login",
+        parents=[common],
+        help="Store or update an API key for a provider in auth.json",
+    )
+    login_parser.add_argument(
+        "provider",
+        nargs="?",
+        default=None,
+        help="Provider name or alias (e.g. openrouter, vercel, google-ai-studio, openai, anthropic)",
+    )
+
+    subparsers.add_parser(
+        "list",
+        parents=[common],
+        help="List providers and credential status/source without revealing secrets",
+    )
+
+    logout_parser = subparsers.add_parser(
+        "logout",
+        parents=[common],
+        help="Remove stored credentials for a provider from auth.json",
+    )
+    logout_parser.add_argument(
+        "provider",
+        help="Provider name or alias to remove from auth.json",
+    )
+    return parser
+
+
+def _auth_login(
+    provider_arg: str | None,
+    global_dir: Path,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any],
+) -> int:
+    statuses = inspect_provider_auth_statuses(registry, config, global_dir)
+    if not provider_arg:
+        print("Available providers:")
+        for index, entry in enumerate(statuses, start=1):
+            print(format_provider_auth_line(entry, index=index))
+        try:
+            chosen = input("Select provider (name or number): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.", file=sys.stderr)
+            return 1
+        if not chosen:
+            print("❌ Aborted: no provider selected.", file=sys.stderr)
+            return 1
+        provider_arg = chosen
+
+    ok, canonical, error = resolve_auth_provider(
+        provider_arg, registry, config, global_dir, statuses=statuses
+    )
+    if not ok:
+        print(f"❌ {error}", file=sys.stderr)
+        return 1
+
+    try:
+        api_key = getpass.getpass(f"API key for {canonical}: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.", file=sys.stderr)
+        return 1
+
+    saved, _, message = login_provider_credential(
+        canonical,
+        api_key,
+        registry=registry,
+        config=config,
+        global_dir=global_dir,
+    )
+    if not saved:
+        print(f"❌ {message}", file=sys.stderr)
+        return 1
+    print(f"✅ {message}")
+    return 0
+
+
+def _auth_list(
+    global_dir: Path,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any],
+) -> int:
+    auth_path = get_auth_store_path(global_dir)
+    exists_label = "exists" if auth_path and auth_path.is_file() else "not created yet"
+    print(f"Credential store: {auth_path} ({exists_label})")
+    for entry in inspect_provider_auth_statuses(registry, config, global_dir):
+        print(format_provider_auth_line(entry))
+    return 0
+
+
+def _auth_logout(
+    provider_arg: str,
+    global_dir: Path,
+    registry: dict[str, dict[str, Any]],
+    config: dict[str, Any] | None = None,
+) -> int:
+    ok, removed, message = logout_provider_credential(
+        provider_arg,
+        registry=registry,
+        config=config,
+        global_dir=global_dir,
+    )
+    if not ok:
+        print(f"❌ {message}", file=sys.stderr)
+        return 1
+    prefix = "✅" if removed else "ℹ️ "
+    print(f"{prefix} {message}")
+    return 0
+
+
+def _run_auth_cli(argv: list[str]) -> int:
+    parser = _build_auth_arg_parser()
+    args = parser.parse_args(argv)
+    if not args.auth_command:
+        parser.print_help()
+        return 0
+
+    raw_global = getattr(args, "global_dir", None)
+    raw_dir = getattr(args, "dir", ".")
+    global_dir = Path(raw_global).resolve() if raw_global else get_default_global_dir()
+    target_dir = Path(raw_dir).resolve()
+
+    layers = ConfigLayers.load(global_dir, target_dir)
+    config = layers.merged
+    registry = load_provider_registry(
+        global_dir=global_dir,
+        project_dir=target_dir,
+        inline_providers=config.get("providers"),
+    )
+
+    if args.auth_command == "login":
+        return _auth_login(args.provider, global_dir, registry, config)
+    if args.auth_command == "list":
+        return _auth_list(global_dir, registry, config)
+    if args.auth_command == "logout":
+        return _auth_logout(args.provider, global_dir, registry, config)
+    parser.print_help()
+    return 1
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    if raw_argv and raw_argv[0] == "auth":
+        exit_code = _run_auth_cli(raw_argv[1:])
+        if exit_code != 0:
+            sys.exit(exit_code)
+        return
+
     parser = _build_arg_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     context = _resolve_cli_context(args)
 
     if _dispatch_benchmark(context):
@@ -744,7 +922,7 @@ def main(argv: list[str] | None = None) -> None:
             auth_error=getattr(context.model, "auth_error", None),
         )
         if isinstance(context.model, HttpChatModel)
-        else Connection()
+        else Connection(model="offline")
     )
 
     if isinstance(context.model, MockModel) or conn.missing_credentials:
@@ -756,10 +934,11 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"❌ {reason}\n\n"
             "To configure a provider, choose one of:\n"
-            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=..., AI_GATEWAY_API_KEY=...)\n"
-            "  2. Pass CLI flags: --provider <name> --api-key <key>\n"
-            "  3. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
-            "  4. Configure ~/.microharness/config.json with default_model and providers.\n\n"
+            "  1. Run `microharness auth login [provider]` (or `/login` inside a session)\n"
+            "  2. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=..., AI_GATEWAY_API_KEY=...)\n"
+            "  3. Pass CLI flags: --provider <name> --api-key <key>\n"
+            "  4. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
+            "  5. Configure ~/.microharness/config.json with default_model and providers.\n\n"
             "Tip: Run with --demo calculator to test offline without API credentials.\n",
             file=sys.stderr,
         )
