@@ -23,7 +23,6 @@ from core.auth_store import (
     get_auth_credential,
     get_auth_store_path,
     load_auth_store,
-    mask_secret,
     remove_auth_credential,
     save_auth_credential,
 )
@@ -429,24 +428,34 @@ def parse_model_spec(
     return ModelRequest(model=raw)
 
 
-def _resolve_profile_api_key(profile: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Resolves a provider profile's ``api_key`` (literal or ``env:VAR``).
-
-    Returns ``(value, source_label)``.
-    """
+def _resolve_profile_api_key(profile: dict[str, Any]) -> str | None:
+    """Resolves a provider profile's ``api_key`` (literal or ``env:VAR``)."""
     raw = profile.get("api_key")
     if not isinstance(raw, str):
-        return None, None
+        return None
     stripped = raw.strip()
     if not stripped:
-        return None, None
+        return None
     if stripped.startswith("env:"):
         var_name = stripped[len("env:") :].strip()
         if not var_name:
-            return None, None
-        value = os.getenv(var_name)
-        return (value, f"providers.json (env:{var_name})") if value else (None, None)
-    return stripped, "providers.json"
+            return None
+        value = (os.getenv(var_name) or "").strip()
+        return value or None
+    return stripped
+
+
+def _profile_source_label(profile: dict[str, Any]) -> str | None:
+    """Returns a non-secret source label when the profile configures a credential."""
+    raw = profile.get("api_key")
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("env:"):
+        return "providers.json (env)" if _resolve_profile_api_key(profile) else None
+    return "providers.json"
 
 
 def resolve_api_key(
@@ -479,7 +488,7 @@ def resolve_api_key(
         if stored := get_auth_credential(global_dir, canonical, aliases=PROVIDER_ALIASES):
             return stored
 
-    profile_key, _ = _resolve_profile_api_key(profile)
+    profile_key = _resolve_profile_api_key(profile)
     if profile_key:
         return profile_key
 
@@ -500,9 +509,7 @@ def inspect_provider_auth_statuses(
     cfg = dict(config or {})
     store = load_auth_store(global_dir, aliases=PROVIDER_ALIASES) if global_dir else {}
     config_key = cfg.get("api_key")
-    config_key_str = (
-        config_key.strip() if isinstance(config_key, str) and config_key.strip() else None
-    )
+    has_config_key = isinstance(config_key, str) and bool(config_key.strip())
 
     canonical_profiles: dict[str, dict[str, Any]] = {}
     for name, profile in registry.items():
@@ -514,20 +521,18 @@ def inspect_provider_auth_statuses(
     statuses: list[dict[str, Any]] = []
     for provider in sorted(canonical_profiles):
         profile = canonical_profiles[provider]
-        env_key: str | None = None
-        env_val: str | None = None
+        env_var_name: str | None = None
         for candidate in profile.get("env_keys") or []:
-            if val := os.getenv(candidate):
-                env_key = candidate
-                env_val = val
+            if (os.getenv(candidate) or "").strip():
+                env_var_name = candidate
                 break
 
-        stored_key = (
-            get_auth_credential(global_dir, provider, aliases=PROVIDER_ALIASES)
+        has_stored_key = (
+            bool(get_auth_credential(global_dir, provider, aliases=PROVIDER_ALIASES))
             if global_dir
-            else None
+            else False
         )
-        profile_key, profile_key_source = _resolve_profile_api_key(profile)
+        profile_source = _profile_source_label(profile)
 
         try:
             auth_scheme, _ = resolve_auth(profile)
@@ -536,29 +541,29 @@ def inspect_provider_auth_statuses(
         is_local = _is_local_endpoint(profile.get("endpoint"))
 
         other_sources: list[str] = []
-        if env_val:
-            effective_source = f"env ({env_key})"
-            effective_masked = mask_secret(env_val)
+        if env_var_name:
+            effective_source = f"env ({env_var_name})"
+            effective_masked = "****"
             configured = True
-            if stored_key:
+            if has_stored_key:
                 other_sources.append("auth.json")
-            if profile_key and profile_key_source:
-                other_sources.append(profile_key_source)
-            if config_key_str:
+            if profile_source:
+                other_sources.append(profile_source)
+            if has_config_key:
                 other_sources.append("config")
-        elif stored_key:
+        elif has_stored_key:
             effective_source = "auth.json"
-            effective_masked = mask_secret(stored_key)
+            effective_masked = "****"
             configured = True
-            if profile_key and profile_key_source:
-                other_sources.append(profile_key_source)
-            if config_key_str:
+            if profile_source:
+                other_sources.append(profile_source)
+            if has_config_key:
                 other_sources.append("config")
-        elif profile_key and profile_key_source:
-            effective_source = profile_key_source
-            effective_masked = mask_secret(profile_key)
+        elif profile_source:
+            effective_source = profile_source
+            effective_masked = "****"
             configured = True
-            if config_key_str:
+            if has_config_key:
                 other_sources.append("config")
         elif auth_scheme == "sigv4":
             aws_ok = resolve_aws_credentials(_aws_profile_name(cfg)) is not None
@@ -569,9 +574,9 @@ def inspect_provider_auth_statuses(
             effective_source = "local (no key needed)" if is_local else "none"
             effective_masked = ""
             configured = True
-        elif config_key_str:
+        elif has_config_key:
             effective_source = "config"
-            effective_masked = mask_secret(config_key_str)
+            effective_masked = "****"
             configured = True
         else:
             effective_source = "not configured"
@@ -584,11 +589,11 @@ def inspect_provider_auth_statuses(
                 "configured": configured,
                 "effective_source": effective_source,
                 "effective_masked": effective_masked,
-                "has_auth_json": bool(stored_key),
-                "auth_json_masked": mask_secret(stored_key),
-                "env_key": env_key,
-                "has_profile_key": bool(profile_key),
-                "has_config_key": bool(config_key_str),
+                "has_auth_json": has_stored_key,
+                "auth_json_masked": "****" if has_stored_key else "",
+                "env_key": env_var_name,
+                "has_profile_key": bool(profile_source),
+                "has_config_key": has_config_key,
                 "is_local": is_local,
                 "auth_scheme": auth_scheme,
                 "other_sources": other_sources,
