@@ -1333,9 +1333,7 @@ class TestVercelAIGatewayProvider(unittest.TestCase):
 
         with patch.dict(os.environ, {"VERCEL_OIDC_TOKEN": "oidc-tok"}, clear=True):
             self.assertEqual(resolve_api_key(ModelRequest(), profile, {}), "oidc-tok")
-            self.assertIsNone(
-                resolve_api_key(ModelRequest(), registry["openai"], {})
-            )
+            self.assertIsNone(resolve_api_key(ModelRequest(), registry["openai"], {}))
 
     def test_builds_http_client_and_missing_credentials_gate(self):
         """Invariant: vercel specs build a gateway-configured HttpChatModel and enforce bearer credentials."""
@@ -1375,9 +1373,7 @@ class TestVercelAIGatewayProvider(unittest.TestCase):
         entries = get_available_models_from_config({}, load_builtin_providers())
         by_name = {e["name"]: e for e in entries}
         self.assertIn("vercel/anthropic/claude-sonnet-5.5", by_name)
-        self.assertEqual(
-            by_name["vercel/anthropic/claude-sonnet-5.5"]["provider"], "vercel"
-        )
+        self.assertEqual(by_name["vercel/anthropic/claude-sonnet-5.5"]["provider"], "vercel")
         self.assertEqual(
             by_name["vercel/anthropic/claude-sonnet-5.5"]["model"],
             "anthropic/claude-sonnet-5.5",
@@ -1387,9 +1383,7 @@ class TestVercelAIGatewayProvider(unittest.TestCase):
         """Invariant: core/model.py stays provider-agnostic (no hardcoded vercel branch)."""
         from pathlib import Path as _Path
 
-        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(
-            encoding="utf-8"
-        )
+        source = (_Path(__file__).parent.parent / "core" / "model.py").read_text(encoding="utf-8")
         self.assertNotIn("vercel", source.lower())
 
 

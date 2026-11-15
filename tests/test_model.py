@@ -521,9 +521,7 @@ class TestModel(unittest.TestCase):
                 }
             },
         }
-        args = argparse.Namespace(
-            endpoint=None, model="muse-ember", api_key=None, provider=None
-        )
+        args = argparse.Namespace(endpoint=None, model="muse-ember", api_key=None, provider=None)
         model = _resolve_model(args, config=config, cache_ttl="off")
         self.assertIsInstance(model, HttpChatModel)
         self.assertEqual(model.endpoint, "https://ai-gateway.vercel.sh/v1/chat/completions")
@@ -562,9 +560,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(model.api_key, "vck-env")
 
         # Without --model, config['model'] keeps top-level config['provider'].
-        default_args = argparse.Namespace(
-            endpoint=None, model=None, api_key=None, provider=None
-        )
+        default_args = argparse.Namespace(endpoint=None, model=None, api_key=None, provider=None)
         default_model = _resolve_model(default_args, config=config, cache_ttl="off")
         self.assertEqual(default_model.endpoint, "https://openrouter.ai/api/v1/chat/completions")
         self.assertEqual(default_model.model, "openai/gpt-4o-mini")
