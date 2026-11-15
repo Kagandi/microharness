@@ -29,6 +29,12 @@ PROVIDER_ALIASES: dict[str, str] = {
     "lm-studio": "lmstudio",
     "llama-cpp": "llamacpp",
     "llama.cpp": "llamacpp",
+    "vercel-ai-gateway": "vercel",
+    "vercel_ai_gateway": "vercel",
+    "vercel-gateway": "vercel",
+    "vercel_gateway": "vercel",
+    "ai-gateway": "vercel",
+    "aigateway": "vercel",
 }
 
 # Last-resort API key lookup when neither the spec nor the provider profile names one.
@@ -36,6 +42,8 @@ FALLBACK_ENV_KEYS: tuple[str, ...] = (
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "VERCEL_AI_GATEWAY_API_KEY",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -405,8 +413,11 @@ def parse_model_spec(
 
     raw = str(resolved).strip()
     provider = _provider_prefix(raw)
-    if provider and provider.lower() in registry:
-        return ModelRequest(model=raw[len(provider) + 1 :], provider=provider.lower())
+    if provider:
+        canonical = _canonical_provider_name(provider)
+        registry_keys = {k.lower() for k in registry}
+        if canonical and canonical in registry_keys:
+            return ModelRequest(model=raw[len(provider) + 1 :], provider=canonical)
     return ModelRequest(model=raw)
 
 
@@ -692,9 +703,13 @@ def resolve_model_spec(
         return True, by_alias[lowered], ""
     if lowered in by_model_id:
         return True, by_model_id[lowered], ""
-    if "/" in clean and clean.split("/", 1)[0].lower() in registry:
-        return True, clean, ""
-    if lowered in registry:
+    registry_keys = {k.lower() for k in registry}
+    if "/" in clean:
+        prefix = _canonical_provider_name(clean.split("/", 1)[0])
+        if prefix and prefix in registry_keys:
+            return True, clean, ""
+    canonical_lowered = _canonical_provider_name(lowered)
+    if lowered in registry_keys or (canonical_lowered and canonical_lowered in registry_keys):
         return True, clean, ""
 
     valid = ", ".join(m["name"] for m in available) or "none configured"

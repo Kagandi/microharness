@@ -30,10 +30,12 @@ from core.model import (
     seed_user_providers,
 )
 from core.providers import (
+    PROVIDER_ALIASES,
     Connection,
     build_model_from_spec,
     get_available_models_from_config,
     load_provider_registry,
+    parse_model_spec,
     resolve_connection,
 )
 from core.types import RunResult, Task, ToolCall
@@ -222,7 +224,7 @@ def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         default=None,
-        help="Provider preset (e.g. 'google', 'openrouter', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', or custom from providers.json)",
+        help="Provider preset (e.g. 'google', 'openrouter', 'vercel', 'openai', 'anthropic', 'deepseek', 'ollama', 'groq', or custom from providers.json)",
     )
     parser.add_argument(
         "--endpoint",
@@ -237,7 +239,7 @@ def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--api-key",
         default=None,
-        help="API key (env: MODEL_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, or ~/.microharness/config.json)",
+        help="API key (env: MODEL_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or ~/.microharness/config.json)",
     )
     parser.add_argument(
         "--cache-ttl",
@@ -324,9 +326,16 @@ def _warn_unrecognized_model_flag(
         names = {m["name"].lower() for m in known}
         ids = {m.get("model", "").lower() for m in known if m.get("model")}
         providers = {name.lower() for name in registry}
-        head = requested_model.split("/", 1)[0].lower()
         lowered = requested_model.strip().lower()
-        if lowered in names or lowered in ids or lowered in providers or head in providers:
+        head = lowered.split("/", 1)[0]
+        if (
+            lowered in names
+            or lowered in ids
+            or lowered in providers
+            or head in providers
+            or PROVIDER_ALIASES.get(lowered) in providers
+            or PROVIDER_ALIASES.get(head) in providers
+        ):
             return
         available = ", ".join(m["name"] for m in known) or "none configured"
         print(
@@ -338,15 +347,32 @@ def _warn_unrecognized_model_flag(
         pass
 
 
-def _startup_model_spec(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    """Assembles the startup model spec (flag > environment > config file)."""
-    return {
+def _startup_model_spec(
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    registry: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Assembles the startup model spec from flags/env (config defaults stay fallbacks)."""
+    spec: dict[str, Any] = {
         "model": args.model or os.getenv("MODEL_NAME") or config.get("model"),
-        "provider": args.provider or config.get("provider"),
-        "endpoint": args.endpoint or os.getenv("MODEL_ENDPOINT") or config.get("endpoint"),
+        "provider": args.provider,
+        "endpoint": args.endpoint or os.getenv("MODEL_ENDPOINT"),
         "api_key": args.api_key or os.getenv("MODEL_API_KEY"),
-        "headers": config.get("headers"),
+        "headers": None,
     }
+    if (
+        args.model
+        and spec["provider"] is None
+        and spec["endpoint"] is None
+        and registry is not None
+    ):
+        cfg_models = config.get("models")
+        if not (isinstance(cfg_models, dict) and args.model in cfg_models):
+            parsed = parse_model_spec(args.model, config, registry)
+            if parsed.provider:
+                spec["model"] = parsed.model
+                spec["provider"] = parsed.provider
+    return spec
 
 
 def _resolve_model(
@@ -356,18 +382,20 @@ def _resolve_model(
     reasoning_effort: str | None = None,
     global_dir: Path | None = None,
     target_dir: Path | None = None,
+    registry: dict[str, dict[str, Any]] | None = None,
 ) -> Model:
     """Builds the startup model from CLI flags, environment, and the provider registry.
 
     Flag precedence (flag > environment > config file) is applied when the spec is
     assembled here; the registry itself only ever fills in what is still missing.
     """
-    registry = load_provider_registry(
-        global_dir=global_dir,
-        project_dir=target_dir,
-        inline_providers=config.get("providers"),
-    )
-    spec: dict[str, Any] = _startup_model_spec(args, config)
+    if registry is None:
+        registry = load_provider_registry(
+            global_dir=global_dir,
+            project_dir=target_dir,
+            inline_providers=config.get("providers"),
+        )
+    spec: dict[str, Any] = _startup_model_spec(args, config, registry)
     connection = resolve_connection(spec, config, registry)
 
     if connection.is_offline:
@@ -623,6 +651,11 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
 
     cache_ttl = _resolve_cache_ttl(args, config)
     reasoning_effort = _resolve_reasoning_effort(args, config)
+    registry = load_provider_registry(
+        global_dir=global_dir,
+        project_dir=target_dir,
+        inline_providers=config.get("providers"),
+    )
 
     return CliContext(
         args=args,
@@ -637,13 +670,14 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
             reasoning_effort,
             global_dir=global_dir,
             target_dir=target_dir,
+            registry=registry,
         ),
         cache_ttl=cache_ttl,
         reasoning_effort=reasoning_effort,
         use_docker=args.docker if args.docker is not None else bool(config.get("docker", False)),
         docker_image=args.docker_image or config.get("docker_image", "python:3.11"),
         trust_project_tools=trust_project_tools,
-        model_spec=_startup_model_spec(args, config),
+        model_spec=_startup_model_spec(args, config, registry),
     )
 
 
@@ -722,7 +756,7 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"❌ {reason}\n\n"
             "To configure a provider, choose one of:\n"
-            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=...)\n"
+            "  1. Add credentials to .env (e.g. GEMINI_API_KEY=..., OPENROUTER_API_KEY=..., AI_GATEWAY_API_KEY=...)\n"
             "  2. Pass CLI flags: --provider <name> --api-key <key>\n"
             "  3. Use a local provider: --provider lmstudio (or ollama, vllm, llamacpp)\n"
             "  4. Configure ~/.microharness/config.json with default_model and providers.\n\n"

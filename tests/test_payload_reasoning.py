@@ -48,5 +48,31 @@ class TestExplicitNoneReasoning(unittest.TestCase):
         self.assertNotIn("reasoning", payload)
 
 
+class TestGatewayReasoning(unittest.TestCase):
+    def test_gateway_effort_sets_reasoning_object_and_no_openrouter_header(self):
+        """Invariant: gateway reasoning_format emits reasoning + reasoning_effort without OpenRouter headers."""
+        client = _client(reasoning_format="gateway", reasoning_effort="xhigh", cache_ttl="5m")
+        payload = client._build_payload([Message(role="user", content="hi")], [TOOL])
+        self.assertEqual(payload["reasoning_effort"], "xhigh")
+        self.assertEqual(payload["reasoning"], {"effort": "xhigh"})
+        self.assertNotIn("X-OpenRouter-Cache-TTL", client._build_headers())
+
+    def test_gateway_numeric_budget_sets_max_tokens_only(self):
+        """Invariant: numeric budget maps to reasoning.max_tokens without reasoning_effort."""
+        payload = _client(reasoning_format="gateway", reasoning_effort="4096")._build_payload(
+            [Message(role="user", content="hi")], [TOOL]
+        )
+        self.assertEqual(payload["reasoning"], {"max_tokens": 4096})
+        self.assertNotIn("reasoning_effort", payload)
+
+    def test_gateway_off_omits_reasoning_fields(self):
+        """Invariant: unset or 'off' effort omits both reasoning and reasoning_effort."""
+        payload = _client(reasoning_format="gateway", reasoning_effort="off")._build_payload(
+            [Message(role="user", content="hi")], [TOOL]
+        )
+        self.assertNotIn("reasoning", payload)
+        self.assertNotIn("reasoning_effort", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

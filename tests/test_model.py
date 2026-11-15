@@ -494,9 +494,74 @@ class TestModel(unittest.TestCase):
         self.assertEqual(run("good-model"), "")
         self.assertEqual(run("openai"), "")
         self.assertEqual(run("openai/gpt-4o"), "")
+        self.assertEqual(run("vercel/openai/gpt-4o"), "")
+        self.assertEqual(run("vercel-ai-gateway/anthropic/claude-sonnet-5.5"), "")
 
         # No explicit flag means nothing to validate.
         self.assertEqual(run(None), "")
+
+    def test_resolve_model_alias_beats_top_level_provider_and_endpoint(self):
+        """Invariant: --model <alias> uses the alias's provider/endpoint, not top-level config defaults."""
+        import argparse
+
+        from main import _resolve_model
+
+        config = {
+            "provider": "openrouter",
+            "endpoint": "https://openrouter.ai/api/v1",
+            "api_key": "or-key",
+            "model": "stealth/space-bunny-alpha",
+            "models": {
+                "muse-ember": {
+                    "model": "meta/muse-ember",
+                    "provider": "vercel",
+                    "api_key": "vck-test",
+                }
+            },
+        }
+        args = argparse.Namespace(endpoint=None, model="muse-ember", api_key=None, provider=None)
+        model = _resolve_model(args, config=config, cache_ttl="off")
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.endpoint, "https://ai-gateway.vercel.sh/v1/chat/completions")
+        self.assertEqual(model.model, "meta/muse-ember")
+        self.assertEqual(model.api_key, "vck-test")
+
+        # Explicit --provider flag still overrides the alias.
+        override_args = argparse.Namespace(
+            endpoint=None, model="muse-ember", api_key=None, provider="openrouter"
+        )
+        override_model = _resolve_model(override_args, config=config, cache_ttl="off")
+        self.assertEqual(override_model.endpoint, "https://openrouter.ai/api/v1/chat/completions")
+
+    def test_resolve_model_prefixed_flag_beats_top_level_provider(self):
+        """Invariant: --model <provider>/<model> switches providers, while config.model keeps config.provider."""
+        import argparse
+        import os
+        from unittest.mock import patch
+
+        from main import _resolve_model
+
+        config = {
+            "provider": "openrouter",
+            "endpoint": "https://openrouter.ai/api/v1",
+            "api_key": "or-key",
+            "model": "openai/gpt-4o-mini",
+        }
+        args = argparse.Namespace(
+            endpoint=None, model="vercel/meta/muse-ember", api_key=None, provider=None
+        )
+        with patch.dict(os.environ, {"AI_GATEWAY_API_KEY": "vck-env"}, clear=False):
+            model = _resolve_model(args, config=config, cache_ttl="off")
+        self.assertIsInstance(model, HttpChatModel)
+        self.assertEqual(model.endpoint, "https://ai-gateway.vercel.sh/v1/chat/completions")
+        self.assertEqual(model.model, "meta/muse-ember")
+        self.assertEqual(model.api_key, "vck-env")
+
+        # Without --model, config['model'] keeps top-level config['provider'].
+        default_args = argparse.Namespace(endpoint=None, model=None, api_key=None, provider=None)
+        default_model = _resolve_model(default_args, config=config, cache_ttl="off")
+        self.assertEqual(default_model.endpoint, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(default_model.model, "openai/gpt-4o-mini")
 
     def test_harness_resolve_model_spec_contract(self):
         """Invariant: resolve_model_spec canonicalizes known names and explains unknown ones."""
@@ -709,6 +774,7 @@ class TestModel(unittest.TestCase):
         self.assertIn("ollama", builtin)
         self.assertIn("deepseek", builtin)
         self.assertIn("groq", builtin)
+        self.assertIn("vercel", builtin)
 
         # Check strict equality of properties
         self.assertEqual(builtin["google"]["default_model"], "gemini-2.5-flash")
@@ -716,6 +782,9 @@ class TestModel(unittest.TestCase):
         self.assertEqual(builtin["google"]["cache_strategy"], "implicit")
         self.assertEqual(builtin["openrouter"]["reasoning_format"], "openrouter")
         self.assertEqual(builtin["openrouter"]["cache_strategy"], "anthropic_block")
+        self.assertEqual(builtin["vercel"]["endpoint"], "https://ai-gateway.vercel.sh/v1")
+        self.assertEqual(builtin["vercel"]["reasoning_format"], "gateway")
+        self.assertEqual(builtin["vercel"]["cache_strategy"], "gateway_auto")
 
     def test_seed_user_providers(self):
         """Invariant: seed_user_providers creates providers.json in target global directory."""

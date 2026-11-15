@@ -305,6 +305,8 @@ class HttpChatModel(UsageTelemetry):
             "model": self.model,
             "messages": formatted_messages,
         }
+        if self.cache_ttl and self.cache_strategy == "gateway_auto":
+            payload["providerOptions"] = {"gateway": {"caching": "auto"}}
         if self.reasoning_format == "explicit_none":
             # Shims that reject tools alongside an unset effort want reasoning
             # stated off explicitly. An explicit user effort still wins.
@@ -313,7 +315,7 @@ class HttpChatModel(UsageTelemetry):
             )
         elif self.reasoning_effort and self.reasoning_format != "none":
             effort = self.reasoning_effort.lower()
-            if self.reasoning_format == "openrouter":
+            if self.reasoning_format in ("openrouter", "gateway"):
                 if effort in ("low", "medium", "high", "xhigh", "max"):
                     payload["reasoning_effort"] = effort
                     payload["reasoning"] = {"effort": effort}
