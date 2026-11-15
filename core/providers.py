@@ -544,16 +544,22 @@ def inspect_provider_auth_statuses(
                 other_sources.append("auth.json")
             if profile_key and profile_key_source:
                 other_sources.append(profile_key_source)
+            if config_key_str:
+                other_sources.append("config")
         elif stored_key:
             effective_source = "auth.json"
             effective_masked = mask_secret(stored_key)
             configured = True
             if profile_key and profile_key_source:
                 other_sources.append(profile_key_source)
+            if config_key_str:
+                other_sources.append("config")
         elif profile_key and profile_key_source:
             effective_source = profile_key_source
             effective_masked = mask_secret(profile_key)
             configured = True
+            if config_key_str:
+                other_sources.append("config")
         elif auth_scheme == "sigv4":
             aws_ok = resolve_aws_credentials(_aws_profile_name(cfg)) is not None
             effective_source = "sigv4 (aws)" if aws_ok else "sigv4 (not configured)"
@@ -678,15 +684,16 @@ def logout_provider_credential(
     registry: dict[str, dict[str, Any]],
     config: dict[str, Any] | None = None,
     global_dir: Path | str | None = None,
-) -> tuple[bool, bool, str]:
+) -> tuple[bool, bool, str, str]:
     """Removes stored credentials for ``provider`` from ``<global_dir>/auth.json``.
 
-    Returns ``(ok, removed, message)`` where ``ok=False`` indicates invalid input
-    or a storage failure, and ``removed`` indicates whether an entry existed.
+    Returns ``(ok, removed, canonical_provider, message)`` where ``ok=False``
+    indicates invalid input or a storage failure, and ``removed`` indicates
+    whether an entry existed.
     """
     clean = str(provider or "").strip()
     if not clean:
-        return False, False, "Provider name cannot be empty."
+        return False, False, "", "Provider name cannot be empty."
     if clean.isdigit():
         stored = [
             s
@@ -700,22 +707,27 @@ def logout_provider_credential(
                 if stored
                 else "No stored credentials found in auth.json."
             )
-            return False, False, msg
+            return False, False, "", msg
         canonical = stored[idx]["provider"]
     else:
         canonical, _ = resolve_provider(registry, clean)
         if not canonical:
-            return False, False, "Provider name cannot be empty."
+            return False, False, "", "Provider name cannot be empty."
 
     try:
         removed = remove_auth_credential(global_dir, canonical, aliases=PROVIDER_ALIASES)
     except Exception as exc:
-        return False, False, f"Failed to remove credentials for '{canonical}': {exc}"
+        return False, False, canonical, f"Failed to remove credentials for '{canonical}': {exc}"
 
     if not removed:
-        return True, False, f"No stored credentials found for '{canonical}'."
+        return True, False, canonical, f"No stored credentials found for '{canonical}'."
     auth_path = get_auth_store_path(global_dir) or "auth.json"
-    return True, True, f"Removed stored credentials for '{canonical}' from {auth_path}."
+    return (
+        True,
+        True,
+        canonical,
+        f"Removed stored credentials for '{canonical}' from {auth_path}.",
+    )
 
 
 @dataclass(frozen=True)

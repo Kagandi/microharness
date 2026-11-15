@@ -839,7 +839,7 @@ def _auth_logout(
     registry: dict[str, dict[str, Any]],
     config: dict[str, Any] | None = None,
 ) -> int:
-    ok, removed, message = logout_provider_credential(
+    ok, removed, _, message = logout_provider_credential(
         provider_arg,
         registry=registry,
         config=config,

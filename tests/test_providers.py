@@ -1591,7 +1591,7 @@ class TestGlobalAuthStorePrecedenceAndInspection(unittest.TestCase):
                 statuses = {
                     s["provider"]: s
                     for s in inspect_provider_auth_statuses(
-                        registry, config={}, global_dir=global_dir
+                        registry, config={"api_key": "cfg-shadowed-key-0000"}, global_dir=global_dir
                     )
                 }
 
@@ -1601,13 +1601,13 @@ class TestGlobalAuthStorePrecedenceAndInspection(unittest.TestCase):
         self.assertEqual(or_status["effective_masked"], "sk-o...3456")
         self.assertTrue(or_status["has_auth_json"])
         self.assertEqual(or_status["auth_json_masked"], "sk-o...4321")
-        self.assertEqual(or_status["other_sources"], ["auth.json"])
+        self.assertEqual(or_status["other_sources"], ["auth.json", "config"])
 
         vercel_status = statuses["vercel"]
         self.assertTrue(vercel_status["configured"])
         self.assertEqual(vercel_status["effective_source"], "auth.json")
         self.assertEqual(vercel_status["effective_masked"], "vck-...9999")
-        self.assertEqual(vercel_status["other_sources"], [])
+        self.assertEqual(vercel_status["other_sources"], ["config"])
 
         lm_status = statuses["lmstudio"]
         self.assertTrue(lm_status["configured"])

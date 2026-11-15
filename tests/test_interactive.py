@@ -455,7 +455,7 @@ class TestRouterDispatch(RouterTestCase):
         self.assertEqual(self.ui.errors[-1], "No stored credentials found for 'vercel'.")
 
     def test_login_handles_spaced_provider_alias_google_ai_studio(self):
-        """Invariant: '/login google ai studio' resolves full alias without treating 'ai studio' as inline key."""
+        """Invariant: '/login google ai studio' resolves full alias both prompted and with inline key."""
         self.ui = RecordingUI(supports_secret_prompt=True, secret_reply="AIza-secret-1234")
         self.harness.resolve_auth_provider.return_value = (True, "google-ai-studio", "")
         self.harness.login_provider.return_value = (
@@ -466,6 +466,12 @@ class TestRouterDispatch(RouterTestCase):
         self.assertEqual(router.dispatch("/login google ai studio"), SKIP)
         self.harness.resolve_auth_provider.assert_called_once_with("google ai studio")
         self.harness.login_provider.assert_called_once_with("google-ai-studio", "AIza-secret-1234")
+
+        self.harness.resolve_auth_provider.reset_mock()
+        self.harness.login_provider.reset_mock()
+        self.assertEqual(router.dispatch("/login google ai studio AIza-inline-5678"), SKIP)
+        self.harness.resolve_auth_provider.assert_called_once_with("google ai studio")
+        self.harness.login_provider.assert_called_once_with("google-ai-studio", "AIza-inline-5678")
 
 
 class TestRenderers(unittest.TestCase):
@@ -626,6 +632,8 @@ class TestHarnessAuthIntegration(unittest.TestCase):
                 removed, rm_msg = harness.logout_provider("vercel-ai-gateway")
                 self.assertTrue(removed)
                 self.assertIn("Removed stored credentials for 'vercel'", rm_msg)
+                self.assertIsNone(harness.model.api_key)
+                self.assertNotIn("api_key", harness.model.auth_secrets)
                 removed_again, _ = harness.logout_provider("vercel")
                 self.assertFalse(removed_again)
 

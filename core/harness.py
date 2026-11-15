@@ -390,6 +390,29 @@ class Harness:
             self.global_dir,
         )
 
+    def _refresh_active_model_api_key(self, canonical: str) -> None:
+        """Syncs the active model's in-memory bearer key with current credentials."""
+        active_provider, _ = resolve_provider(
+            self.provider_registry, getattr(self.model, "provider", None)
+        )
+        if active_provider != canonical or getattr(self.model, "auth_scheme", "bearer") != "bearer":
+            return
+        profile = self.provider_registry.get(canonical, {})
+        effective = resolve_api_key(
+            ModelRequest(),
+            profile,
+            self.merged_config,
+            provider=canonical,
+            global_dir=self.global_dir,
+        )
+        if hasattr(self.model, "api_key"):
+            self.model.api_key = effective
+        if isinstance(getattr(self.model, "auth_secrets", None), dict):
+            if effective is None:
+                self.model.auth_secrets.pop("api_key", None)
+            else:
+                self.model.auth_secrets["api_key"] = effective
+
     def login_provider(self, provider: str, api_key: str) -> tuple[bool, str]:
         """Saves an API key for ``provider`` to ``<global_dir>/auth.json``."""
         ok, canonical, message = login_provider_credential(
@@ -402,33 +425,19 @@ class Harness:
         if not ok:
             return False, message
 
-        profile = self.provider_registry.get(canonical, {})
-        active_provider, _ = resolve_provider(
-            self.provider_registry, getattr(self.model, "provider", None)
-        )
-        if active_provider == canonical:
-            effective = resolve_api_key(
-                ModelRequest(),
-                profile,
-                self.merged_config,
-                provider=canonical,
-                global_dir=self.global_dir,
-            )
-            if effective and getattr(self.model, "auth_scheme", "bearer") == "bearer":
-                self.model.api_key = effective
-                if isinstance(getattr(self.model, "auth_secrets", None), dict):
-                    self.model.auth_secrets["api_key"] = effective
-
+        self._refresh_active_model_api_key(canonical)
         return True, message
 
     def logout_provider(self, provider: str) -> tuple[bool, str]:
         """Removes stored credentials for ``provider`` from ``<global_dir>/auth.json``."""
-        ok, removed, message = logout_provider_credential(
+        ok, removed, canonical, message = logout_provider_credential(
             provider,
             registry=self.provider_registry,
             config=self.merged_config,
             global_dir=self.global_dir,
         )
+        if ok and removed and canonical:
+            self._refresh_active_model_api_key(canonical)
         return (ok and removed), message
 
     def find_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:

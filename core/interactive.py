@@ -737,9 +737,21 @@ class CommandRouter:
         from core.providers import PROVIDER_ALIASES
 
         clean_arg = arg.strip()
-        if clean_arg.lower() in PROVIDER_ALIASES:
-            provider_spec = clean_arg
-            inline_key = None
+        lowered_arg = clean_arg.lower()
+        matched_alias = next(
+            (
+                alias
+                for alias in sorted(PROVIDER_ALIASES, key=len, reverse=True)
+                if lowered_arg == alias
+                or lowered_arg.startswith(f"{alias} ")
+                or lowered_arg.startswith(f"{alias}\t")
+            ),
+            None,
+        )
+        if matched_alias is not None:
+            provider_spec = clean_arg[: len(matched_alias)]
+            rest = clean_arg[len(matched_alias) :].strip()
+            inline_key = rest or None
         else:
             parts = clean_arg.split(None, 1)
             provider_spec = parts[0]
