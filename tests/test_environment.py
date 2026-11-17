@@ -247,8 +247,19 @@ class TestEnvironment(unittest.TestCase):
         # 3. Capture patch
         patch = self.env.get_git_patch()
         self.assertIsNotNone(patch)
+        assert patch is not None
+        self.assertTrue(patch.endswith("\n"))
         self.assertIn("staged_content", patch)
         self.assertIn("untracked_content", patch)
+
+        # Patch must be directly applicable by git apply without corrupt-patch errors
+        patch_file = Path(self.temp_dir) / ".tmp_check.patch"
+        patch_file.write_text(patch, encoding="utf-8")
+        try:
+            stat_code, stat_out = self.env.execute_bash(f"git apply --stat {patch_file.name}")
+            self.assertEqual(stat_code, 0, f"git apply --stat failed: {stat_out}")
+        finally:
+            patch_file.unlink(missing_ok=True)
 
         # 4. CRITICAL: staged.txt must STILL be staged in git index
         _, status_out = self.env.execute_bash("git status --porcelain")

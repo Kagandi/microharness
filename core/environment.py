@@ -219,7 +219,9 @@ class Environment:
             quoted_untracked = " ".join(shlex.quote(f) for f in untracked)
             self.execute_bash(f"git reset -q -- {quoted_untracked}")
 
-        return diff_out.strip() if diff_out.strip() else None
+        if not diff_out.strip():
+            return None
+        return diff_out if diff_out.endswith("\n") else f"{diff_out}\n"
 
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the workspace directory."""
