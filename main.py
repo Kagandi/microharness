@@ -224,6 +224,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Timeout in seconds for task execution (e.g. 3600, 7200)",
     )
+    parser.add_argument(
+        "--bash-timeout",
+        type=float,
+        default=None,
+        help="Per-command timeout in seconds for the bash tool (default: 120.0 or from config)",
+    )
 
 
 def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
@@ -294,6 +300,17 @@ def _add_sandbox_arguments(parser: argparse.ArgumentParser) -> None:
         "--docker-image",
         default=None,
         help="Docker image for container sandboxing (default: python:3.11 or from config)",
+    )
+    parser.add_argument(
+        "--docker-network",
+        default=None,
+        help="Docker network mode for container execution (e.g. 'none' to block outbound network)",
+    )
+    parser.add_argument(
+        "--no-network-tools",
+        action="store_true",
+        default=None,
+        help="Disable outbound network tool plugins (such as web_fetch)",
     )
     parser.add_argument(
         "--trust-project-tools",
@@ -466,6 +483,9 @@ class CliContext:
     reasoning_effort: str | None = None
     use_docker: bool = False
     docker_image: str = "python:3.11"
+    docker_network: str | None = None
+    allow_network_tools: bool | None = None
+    bash_timeout: float | None = None
     trust_project_tools: bool = False
     verbose: bool = True
     args: argparse.Namespace | None = None
@@ -484,6 +504,9 @@ class CliContext:
             sandbox=sandbox,
             docker=self.use_docker,
             docker_image=self.docker_image,
+            docker_network=self.docker_network,
+            allow_network_tools=self.allow_network_tools,
+            bash_timeout=self.bash_timeout,
             evaluator=evaluator,
             cache_ttl=self.cache_ttl,
             reasoning_effort=self.reasoning_effort,
@@ -505,6 +528,9 @@ def create_benchmark_harness_factory(
     reasoning_effort: str | None = None,
     trust_project_tools: bool = False,
     verbose: bool = True,
+    docker_network: str | None = None,
+    allow_network_tools: bool = False,
+    bash_timeout: float | None = None,
 ) -> Callable[[Evaluator], Harness]:
     """Creates a harness factory for benchmark suites that resets ResettableModel between tasks."""
     context = CliContext(
@@ -515,22 +541,35 @@ def create_benchmark_harness_factory(
         reasoning_effort=reasoning_effort,
         use_docker=use_docker,
         docker_image=docker_image or "python:3.11",
+        docker_network=docker_network,
+        allow_network_tools=allow_network_tools,
+        bash_timeout=bash_timeout,
         trust_project_tools=trust_project_tools,
         verbose=verbose,
     )
     return lambda evaluator: context.harness(evaluator)
 
 
+def _task_requires_finish_tool(context: CliContext) -> bool:
+    """Requires explicit finish-tool termination in autonomous runs for real models."""
+    return not isinstance(context.model, MockModel)
+
+
 def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
     """The model/limits summary recorded alongside a benchmark's scorecard."""
     model = context.model
     return {
-        "provider": getattr(context.args, "provider", None) or context.config.get("provider"),
+        "provider": (
+            getattr(context.args, "provider", None)
+            or getattr(model, "provider", None)
+            or context.config.get("provider")
+        ),
         "model": getattr(model, "model", None) or context.config.get("model"),
         "endpoint": getattr(model, "endpoint", None) or context.config.get("endpoint"),
         "cache_ttl": context.cache_ttl,
         "reasoning_effort": context.reasoning_effort,
-        "max_steps": context.args.max_steps or int(context.config.get("max_steps", 30)),
+        "max_steps": getattr(context.args, "max_steps", None)
+        or int(context.config.get("max_steps", 30)),
     }
 
 
@@ -540,6 +579,14 @@ def _resolve_deepswe_dataset(target_dir: Path) -> Path | None:
     if not candidate.is_dir():
         candidate = Path("datasets/deep-swe/tasks").resolve()
     return candidate if candidate.is_dir() else None
+
+
+def _normalize_optional_str(value: Any) -> str | None:
+    """Strips optional string inputs and turns empty/whitespace strings into None."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _run_mini_swe(context: CliContext) -> None:
@@ -552,12 +599,31 @@ def _run_mini_swe(context: CliContext) -> None:
         print(f"❌ No benchmark tasks found matching filter: '{context.args.task}'")
         return
 
-    if context.args.max_steps or context.args.timeout:
-        for task, _ in suite:
-            if context.args.max_steps:
-                task.max_steps = context.args.max_steps
-            if context.args.timeout:
-                task.timeout_seconds = context.args.timeout
+    require_finish = _task_requires_finish_tool(context)
+    explicit_docker_net = _normalize_optional_str(getattr(context.args, "docker_network", None))
+    requested_net = explicit_docker_net or context.docker_network
+    docker_active_any = context.use_docker or any(bool(task.docker_image) for task, _ in suite)
+    if requested_net and not docker_active_any:
+        print(
+            "⚠️ Warning: --docker-network was specified without --docker; bash commands will run on "
+            "the host without container network isolation (network tools remain disabled).",
+            file=sys.stderr,
+        )
+
+    for task, _ in suite:
+        if context.args.max_steps:
+            task.max_steps = context.args.max_steps
+        if context.args.timeout:
+            task.timeout_seconds = context.args.timeout
+        if require_finish:
+            task.require_finish_tool = True
+        task.allow_network_tools = False
+        if explicit_docker_net:
+            task.docker_network = explicit_docker_net
+        elif context.use_docker or task.docker_image:
+            task.docker_network = task.docker_network or context.docker_network or "none"
+        if context.bash_timeout is not None:
+            task.bash_timeout = context.bash_timeout
 
     run_benchmark_suite(
         harness_factory=lambda evaluator: context.harness(evaluator),
@@ -596,6 +662,19 @@ def _run_deepswe_mini(context: CliContext) -> None:
         print(f"❌ No DeepSWE tasks found matching filter: '{context.args.task}'")
         return
 
+    require_finish = _task_requires_finish_tool(context)
+    explicit_docker_net = _normalize_optional_str(getattr(context.args, "docker_network", None))
+    for task, _ in suite:
+        if require_finish:
+            task.require_finish_tool = True
+        task.allow_network_tools = False
+        if explicit_docker_net:
+            task.docker_network = explicit_docker_net
+        elif not task.docker_network:
+            task.docker_network = context.docker_network or "none"
+        if context.bash_timeout is not None:
+            task.bash_timeout = context.bash_timeout
+
     run_benchmark_suite(
         harness_factory=lambda evaluator: context.harness(evaluator),
         tasks=suite,
@@ -610,6 +689,8 @@ def _run_deepswe_mini(context: CliContext) -> None:
 def _run_demo(context: CliContext, name: str) -> None:
     """Runs one of the built-in single-task demos."""
     task, evaluator = create_calculator_demo() if name == "calculator" else create_greeting_demo()
+    if _task_requires_finish_tool(context):
+        task.require_finish_tool = True
     _print_run_summary(context.harness(evaluator).run(task))
 
 
@@ -666,6 +747,17 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         inline_providers=config.get("providers"),
     )
 
+    docker_network = _normalize_optional_str(
+        getattr(args, "docker_network", None)
+    ) or _normalize_optional_str(config.get("docker_network"))
+    allow_network_tools: bool | None = False if getattr(args, "no_network_tools", None) else None
+    raw_bash_timeout = getattr(args, "bash_timeout", None)
+    bash_timeout = (
+        float(raw_bash_timeout)
+        if raw_bash_timeout is not None
+        else (float(config["bash_timeout"]) if config.get("bash_timeout") is not None else None)
+    )
+
     return CliContext(
         args=args,
         config=config,
@@ -685,6 +777,9 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         reasoning_effort=reasoning_effort,
         use_docker=args.docker if args.docker is not None else bool(config.get("docker", False)),
         docker_image=args.docker_image or config.get("docker_image", "python:3.11"),
+        docker_network=docker_network,
+        allow_network_tools=allow_network_tools,
+        bash_timeout=bash_timeout,
         trust_project_tools=trust_project_tools,
         model_spec=_startup_model_spec(args, config, registry),
     )
@@ -716,6 +811,7 @@ def _run_single_task(context: CliContext, parser: argparse.ArgumentParser) -> No
         instruction=args.instruction.strip(),
         max_steps=args.max_steps or 15,
         timeout_seconds=args.timeout or 60.0,
+        require_finish_tool=_task_requires_finish_tool(context),
     )
     harness = context.harness(sandbox=bool(args.sandbox or context.config.get("sandbox", False)))
     _print_run_summary(harness.run(task))
@@ -953,6 +1049,9 @@ def main(argv: list[str] | None = None) -> None:
         sandbox=sandbox,
         docker=context.use_docker,
         docker_image=context.docker_image,
+        docker_network=context.docker_network,
+        allow_network_tools=context.allow_network_tools,
+        bash_timeout=context.bash_timeout,
         cache_ttl=context.cache_ttl,
         reasoning_effort=context.reasoning_effort,
         trust_project_tools=context.trust_project_tools,

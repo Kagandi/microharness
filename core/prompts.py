@@ -20,6 +20,21 @@ Guidelines:
 - Once the task is fully satisfied and verified, provide a final response summarizing your solution without calling any more tools.
 """
 
+DEFAULT_FINISH_TOOL_BULLET = (
+    "- Once the task is fully satisfied and verified, provide a final response summarizing "
+    "your solution without calling any more tools."
+)
+FINISH_TOOL_BULLET = (
+    "- Once the task is fully satisfied and verified, call the `finish` tool with a concise "
+    "summary of your solution and verification results. Do not stop with a plain text status "
+    "message while work remains."
+)
+FINISH_TOOL_INSTRUCTION = (
+    "Completion:\n"
+    "When the task is completely finished and verified, call the `finish` tool with your final "
+    "summary instead of ending with a plain text message."
+)
+
 TOOL_CATALOGUE_ANCHOR = "You have access to tools to interact with the environment:"
 
 GLOBAL_INSTRUCTIONS_HEADER = "--- Global User Instructions (~/.microharness/AGENTS.md) ---"
@@ -60,17 +75,31 @@ def build_system_prompt(
     sandboxed: bool = True,
     agents_instructions: str = "",
     skills_index: str = "",
+    require_finish_tool: bool = False,
 ) -> str:
     """Assembles the full system prompt from its optional sections.
 
     Args:
         sandboxed: When False, adds guidance for working inside a real project
             directory (inspect existing files and git history first).
+        require_finish_tool: When True, instructs the model to terminate via
+            the ``finish`` tool instead of stopping on plain text.
     """
-    sections = [base_prompt]
+    effective_base = base_prompt
+    append_finish_section = False
+    if require_finish_tool:
+        if DEFAULT_FINISH_TOOL_BULLET in effective_base:
+            effective_base = effective_base.replace(DEFAULT_FINISH_TOOL_BULLET, FINISH_TOOL_BULLET)
+        else:
+            append_finish_section = True
 
-    if tool_docs and TOOL_CATALOGUE_ANCHOR not in base_prompt:
+    sections = [effective_base]
+
+    if tool_docs and TOOL_CATALOGUE_ANCHOR not in effective_base:
         sections.append(tool_docs)
+
+    if append_finish_section:
+        sections.append(FINISH_TOOL_INSTRUCTION)
 
     if not sandboxed and workspace is not None:
         sections.append(

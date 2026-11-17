@@ -116,7 +116,9 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.sandbox, False)
         self.assertEqual(cfg.docker, False)
         self.assertEqual(cfg.docker_image, "python:3.11")
+        self.assertIsNone(cfg.docker_network)
         self.assertEqual(cfg.auto_discover_tools, True)
+        self.assertEqual(cfg.allow_network_tools, True)
         self.assertEqual(cfg.disable_default_tools, False)
         self.assertEqual(cfg.runs_dir, None)
         self.assertEqual(cfg.max_tool_tokens, 8000)
@@ -126,6 +128,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.reasoning_effort, None)
         self.assertEqual(cfg.max_step_retries, 3)
         self.assertEqual(cfg.step_retry_delay, 5.0)
+        self.assertEqual(cfg.bash_timeout, 120.0)
 
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
@@ -259,6 +262,62 @@ class TestHarnessConfigCascade(unittest.TestCase):
             legacy.mkdir()
             with patch("pathlib.Path.home", return_value=fake_home):
                 self.assertEqual(get_default_global_dir(), legacy)
+
+    def test_network_isolation_and_bash_timeout_cascade_and_validation(self):
+        """Invariant: docker_network, allow_network_tools, and bash_timeout follow cascade precedence and validate bounds."""
+        cfg_project = self._resolve(
+            HarnessConfig(),
+            global_cfg={
+                "docker_network": "bridge",
+                "allow_network_tools": True,
+                "bash_timeout": 60,
+            },
+            project_cfg={
+                "docker_network": "none",
+                "allow_network_tools": False,
+                "bash_timeout": 90,
+            },
+        )
+        self.assertEqual(cfg_project.docker_network, "none")
+        self.assertEqual(cfg_project.allow_network_tools, False)
+        self.assertEqual(cfg_project.bash_timeout, 90.0)
+
+        cfg_explicit = self._resolve(
+            HarnessConfig(docker_network="host", allow_network_tools=True, bash_timeout=45.0),
+            project_cfg={
+                "docker_network": "none",
+                "allow_network_tools": False,
+                "bash_timeout": 90,
+            },
+        )
+        self.assertEqual(cfg_explicit.docker_network, "host")
+        self.assertEqual(cfg_explicit.allow_network_tools, True)
+        self.assertEqual(cfg_explicit.bash_timeout, 45.0)
+
+        cfg_empty_network = self._resolve(HarnessConfig(docker_network=""))
+        self.assertIsNone(cfg_empty_network.docker_network)
+
+        cfg_ws_and_null = self._resolve(
+            HarnessConfig(),
+            project_cfg={
+                "docker_network": "   ",
+                "allow_network_tools": None,
+            },
+        )
+        self.assertIsNone(cfg_ws_and_null.docker_network)
+        self.assertTrue(cfg_ws_and_null.allow_network_tools)
+
+        cfg_str_false = self._resolve(
+            HarnessConfig(),
+            project_cfg={"allow_network_tools": "false"},
+        )
+        self.assertFalse(cfg_str_false.allow_network_tools)
+
+        for bad_timeout in (0, -1.5):
+            with self.subTest(bad_timeout=bad_timeout):
+                with self.assertRaises(ValueError) as ctx:
+                    self._resolve(HarnessConfig(bash_timeout=bad_timeout))
+                self.assertIn("bash_timeout", str(ctx.exception))
 
 
 class TestProjectToolTrust(unittest.TestCase):

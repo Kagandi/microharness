@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import uuid
@@ -22,14 +23,21 @@ class ContainerEnvironment(Protocol):
         ...
 
 
-def _decode_timeout_output(exc: subprocess.TimeoutExpired, timeout: float) -> tuple[int, str]:
+def _decode_timeout_output(
+    exc: subprocess.TimeoutExpired,
+    timeout: float,
+    note: str | None = None,
+) -> tuple[int, str]:
     """Decodes subprocess timeout output gracefully, handling bytes or string."""
     stdout_str = (
         exc.stdout.decode("utf-8", errors="replace")
         if isinstance(exc.stdout, bytes)
         else (exc.stdout or "")
     )
-    return 124, f"{stdout_str}\n[Command timed out after {timeout} seconds]"
+    suffix = f"[Command timed out after {timeout} seconds]"
+    if note:
+        suffix = f"[Command timed out after {timeout} seconds; {note}]"
+    return 124, f"{stdout_str}\n{suffix}"
 
 
 def _run_command_process(
@@ -211,19 +219,66 @@ class Environment:
             quoted_untracked = " ".join(shlex.quote(f) for f in untracked)
             self.execute_bash(f"git reset -q -- {quoted_untracked}")
 
-        return diff_out.strip() if diff_out.strip() else None
+        if not diff_out.strip():
+            return None
+        return diff_out if diff_out.endswith("\n") else f"{diff_out}\n"
 
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the workspace directory."""
+        if os.name != "posix":
+            try:
+                process = _run_command_process(
+                    command,
+                    cwd=self.workspace_dir,
+                    timeout=timeout,
+                    shell=True,
+                )
+                return process.returncode, process.stdout
+            except subprocess.TimeoutExpired as exc:
+                return _decode_timeout_output(exc, timeout)
+            except Exception as exc:
+                return 1, f"[Execution error: {exc}]"
+
+        proc: subprocess.Popen[str] | None = None
         try:
-            process = _run_command_process(
+            proc = subprocess.Popen(
                 command,
-                cwd=self.workspace_dir,
-                timeout=timeout,
                 shell=True,
+                cwd=str(self.workspace_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=True,
             )
-            return process.returncode, process.stdout
+            stdout, _ = proc.communicate(timeout=timeout)
+            return proc.returncode, stdout
         except subprocess.TimeoutExpired as exc:
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
+                try:
+                    tail, _ = proc.communicate(timeout=2.0)
+                except Exception:
+                    tail = ""
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
+                    if proc.stdout is not None:
+                        try:
+                            proc.stdout.close()
+                        except Exception:
+                            pass
+                if tail:
+                    existing = exc.stdout or ""
+                    if isinstance(existing, bytes):
+                        existing = existing.decode("utf-8", errors="replace")
+                    exc.stdout = f"{existing}{tail}" if existing else tail
             return _decode_timeout_output(exc, timeout)
         except Exception as exc:
             return 1, f"[Execution error: {exc}]"
@@ -266,6 +321,7 @@ class DockerEnvironment(Environment):
     """
 
     container_name: str = ""
+    network: str | None = None
 
     def __init__(
         self,
@@ -277,6 +333,7 @@ class DockerEnvironment(Environment):
         cleanup_on_teardown: bool = True,
         docker_args: list[str] | None = None,
         init_workdir: str | None = None,
+        network: str | None = None,
     ):
         super().__init__(
             workspace_dir=workspace_dir,
@@ -286,14 +343,26 @@ class DockerEnvironment(Environment):
         )
         self.image = image
         self.container_name = container_name or f"microharness_{uuid.uuid4().hex[:10]}"
-        self.docker_args = docker_args or []
+        self.docker_args = list(docker_args or [])
         self.init_workdir = init_workdir
+        self.network = network
         self._container_started = False
         try:
             self._start_container()
         except Exception:
             self.teardown()
             raise
+
+    def _effective_docker_args(self) -> list[str]:
+        """Builds docker run arguments, applying network isolation unless already set."""
+        args = list(self.docker_args)
+        if self.network:
+            has_network_flag = any(
+                a in ("--network", "--net") or a.startswith(("--network=", "--net=")) for a in args
+            )
+            if not has_network_flag:
+                args = ["--network", self.network, *args]
+        return args
 
     def _start_container(self) -> None:
         """Starts a persistent background container mounting workspace at /workspace."""
@@ -307,7 +376,7 @@ class DockerEnvironment(Environment):
             f"{self.workspace_dir}:/workspace",
             "-w",
             "/workspace",
-            *self.docker_args,
+            *self._effective_docker_args(),
             self.image,
             "tail",
             "-f",
@@ -362,14 +431,66 @@ class DockerEnvironment(Environment):
         """Returns True if the Docker container is currently active."""
         return self._container_started
 
+    def _cleanup_timed_out_exec(self, exec_id: str) -> str | None:
+        """Terminates in-container processes tagged with exec_id after a timeout."""
+        target = shlex.quote(f"_MH_EXEC_ID={exec_id}")
+        cleanup_script = (
+            f"target={target}; found=0; "
+            "for f in /proc/[0-9]*/environ; do "
+            "p=${f#/proc/}; p=${p%/environ}; "
+            '[ "$p" = "$$" ] || [ "$p" = "1" ] && continue; '
+            'if tr "\\0" "\\n" < "$f" 2>/dev/null | grep -qx "$target"; then '
+            'found=1; kill -TERM "$p" 2>/dev/null || true; '
+            "fi; "
+            "done; "
+            '[ "$found" -eq 0 ] && exit 0; '
+            "sleep 0.1 2>/dev/null || sleep 1; "
+            "for f in /proc/[0-9]*/environ; do "
+            "p=${f#/proc/}; p=${p%/environ}; "
+            '[ "$p" = "$$" ] || [ "$p" = "1" ] && continue; '
+            'if tr "\\0" "\\n" < "$f" 2>/dev/null | grep -qx "$target"; then '
+            'kill -KILL "$p" 2>/dev/null || true; '
+            "fi; "
+            "done"
+        )
+        try:
+            subprocess.run(
+                ["docker", "exec", self.container_name, "/bin/sh", "-c", cleanup_script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5.0,
+                check=False,
+            )
+            return None
+        except subprocess.TimeoutExpired:
+            try:
+                restart_res = subprocess.run(
+                    ["docker", "restart", "-t", "2", self.container_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15.0,
+                    check=False,
+                )
+                if restart_res.returncode == 0:
+                    return "container became unresponsive and was restarted"
+            except Exception:
+                pass
+            self._container_started = False
+            return "container became unresponsive and restart failed"
+        except Exception:
+            return None
+
     def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
         """Execute a shell command inside the Docker container at /workspace."""
         if not self._container_started:
             return 1, "[Error: Docker container is not running]"
 
+        exec_id = f"mh_{uuid.uuid4().hex[:12]}"
         cmd = [
             "docker",
             "exec",
+            "-e",
+            f"_MH_EXEC_ID={exec_id}",
             "-w",
             "/workspace",
             self.container_name,
@@ -379,13 +500,14 @@ class DockerEnvironment(Environment):
         ]
         try:
             process = _run_command_process(cmd, timeout=timeout)
-            # If bash doesn't exist in the target image (e.g. alpine), fall back to sh (index 5)
+            # If bash doesn't exist in the target image (e.g. alpine), fall back to sh
             if process.returncode == 127 and "bash: not found" in (process.stdout or ""):
-                cmd[5] = "/bin/sh"
+                cmd[cmd.index("/bin/bash")] = "/bin/sh"
                 process = _run_command_process(cmd, timeout=timeout)
             return process.returncode, process.stdout
         except subprocess.TimeoutExpired as exc:
-            return _decode_timeout_output(exc, timeout)
+            note = self._cleanup_timed_out_exec(exec_id)
+            return _decode_timeout_output(exc, timeout, note=note)
         except Exception as exc:
             return 1, f"[Docker execution error: {exc}]"
 

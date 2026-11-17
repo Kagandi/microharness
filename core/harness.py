@@ -72,11 +72,13 @@ from core.skills import (
 from core.tools import (
     BashTool,
     EditFileTool,
+    FinishTool,
     ReadFileTool,
     Tool,
     ToolRegistry,
     WriteFileTool,
     discover_tool_plugins,
+    is_network_tool,
 )
 from core.tracer import ActionFormatter, Tracer
 from core.tui_session import TuiTurnRunner, replay_messages
@@ -128,6 +130,10 @@ class Harness:
         step_retry_delay: float | None = None,
         action_formatters: dict[str, ActionFormatter] | None = None,
         verbose: bool = True,
+        require_finish_tool: bool = False,
+        docker_network: str | None = None,
+        allow_network_tools: bool | None = None,
+        bash_timeout: float | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
@@ -143,7 +149,9 @@ class Harness:
             sandbox=sandbox,
             docker=docker,
             docker_image=docker_image,
+            docker_network=docker_network,
             auto_discover_tools=auto_discover_tools,
+            allow_network_tools=allow_network_tools,
             disable_default_tools=disable_default_tools,
             runs_dir=runs_dir,
             max_tool_tokens=max_tool_tokens,
@@ -153,12 +161,15 @@ class Harness:
             reasoning_effort=reasoning_effort,
             max_step_retries=max_step_retries,
             step_retry_delay=step_retry_delay,
+            bash_timeout=bash_timeout,
         ).resolve(self.layers)
 
         self.sandbox = cfg.sandbox
         self.docker = cfg.docker
         self.docker_image = cfg.docker_image
+        self.docker_network = cfg.docker_network
         self.auto_discover_tools = cfg.auto_discover_tools
+        self.allow_network_tools = cfg.allow_network_tools
         self.disable_default_tools = cfg.disable_default_tools
         self.runs_dir = (
             cfg.runs_dir.resolve() if cfg.runs_dir else (self.global_dir / "runs").resolve()
@@ -170,6 +181,7 @@ class Harness:
         self.reasoning_effort = cfg.reasoning_effort
         self.max_step_retries = cfg.max_step_retries
         self.step_retry_delay = cfg.step_retry_delay
+        self.bash_timeout = cfg.bash_timeout
 
         self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
             trust_project_tools, self.layers
@@ -187,6 +199,7 @@ class Harness:
         self.evaluator = evaluator
         self.action_formatters = action_formatters
         self.verbose = verbose
+        self.require_finish_tool = bool(require_finish_tool)
 
         from core.model import load_provider_registry
 
@@ -459,6 +472,7 @@ class Harness:
         active_image: str,
         init_workdir: str | None,
         initial_files: dict[str, str],
+        docker_network: str | None = None,
     ) -> Environment:
         allowed_reads: list[Path] = [logs_dir]
         if self.global_dir:
@@ -467,6 +481,7 @@ class Harness:
                 allowed_reads.append(sub_path)
             allowed_reads.append(self.global_dir / "AGENTS.md")
         if active_docker:
+            active_network = docker_network if docker_network is not None else self.docker_network
             env: Environment = DockerEnvironment(
                 image=active_image,
                 workspace_dir=workspace,
@@ -474,6 +489,7 @@ class Harness:
                 allowed_read_dirs=allowed_reads,
                 cleanup_on_teardown=True,
                 init_workdir=init_workdir,
+                network=active_network,
             )
         else:
             env = Environment(
@@ -486,21 +502,40 @@ class Harness:
             env.populate_files(initial_files)
         return env
 
-    def _init_tools(self, env: Environment) -> ToolRegistry:
+    def _init_tools(
+        self,
+        env: Environment,
+        *,
+        require_finish_tool: bool = False,
+        allow_network_tools: bool | None = None,
+        bash_timeout: float | None = None,
+    ) -> ToolRegistry:
         registry = ToolRegistry(env=env, max_tool_tokens=self.max_tool_tokens)
+        effective_bash_timeout = bash_timeout if bash_timeout is not None else self.bash_timeout
+        if effective_bash_timeout <= 0:
+            raise ValueError(
+                f"Unsupported bash_timeout: {effective_bash_timeout}. Must be greater than 0."
+            )
+        effective_allow_network = (
+            self.allow_network_tools if allow_network_tools is None else allow_network_tools
+        )
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
-            registry.register(BashTool(env))
+            registry.register(BashTool(env, timeout=effective_bash_timeout))
             registry.register(ReadFileTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
         elif self.custom_tools:
             for t in self.custom_tools:
+                if not effective_allow_network and is_network_tool(t):
+                    continue
                 registry.register(t)
 
         # 2. Additive extra_tools explicitly provided
         for t in self.extra_tools:
+            if not effective_allow_network and is_network_tool(t):
+                continue
             registry.register(t)
 
         # 3. Dynamic plugins auto-discovered from global and project directories
@@ -513,12 +548,18 @@ class Harness:
                 trust_project_tools=self.trust_project_tools,
             )
             for t in discovered:
+                if not effective_allow_network and is_network_tool(t):
+                    continue
                 if t.name in registry:
                     print(
                         f"⚠️ Warning: Discovered tool plugin '{t.name}' overrides existing tool '{t.name}'.",
                         file=sys.stderr,
                     )
                 registry.register(t)
+
+        # 4. Explicit completion tool for autonomous runs unless already supplied
+        if require_finish_tool and "finish" not in registry:
+            registry.register(FinishTool())
 
         return registry
 
@@ -528,6 +569,8 @@ class Harness:
         base_prompt: str,
         tool_registry: ToolRegistry,
         use_sandbox: bool,
+        *,
+        require_finish_tool: bool = False,
     ) -> str:
         """Assembles the system prompt from tools, steering, and the skills index."""
         return build_system_prompt(
@@ -537,6 +580,7 @@ class Harness:
             sandboxed=use_sandbox,
             agents_instructions=load_agents_instructions(workspace, self.global_dir),
             skills_index=render_skills_index(discover_skills(workspace, self.global_dir)),
+            require_finish_tool=require_finish_tool,
         )
 
     def _setup_run(
@@ -548,6 +592,10 @@ class Harness:
         force_sandbox: bool = False,
         docker_image: str | None = None,
         init_workdir: str | None = None,
+        require_finish_tool: bool = False,
+        docker_network: str | None = None,
+        allow_network_tools: bool | None = None,
+        bash_timeout: float | None = None,
     ) -> tuple[Environment, ToolRegistry, Memory, Tracer, AgentLoop, Path]:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"{task_id}_{timestamp}_{uuid.uuid4().hex[:6]}"
@@ -560,6 +608,14 @@ class Harness:
         workspace = (run_dir / "workspace") if use_sandbox else self.explicit_workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
 
+        effective_network = docker_network if docker_network is not None else self.docker_network
+        base_allow_network = (
+            self.allow_network_tools
+            if allow_network_tools is None
+            else (self.allow_network_tools and allow_network_tools)
+        )
+        effective_allow_network = base_allow_network and (effective_network != "none")
+
         env = self._create_environment(
             workspace=workspace,
             logs_dir=logs_dir,
@@ -567,10 +623,20 @@ class Harness:
             active_image=docker_image or self.docker_image,
             init_workdir=init_workdir,
             initial_files=initial_files,
+            docker_network=effective_network,
         )
-        tool_registry = self._init_tools(env)
+        tool_registry = self._init_tools(
+            env,
+            require_finish_tool=require_finish_tool,
+            allow_network_tools=effective_allow_network,
+            bash_timeout=bash_timeout,
+        )
         active_system_prompt = self._build_system_prompt(
-            workspace, system_prompt, tool_registry, use_sandbox
+            workspace,
+            system_prompt,
+            tool_registry,
+            use_sandbox,
+            require_finish_tool=require_finish_tool,
         )
 
         # A batch instruction may itself be a custom command, e.g. "/review src/auth.py".
@@ -592,7 +658,15 @@ class Harness:
             max_context_tokens=self.max_context_tokens,
             trigger_ratio=self.trigger_ratio,
         )
-        task = Task(id=task_id, instruction=effective_instruction, initial_files=initial_files)
+        task = Task(
+            id=task_id,
+            instruction=effective_instruction,
+            initial_files=initial_files,
+            require_finish_tool=require_finish_tool,
+            docker_network=effective_network,
+            allow_network_tools=effective_allow_network,
+            bash_timeout=bash_timeout,
+        )
         tracer = Tracer(
             task=task,
             output_dir=run_dir,
@@ -613,6 +687,7 @@ class Harness:
         max_steps: int,
         deadline: float | None = None,
         on_finish: Callable[[str], None] | None = None,
+        require_finish_tool: bool = False,
     ) -> tuple[bool, str, int]:
         """Drives the agent loop for up to max_steps with retries."""
         outcome = run_steps(
@@ -625,6 +700,7 @@ class Harness:
             max_retries=self.max_step_retries,
             retry_delay=self.step_retry_delay,
             on_finish=on_finish,
+            require_finish_tool=require_finish_tool,
         )
         return outcome.finished, outcome.reason, outcome.next_step
 
@@ -633,9 +709,23 @@ class Harness:
         run_start = time.time()
         start_rl_wait = self._rate_limit_wait()
         system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
+        require_finish = bool(self.require_finish_tool or task.require_finish_tool)
 
         active_docker = self.docker or bool(task.docker_image)
         active_image = task.docker_image or self.docker_image
+        effective_network = (
+            task.docker_network if task.docker_network is not None else self.docker_network
+        )
+        effective_allow_network = (
+            self.allow_network_tools and task.allow_network_tools and (effective_network != "none")
+        )
+        effective_bash_timeout = (
+            task.bash_timeout if task.bash_timeout is not None else self.bash_timeout
+        )
+        if effective_bash_timeout <= 0:
+            raise ValueError(
+                f"Unsupported bash_timeout: {effective_bash_timeout}. Must be greater than 0."
+            )
 
         env, _, _, tracer, loop, run_dir = self._setup_run(
             task_id=task.id,
@@ -645,13 +735,20 @@ class Harness:
             force_sandbox=bool(task.initial_files) or bool(task.init_workdir),
             docker_image=task.docker_image,
             init_workdir=task.init_workdir,
+            require_finish_tool=require_finish,
+            docker_network=effective_network,
+            allow_network_tools=effective_allow_network,
+            bash_timeout=effective_bash_timeout,
         )
 
         if self.verbose:
             print(f"\n🚀 Starting Harness for Task: {task.id}")
             print(f"📁 Workspace: {env.workspace_dir}")
             if active_docker:
-                print(f"🐳 Docker Sandbox: ACTIVE ({active_image})")
+                net_label = f", network: {effective_network}" if effective_network else ""
+                print(f"🐳 Docker Sandbox: ACTIVE ({active_image}{net_label})")
+            if not effective_allow_network:
+                print("🔒 Network tools: DISABLED")
             print(f"📝 Instruction: {task.instruction.strip()}\n")
 
         task_deadline = (run_start + task.timeout_seconds) if task.timeout_seconds else None
@@ -665,6 +762,7 @@ class Harness:
                 start_step=1,
                 max_steps=task.max_steps,
                 deadline=task_deadline,
+                require_finish_tool=require_finish,
             )
 
             total_duration = time.time() - run_start

@@ -66,12 +66,15 @@ class AgentLoop:
 
         # 6. Execute actions and record observations
         tool_results: list[ToolResult] = []
+        terminated = False
         for call in tool_calls:
             result = self.tools.dispatch(call, step_index=step_index)
             if result.exit_code == 0 and self.tools.modifies_files(call.name):
                 target_path = call.arguments.get("path")
                 if target_path:
                     self.memory.record_modified_file(str(target_path))
+            if result.exit_code == 0 and self.tools.terminates_loop(call.name):
+                terminated = True
             self.memory.add_tool_result(result)
             tool_results.append(result)
 
@@ -91,4 +94,4 @@ class AgentLoop:
             usage=step_usage,
         )
 
-        return False, trace
+        return terminated, trace

@@ -116,6 +116,10 @@ class Task:
     timeout_seconds: float = 60.0
     docker_image: str | None = None
     init_workdir: str | None = None
+    require_finish_tool: bool = False
+    docker_network: str | None = None
+    allow_network_tools: bool = True
+    bash_timeout: float | None = None
 
 
 @dataclass

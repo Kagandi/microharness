@@ -160,6 +160,18 @@ def load_harbor_task(
     if isinstance(collect_list, list) and len(collect_list) > 0:
         collect_cmd = collect_list[0].get("command")
 
+    agent_cfg = cfg.get("agent", {})
+    raw_network_mode = str(agent_cfg.get("network_mode", "")).strip().lower()
+    if raw_network_mode in ("no-network", "none"):
+        docker_network: str | None = "none"
+        allow_network_tools = False
+    elif raw_network_mode:
+        docker_network = raw_network_mode
+        allow_network_tools = True
+    else:
+        docker_network = None
+        allow_network_tools = True
+
     task = Task(
         id=task_id,
         instruction=instruction,
@@ -167,6 +179,8 @@ def load_harbor_task(
         timeout_seconds=timeout_seconds,
         docker_image=docker_image,
         init_workdir="/app",
+        docker_network=docker_network,
+        allow_network_tools=allow_network_tools,
     )
     evaluator = HarborEvaluator(task_dir=path, base_commit=base_commit, collect_cmd=collect_cmd)
     return task, evaluator

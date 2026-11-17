@@ -2639,6 +2639,545 @@ class TestCliContext(unittest.TestCase):
         context = self._context(args=argparse.Namespace(benchmark=None, demo=None))
         self.assertFalse(_dispatch_benchmark(context))
 
+    def test_benchmark_metadata_uses_active_model_provider_before_config(self):
+        """Invariant: benchmark metadata logs the active model's provider instead of config fallback."""
+        import argparse
+
+        from main import _benchmark_metadata
+
+        class FakeHttpModel:
+            provider = "vercel"
+            model = "meta/muse-ember"
+            endpoint = "https://ai-gateway.vercel.sh/v1/chat/completions"
+
+        context = self._context(
+            model=FakeHttpModel(),
+            args=argparse.Namespace(provider=None, max_steps=500),
+            config={"provider": "openrouter", "model": "other"},
+        )
+        meta = _benchmark_metadata(context)
+        self.assertEqual(meta["provider"], "vercel")
+        self.assertEqual(meta["model"], "meta/muse-ember")
+        self.assertEqual(meta["max_steps"], 500)
+
+    def test_batch_mode_enables_require_finish_tool_only_for_non_mock_models(self):
+        """Invariant: --batch requires finish tool for real models while leaving MockModel demos clean."""
+        import argparse
+
+        from main import _run_single_task
+
+        class RealLikeModel:
+            provider = "vercel"
+            model = "meta/muse-ember"
+
+            def generate(self, messages, tools):
+                return "done", [
+                    ToolCall(id="f1", name="finish", arguments={"summary": "completed"})
+                ]
+
+        captured_tasks: list[Task] = []
+        real_ctx = self._context(
+            model=RealLikeModel(),
+            args=argparse.Namespace(
+                instruction="Fix bug",
+                max_steps=5,
+                timeout=30.0,
+                sandbox=True,
+            ),
+        )
+        with patch.object(
+            Harness,
+            "run",
+            side_effect=lambda task: (
+                captured_tasks.append(task)
+                or MagicMock(
+                    eval_result=None,
+                    passed=True,
+                    total_steps=1,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    workspace_path=self.tmp,
+                    trace_path=str(self.runs_dir / "t" / "trace.json"),
+                    patch_path=None,
+                )
+            ),
+        ):
+            _run_single_task(real_ctx, argparse.ArgumentParser())
+
+        self.assertEqual(len(captured_tasks), 1)
+        self.assertTrue(captured_tasks[0].require_finish_tool)
+
+        captured_tasks.clear()
+        mock_ctx = self._context(
+            model=MockModel([("offline", [])]),
+            args=argparse.Namespace(
+                instruction="Fix bug",
+                max_steps=5,
+                timeout=30.0,
+                sandbox=True,
+            ),
+        )
+        with patch.object(
+            Harness,
+            "run",
+            side_effect=lambda task: (
+                captured_tasks.append(task)
+                or MagicMock(
+                    eval_result=None,
+                    passed=True,
+                    total_steps=1,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    workspace_path=self.tmp,
+                    trace_path=str(self.runs_dir / "t" / "trace.json"),
+                    patch_path=None,
+                )
+            ),
+        ):
+            _run_single_task(mock_ctx, argparse.ArgumentParser())
+
+        self.assertEqual(len(captured_tasks), 1)
+        self.assertFalse(captured_tasks[0].require_finish_tool)
+
+
+class TestFinishToolAndContinuation(unittest.TestCase):
+    def setUp(self):
+        self.runs_dir = tempfile.mkdtemp()
+
+    def test_harness_recovers_from_narration_only_turn_when_require_finish_tool_enabled(self):
+        """Invariant: a mid-task plain-text narration turn is nudged and completes via finish tool."""
+        script = [
+            ("I've inspected the directory — now implementing the solution.", []),
+            (
+                "Writing answer.txt now.",
+                [
+                    ToolCall(
+                        id="c1",
+                        name="write_file",
+                        arguments={"path": "answer.txt", "content": "42"},
+                    )
+                ],
+            ),
+            (
+                "",
+                [
+                    ToolCall(
+                        id="c2",
+                        name="finish",
+                        arguments={"summary": "Wrote 42 to answer.txt."},
+                    )
+                ],
+            ),
+        ]
+
+        class RecordingMockModel(MockModel):
+            def __init__(self, steps):
+                super().__init__(steps)
+                self.seen_tools: list[list[dict]] = []
+
+            def generate(self, messages, tools):
+                self.seen_tools.append(tools)
+                return super().generate(messages, tools)
+
+        model = RecordingMockModel(script)
+        evaluator = FileContentEvaluator(file_path="answer.txt", must_contain=["42"])
+        harness = Harness(model=model, evaluator=evaluator, runs_dir=self.runs_dir, verbose=False)
+        task = Task(
+            id="recover_from_narration",
+            instruction="Write 42 to answer.txt",
+            max_steps=6,
+            require_finish_tool=True,
+        )
+
+        result = harness.run(task)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.score, 1.0)
+        self.assertEqual(result.finish_reason, "completed")
+        self.assertEqual(result.total_steps, 3)
+
+        trace = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        step2_prompts = trace["steps"][1]["prompt_messages"]
+        self.assertEqual(step2_prompts[-1]["role"], "user")
+        self.assertIn("`finish` tool", step2_prompts[-1]["content"])
+        self.assertIn("`finish`", step2_prompts[0]["content"])
+
+        # Schema advertised finish tool to the model
+        tool_names = [t["function"]["name"] for t in model.seen_tools[-1]]
+        self.assertIn("finish", tool_names)
+
+    def test_finish_tool_error_does_not_terminate_agent_loop(self):
+        """Invariant: a failing finish call returns an error observation rather than ending the loop."""
+        from core.tools import FinishTool
+
+        env = Environment(workspace_dir=tempfile.mkdtemp(), cleanup_on_teardown=True)
+        try:
+            registry = ToolRegistry(env=env)
+            registry.register(FinishTool())
+            memory = Memory(system_prompt="SYS", user_prompt="Finish the task")
+            model = MockModel(
+                [
+                    (
+                        "Finishing",
+                        [ToolCall(id="bad", name="finish", arguments={"unexpected": 1})],
+                    ),
+                    (
+                        "Retrying finish",
+                        [ToolCall(id="ok", name="finish", arguments={"summary": "Done"})],
+                    ),
+                ]
+            )
+            loop = AgentLoop(model=model, memory=memory, tools=registry)
+
+            finished_1, trace_1 = loop.step(step_index=1)
+            self.assertFalse(finished_1)
+            self.assertEqual(trace_1.tool_results[0]["exit_code"], 1)
+
+            finished_2, trace_2 = loop.step(step_index=2)
+            self.assertTrue(finished_2)
+            self.assertEqual(trace_2.tool_results[0]["exit_code"], 0)
+            self.assertEqual(trace_2.tool_results[0]["output"], "Done")
+        finally:
+            env.teardown()
+
+    def test_default_setup_run_does_not_register_finish_tool(self):
+        """Invariant: interactive and default runs do not inject FinishTool."""
+        harness = Harness(model=MockModel([]), runs_dir=self.runs_dir, verbose=False)
+        env, registry, _, _, _, _ = harness._setup_run(
+            task_id="interactive_like",
+            system_prompt="SYS",
+            initial_instruction="",
+            initial_files={},
+        )
+        try:
+            self.assertNotIn("finish", registry)
+        finally:
+            env.teardown()
+
+    def test_harness_blocks_network_tools_when_disabled_or_network_none(self):
+        """Invariant: web_fetch and requires_network tools are excluded when allow_network_tools=False or docker_network='none'."""
+        global_dir = Path(tempfile.mkdtemp())
+        tools_dir = global_dir / "tools"
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        (tools_dir / "web_fetch.py").write_text(
+            "class WebFetchTool:\n"
+            "    name = 'web_fetch'\n"
+            "    description = 'Fetch URL'\n"
+            "    parameters = {'type': 'object', 'properties': {}}\n"
+            "    def execute(self):\n"
+            "        return 0, 'fetched'\n",
+            encoding="utf-8",
+        )
+        (tools_dir / "local_helper.py").write_text(
+            "class LocalHelperTool:\n"
+            "    name = 'local_helper'\n"
+            "    description = 'Offline helper'\n"
+            "    parameters = {'type': 'object', 'properties': {}}\n"
+            "    def execute(self):\n"
+            "        return 0, 'local'\n",
+            encoding="utf-8",
+        )
+
+        class ExtraNetTool:
+            name = "extra_search"
+            description = "Network search"
+            parameters = {"type": "object", "properties": {}}
+            requires_network = True
+
+            def execute(self):
+                return 0, "search"
+
+        # 1. Enabled by default -> web_fetch + extra_search + local_helper present
+        harness_open = Harness(
+            model=MockModel([]),
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            extra_tools=[ExtraNetTool()],
+            verbose=False,
+        )
+        env1, reg1, _, _, _, _ = harness_open._setup_run(
+            task_id="open_net",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+        )
+        try:
+            self.assertIn("web_fetch", reg1)
+            self.assertIn("extra_search", reg1)
+            self.assertIn("local_helper", reg1)
+        finally:
+            env1.teardown()
+
+        # 2. Disabled via allow_network_tools=False -> network tools removed, local_helper kept
+        harness_offline = Harness(
+            model=MockModel([]),
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            extra_tools=[ExtraNetTool()],
+            allow_network_tools=False,
+            verbose=False,
+        )
+        env2, reg2, _, _, _, _ = harness_offline._setup_run(
+            task_id="offline_flag",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+        )
+        try:
+            self.assertNotIn("web_fetch", reg2)
+            self.assertNotIn("extra_search", reg2)
+            self.assertIn("local_helper", reg2)
+            self.assertIn("bash", reg2)
+        finally:
+            env2.teardown()
+
+        # 3. Disabled implicitly when docker_network='none'
+        env3, reg3, _, _, _, _ = harness_open._setup_run(
+            task_id="offline_docker_net",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+            docker_network="none",
+        )
+        try:
+            self.assertNotIn("web_fetch", reg3)
+            self.assertNotIn("extra_search", reg3)
+            self.assertIn("local_helper", reg3)
+        finally:
+            env3.teardown()
+
+    def test_harness_configures_bash_tool_timeout_from_task_and_harness(self):
+        """Invariant: BashTool timeout follows Task.bash_timeout > Harness.bash_timeout > config default (120.0)."""
+        harness_default = Harness(model=MockModel([]), runs_dir=self.runs_dir, verbose=False)
+        env1, reg1, _, _, _, _ = harness_default._setup_run(
+            task_id="bash_t1",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+        )
+        try:
+            self.assertEqual(reg1.get("bash").timeout, 120.0)
+        finally:
+            env1.teardown()
+
+        harness_custom = Harness(
+            model=MockModel([]),
+            runs_dir=self.runs_dir,
+            bash_timeout=45.0,
+            verbose=False,
+        )
+        env2, reg2, _, _, _, _ = harness_custom._setup_run(
+            task_id="bash_t2",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+        )
+        try:
+            self.assertEqual(reg2.get("bash").timeout, 45.0)
+        finally:
+            env2.teardown()
+
+        env3, reg3, _, _, _, _ = harness_custom._setup_run(
+            task_id="bash_t3",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+            bash_timeout=95.0,
+        )
+        try:
+            self.assertEqual(reg3.get("bash").timeout, 95.0)
+        finally:
+            env3.teardown()
+
+    def test_cli_network_and_bash_timeout_flags_and_deepswe_isolation(self):
+        """Invariant: CLI flags parse cleanly and _run_deepswe_mini enforces network isolation & custom bash timeout."""
+        from main import _build_arg_parser, _resolve_cli_context, _run_deepswe_mini
+
+        parser = _build_arg_parser()
+        args = parser.parse_args(
+            [
+                "--benchmark",
+                "deepswe-mini",
+                "--docker-network",
+                "none",
+                "--no-network-tools",
+                "--bash-timeout",
+                "180",
+                "--dir",
+                str(self.runs_dir),
+                "--global-dir",
+                str(self.runs_dir),
+            ]
+        )
+        ctx = _resolve_cli_context(args)
+        self.assertEqual(ctx.docker_network, "none")
+        self.assertFalse(ctx.allow_network_tools)
+        self.assertEqual(ctx.bash_timeout, 180.0)
+
+        captured_tasks: list[Task] = []
+        fake_task = Task(
+            id="fake-deepswe",
+            instruction="fix it",
+            docker_image="img:1",
+            docker_network=None,
+            allow_network_tools=True,
+        )
+        with (
+            patch("main._resolve_deepswe_dataset", return_value=Path(self.runs_dir)),
+            patch(
+                "benchmarks.harbor.get_deepswe_mini_suite", return_value=[(fake_task, MagicMock())]
+            ),
+            patch(
+                "benchmarks.runner.run_benchmark_suite",
+                side_effect=lambda **kwargs: captured_tasks.extend(t for t, _ in kwargs["tasks"]),
+            ),
+        ):
+            _run_deepswe_mini(ctx)
+
+        self.assertEqual(len(captured_tasks), 1)
+        self.assertEqual(captured_tasks[0].docker_network, "none")
+        self.assertFalse(captured_tasks[0].allow_network_tools)
+        self.assertEqual(captured_tasks[0].bash_timeout, 180.0)
+
+    def test_harness_run_filters_custom_tools_and_validates_task_bash_timeout(self):
+        """Invariant: custom_tools obey allow_network_tools=False and Task.bash_timeout <= 0 is rejected in run()."""
+
+        class CustomNetTool:
+            name = "custom_net"
+            description = "Network call"
+            parameters = {"type": "object", "properties": {}}
+            requires_network = True
+
+            def execute(self):
+                return 0, "ok"
+
+        class CustomLocalTool:
+            name = "custom_local"
+            description = "Local call"
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self):
+                return 0, "ok"
+
+        model_called_tools: list[list[str]] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                model_called_tools.append([t["function"]["name"] for t in tools])
+                return "done", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            runs_dir=self.runs_dir,
+            tools=[CustomNetTool(), CustomLocalTool()],
+            verbose=False,
+        )
+        res = harness.run(
+            Task(
+                id="task_custom_net_block",
+                instruction="do local work",
+                allow_network_tools=False,
+                max_steps=2,
+            )
+        )
+        self.assertEqual(res.finish_reason, "completed")
+        self.assertEqual(len(model_called_tools), 1)
+        self.assertNotIn("custom_net", model_called_tools[0])
+        self.assertIn("custom_local", model_called_tools[0])
+
+        for bad_timeout in (0, -2.5):
+            with self.subTest(bad_timeout=bad_timeout):
+                with self.assertRaises(ValueError) as ctx:
+                    harness.run(
+                        Task(
+                            id="task_bad_timeout",
+                            instruction="nope",
+                            bash_timeout=bad_timeout,
+                        )
+                    )
+                self.assertIn("bash_timeout", str(ctx.exception))
+
+    def test_mini_swe_wiring_and_cli_config_normalization(self):
+        """Invariant: _run_mini_swe wires isolation/finish flags, warns on --docker-network without docker, and CLI normalizes whitespace/null."""
+        import contextlib
+        import dataclasses
+        import io
+        import json
+
+        from main import _build_arg_parser, _resolve_cli_context, _run_mini_swe
+
+        cfg_dir = Path(tempfile.mkdtemp())
+        (cfg_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "docker_network": "   ",
+                    "allow_network_tools": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        parser = _build_arg_parser()
+        args_cfg = parser.parse_args(["--dir", str(cfg_dir), "--global-dir", str(cfg_dir)])
+        ctx_cfg = _resolve_cli_context(args_cfg)
+        self.assertIsNone(ctx_cfg.docker_network)
+        self.assertIsNone(ctx_cfg.allow_network_tools)
+        self.assertTrue(ctx_cfg.harness().allow_network_tools)
+
+        # With project config disabling allow_network_tools via string "false", CliContext lets HarnessConfig resolve False
+        (cfg_dir / "config.json").write_text(
+            json.dumps({"allow_network_tools": "false"}),
+            encoding="utf-8",
+        )
+        ctx_disabled = _resolve_cli_context(args_cfg)
+        self.assertFalse(ctx_disabled.harness().allow_network_tools)
+
+        # _run_mini_swe with --docker-network none but no --docker warns on stderr and still configures tasks safely
+        args_mini = parser.parse_args(
+            [
+                "--benchmark",
+                "mini-swe",
+                "--docker-network",
+                "none",
+                "--bash-timeout",
+                "75",
+                "--dir",
+                str(self.runs_dir),
+                "--global-dir",
+                str(self.runs_dir),
+            ]
+        )
+        ctx_mini = _resolve_cli_context(args_mini)
+
+        class RealLikeModel:
+            provider = "vercel"
+            model = "meta/muse-ember"
+
+            def generate(self, messages, tools):
+                return "done", []
+
+        ctx_mini_real = dataclasses.replace(ctx_mini, model=RealLikeModel())
+        captured_tasks: list[Task] = []
+        fake_task = Task(id="mini-1", instruction="solve", docker_image=None)
+        stderr_buf = io.StringIO()
+        with (
+            patch(
+                "benchmarks.mini_swe.get_mini_swe_suite", return_value=[(fake_task, MagicMock())]
+            ),
+            patch(
+                "benchmarks.runner.run_benchmark_suite",
+                side_effect=lambda **kwargs: captured_tasks.extend(t for t, _ in kwargs["tasks"]),
+            ),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
+            _run_mini_swe(ctx_mini_real)
+
+        self.assertIn("--docker-network was specified without --docker", stderr_buf.getvalue())
+        self.assertEqual(len(captured_tasks), 1)
+        self.assertTrue(captured_tasks[0].require_finish_tool)
+        self.assertFalse(captured_tasks[0].allow_network_tools)
+        self.assertEqual(captured_tasks[0].docker_network, "none")
+        self.assertEqual(captured_tasks[0].bash_timeout, 75.0)
+
 
 if __name__ == "__main__":
     unittest.main()
