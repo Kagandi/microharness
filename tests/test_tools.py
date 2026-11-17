@@ -639,6 +639,72 @@ class ValidTool:
 
         self.assertFalse(_is_tool_like(NonCallableExecuteTool()))
 
+    def test_finish_tool_and_terminates_loop(self):
+        """Invariant: FinishTool conforms to Tool, returns summary, and marks terminates_loop."""
+        from core.tools import FinishTool, Tool
+
+        finish = FinishTool()
+        self.assertTrue(isinstance(finish, Tool))
+        self.registry.register(finish)
+
+        self.assertTrue(self.registry.terminates_loop("finish"))
+        self.assertFalse(self.registry.terminates_loop("bash"))
+        self.assertFalse(self.registry.terminates_loop("nonexistent"))
+
+        res = self.registry.dispatch(
+            ToolCall(id="f1", name="finish", arguments={"summary": "All tests pass."}),
+            step_index=1,
+        )
+        self.assertEqual(res.exit_code, 0)
+        self.assertEqual(res.output, "All tests pass.")
+
+        res_empty = self.registry.dispatch(
+            ToolCall(id="f2", name="finish", arguments={"summary": "   "}),
+            step_index=2,
+        )
+        self.assertEqual(res_empty.exit_code, 0)
+        self.assertEqual(res_empty.output, "Task completed.")
+
+    def test_is_network_tool_and_registry_requires_network(self):
+        """Invariant: is_network_tool detects both explicit requires_network attribute and standard network tool names."""
+        from core.tools import is_network_tool
+
+        class FlaggedTool:
+            name = "custom_scraper"
+            description = "Fetches external pages"
+            parameters = {"type": "object", "properties": {}}
+            requires_network = True
+
+            def execute(self):
+                return 0, "ok"
+
+        class WebFetchNamedTool:
+            name = "web_fetch"
+            description = "Legacy plugin without attribute"
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self):
+                return 0, "ok"
+
+        class LocalTool:
+            name = "local_check"
+            description = "Local tool"
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self):
+                return 0, "ok"
+
+        self.assertTrue(is_network_tool(FlaggedTool()))
+        self.assertTrue(is_network_tool(WebFetchNamedTool()))
+        self.assertFalse(is_network_tool(LocalTool()))
+        self.assertFalse(self.registry.requires_network("bash"))
+        self.assertFalse(self.registry.requires_network("nonexistent"))
+
+        self.registry.register(FlaggedTool())
+        self.registry.register(WebFetchNamedTool())
+        self.assertTrue(self.registry.requires_network("custom_scraper"))
+        self.assertTrue(self.registry.requires_network("web_fetch"))
+
 
 if __name__ == "__main__":
     unittest.main()

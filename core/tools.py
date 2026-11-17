@@ -26,6 +26,17 @@ class Tool(Protocol):
 
 DEFAULT_MAX_TOOL_TOKENS = 8000
 
+NETWORK_TOOL_NAMES: frozenset[str] = frozenset(
+    {"web_fetch", "web_search", "fetch_url", "http_request"}
+)
+
+
+def is_network_tool(tool: Any) -> bool:
+    """Checks whether a tool requires outbound network access."""
+    if bool(getattr(tool, "requires_network", False)):
+        return True
+    return getattr(tool, "name", "") in NETWORK_TOOL_NAMES
+
 
 def format_tool_output(
     output: str,
@@ -201,6 +212,28 @@ class EditFileTool:
             return 1, f"Error editing file '{path}': {exc}"
 
 
+class FinishTool:
+    name = "finish"
+    terminates_loop = True
+    description = (
+        "Signal that the entire task is complete and verified. "
+        "Call this only when you are completely finished and ready to submit your final answer."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Concise final summary of the changes made and verification results.",
+            }
+        },
+        "required": ["summary"],
+    }
+
+    def execute(self, summary: str = "") -> tuple[int, str]:
+        return 0, summary.strip() or "Task completed."
+
+
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
@@ -222,6 +255,16 @@ class ToolRegistry:
         """Checks if a registered tool is marked as modifying workspace files."""
         tool = self._tools.get(tool_name)
         return bool(getattr(tool, "modifies_files", False))
+
+    def terminates_loop(self, tool_name: str) -> bool:
+        """Checks if a registered tool signals end-of-task when called successfully."""
+        tool = self._tools.get(tool_name)
+        return bool(getattr(tool, "terminates_loop", False))
+
+    def requires_network(self, tool_name: str) -> bool:
+        """Checks if a registered tool requires outbound network access."""
+        tool = self._tools.get(tool_name)
+        return is_network_tool(tool) if tool is not None else False
 
     def to_system_prompt_snippet(self) -> str:
         """Generates dynamic documentation for all registered tools."""

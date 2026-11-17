@@ -176,6 +176,127 @@ class TestRunSteps(unittest.TestCase):
 
         self.assertTrue(outcome.finished)
 
+    def test_require_finish_tool_nudges_on_empty_tool_calls_until_finish_tool(self):
+        """Invariant: plain-text pauses are nudged when require_finish_tool=True until a tool ends the loop."""
+        empty_pause = _Trace("Now implementing the fix.")
+        tool_step = _Trace("Editing file.")
+        tool_step.model_response["tool_calls"] = [
+            {"id": "c1", "name": "edit_file", "arguments": {}}
+        ]
+        finish_step = _Trace("")
+        finish_step.model_response["tool_calls"] = [
+            {"id": "f1", "name": "finish", "arguments": {"summary": "Fixed and verified"}}
+        ]
+        finish_step.tool_results = [
+            {"call_id": "f1", "output": "Fixed and verified", "exit_code": 0}
+        ]
+
+        loop = _traced_loop(
+            (True, empty_pause),
+            (False, tool_step),
+            (True, empty_pause),
+            (True, finish_step),
+        )
+        loop.memory = MagicMock()
+        tracer = FakeTracer()
+        seen: list[str] = []
+
+        outcome = run_steps(
+            MockModel([]),
+            loop,
+            tracer,
+            start_step=1,
+            max_steps=10,
+            on_finish=seen.append,
+            require_finish_tool=True,
+            max_empty_nudges=1,
+            finish_nudge="Keep going or call finish.",
+        )
+
+        self.assertTrue(outcome.finished)
+        self.assertEqual(outcome.reason, "completed")
+        self.assertEqual(outcome.next_step, 5)
+        self.assertEqual(len(tracer.steps), 4)
+        # Counter reset after tool_step allowed a second empty pause even with max_empty_nudges=1
+        self.assertEqual(loop.memory.add_user.call_count, 2)
+        loop.memory.add_user.assert_called_with("Keep going or call finish.")
+        self.assertEqual(seen, ["Fixed and verified"])
+
+    def test_final_response_text_prefers_finish_tool_over_trailing_tool_result(self):
+        """Invariant: When multiple tools run in the finishing step with empty content, finish's output wins."""
+        multi_step = _Trace("")
+        multi_step.model_response["tool_calls"] = [
+            {"id": "f1", "name": "finish", "arguments": {"summary": "Final summary"}},
+            {"id": "b1", "name": "bash", "arguments": {"command": "echo trailing"}},
+        ]
+        multi_step.tool_results = [
+            {"call_id": "f1", "output": "Final summary", "exit_code": 0},
+            {"call_id": "b1", "output": "trailing stdout", "exit_code": 0},
+        ]
+
+        loop = _traced_loop((True, multi_step))
+        seen: list[str] = []
+        outcome = run_steps(
+            MockModel([]),
+            loop,
+            FakeTracer(),
+            start_step=1,
+            max_steps=5,
+            on_finish=seen.append,
+            require_finish_tool=True,
+        )
+        self.assertTrue(outcome.finished)
+        self.assertEqual(seen, ["Final summary"])
+
+    def test_require_finish_tool_stops_after_max_empty_nudges(self):
+        """Invariant: consecutive plain-text turns stop once max_empty_nudges is exceeded."""
+        loop = _traced_loop(
+            (True, _Trace("pause 1")),
+            (True, _Trace("pause 2")),
+            (True, _Trace("pause 3")),
+        )
+        loop.memory = MagicMock()
+        tracer = FakeTracer()
+        seen: list[str] = []
+
+        outcome = run_steps(
+            MockModel([]),
+            loop,
+            tracer,
+            start_step=1,
+            max_steps=10,
+            on_finish=seen.append,
+            require_finish_tool=True,
+            max_empty_nudges=2,
+        )
+
+        self.assertTrue(outcome.finished)
+        self.assertEqual(outcome.reason, "completed")
+        self.assertEqual(outcome.next_step, 4)
+        self.assertEqual(loop.memory.add_user.call_count, 2)
+        self.assertEqual(seen, ["pause 3"])
+        self.assertTrue(any("without calling finish after 2" in line for line in tracer.logs))
+
+    def test_require_finish_tool_hits_max_steps_without_orphan_nudge(self):
+        """Invariant: running out of step budget on a plain-text pause reports max_steps_exceeded."""
+        loop = _traced_loop((True, _Trace("still thinking")))
+        loop.memory = MagicMock()
+
+        outcome = run_steps(
+            MockModel([]),
+            loop,
+            FakeTracer(),
+            start_step=1,
+            max_steps=1,
+            require_finish_tool=True,
+            max_empty_nudges=3,
+        )
+
+        self.assertFalse(outcome.finished)
+        self.assertEqual(outcome.reason, MAX_STEPS_EXCEEDED)
+        self.assertEqual(outcome.next_step, 2)
+        loop.memory.add_user.assert_not_called()
+
 
 class TestSessionResolution(unittest.TestCase):
     def setUp(self):

@@ -68,6 +68,44 @@ class TestEnvironment(unittest.TestCase):
         self.assertEqual(exit_code, 124)
         self.assertIn("timed out after 0.1", output)
 
+    def test_bash_timeout_kills_process_group_and_captures_partial_output(self):
+        """Invariant: Host POSIX timeout sends SIGKILL to the entire process group and preserves flushed output."""
+        import os
+        import signal
+        import time
+
+        pid_file = Path(self.temp_dir) / "grandchild.pid"
+        cmd = (
+            "python3 -c "
+            f'"import os, subprocess, sys, time; '
+            f"p = subprocess.Popen(['sleep', '60']); "
+            f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
+            "print('PARTIAL_BEFORE_TIMEOUT', flush=True); "
+            'time.sleep(60)"'
+        )
+        exit_code, output = self.env.execute_bash(cmd, timeout=0.35)
+        self.assertEqual(exit_code, 124)
+        self.assertIn("timed out after 0.35", output)
+        self.assertIn("PARTIAL_BEFORE_TIMEOUT", output)
+
+        if pid_file.exists():
+            grandchild_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            # Give the kernel a brief moment to reap the killed child process
+            alive = True
+            for _ in range(20):
+                try:
+                    os.kill(grandchild_pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    alive = False
+                    break
+            if alive:
+                try:
+                    os.kill(grandchild_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.assertFalse(alive, f"Grandchild pid {grandchild_pid} survived timeout killpg")
+
     def test_allowed_read_dirs_permits_external_read(self):
         allowed_dir = Path(tempfile.mkdtemp(prefix="allowed_dir_"))
         external_file = allowed_dir / "global_skill.md"
@@ -232,10 +270,13 @@ class TestEnvironment(unittest.TestCase):
             code, out = d_env.execute_bash("echo hi")
             self.assertEqual(code, 0)
             self.assertEqual(mock_run.call_count, 2)
-            # The second call must have container_name at index 4 and /bin/sh at index 5
             second_cmd = mock_run.call_args_list[1][0][0]
-            self.assertEqual(second_cmd[4], "test_container_xyz")
-            self.assertEqual(second_cmd[5], "/bin/sh")
+            self.assertEqual(second_cmd[2], "-e")
+            self.assertTrue(second_cmd[3].startswith("_MH_EXEC_ID=mh_"))
+            container_idx = second_cmd.index("test_container_xyz")
+            self.assertEqual(container_idx, 6)
+            self.assertEqual(second_cmd[container_idx + 1], "/bin/sh")
+            self.assertEqual(second_cmd[container_idx + 2 :], ["-c", "echo hi"])
 
     def test_is_running_property(self):
         self.assertTrue(self.env.is_running)
@@ -288,6 +329,150 @@ class TestEnvironment(unittest.TestCase):
                 return 0, "podman execution"
 
         self.assertTrue(isinstance(CustomContainerEnv(), ContainerEnvironment))
+
+    def test_docker_environment_network_arg_and_dedup(self):
+        """Invariant: DockerEnvironment applies --network when configured unless docker_args already sets it."""
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.network = "none"
+        d_env.docker_args = ["--cpus", "2"]
+        self.assertEqual(d_env._effective_docker_args(), ["--network", "none", "--cpus", "2"])
+
+        d_env_dup = DockerEnvironment.__new__(DockerEnvironment)
+        d_env_dup.network = "none"
+        d_env_dup.docker_args = ["--network=bridge", "--cpus", "2"]
+        self.assertEqual(d_env_dup._effective_docker_args(), ["--network=bridge", "--cpus", "2"])
+
+        d_env_short = DockerEnvironment.__new__(DockerEnvironment)
+        d_env_short.network = "none"
+        d_env_short.docker_args = ["--net", "host"]
+        self.assertEqual(d_env_short._effective_docker_args(), ["--net", "host"])
+
+    def test_docker_execute_bash_timeout_cleans_up_container_process(self):
+        """Invariant: On TimeoutExpired, DockerEnvironment cleans up matching _MH_EXEC_ID processes inside the container."""
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "test_container_timeout"
+        d_env._container_started = True
+
+        timeout_exc = subprocess.TimeoutExpired(
+            cmd=["docker", "exec"], timeout=1.0, output="partial"
+        )
+        cleanup_res = MagicMock(returncode=0, stdout="")
+
+        with patch("subprocess.run", side_effect=[timeout_exc, cleanup_res]) as mock_run:
+            code, out = d_env.execute_bash("sleep 10", timeout=1.0)
+
+        self.assertEqual(code, 124)
+        self.assertIn("timed out after 1.0 seconds", out)
+        self.assertIn("partial", out)
+        self.assertEqual(mock_run.call_count, 2)
+
+        exec_cmd = mock_run.call_args_list[0][0][0]
+        cleanup_cmd = mock_run.call_args_list[1][0][0]
+        self.assertEqual(
+            cleanup_cmd[:6],
+            ["docker", "exec", "test_container_timeout", "/bin/sh", "-c", cleanup_cmd[5]],
+        )
+        # Extract exec_id from "-e _MH_EXEC_ID=mh_..." and confirm cleanup targets the exact ID
+        self.assertEqual(exec_cmd[2], "-e")
+        env_pair = exec_cmd[3]
+        self.assertTrue(env_pair.startswith("_MH_EXEC_ID=mh_"))
+        exec_id = env_pair.split("=", 1)[1]
+        self.assertIn(f"_MH_EXEC_ID={exec_id}", cleanup_cmd[5])
+
+    def test_docker_execute_bash_timeout_restarts_unresponsive_container(self):
+        """Invariant: If cleanup exec itself times out, DockerEnvironment restarts the container and reports it."""
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "wedged_container"
+        d_env._container_started = True
+
+        exec_timeout = subprocess.TimeoutExpired(cmd=["docker", "exec"], timeout=1.0)
+        cleanup_timeout = subprocess.TimeoutExpired(cmd=["docker", "exec"], timeout=5.0)
+        restart_ok = MagicMock(returncode=0)
+
+        with patch(
+            "subprocess.run", side_effect=[exec_timeout, cleanup_timeout, restart_ok]
+        ) as mock_run:
+            code, out = d_env.execute_bash("echo hi", timeout=1.0)
+
+        self.assertEqual(code, 124)
+        self.assertIn("container became unresponsive and was restarted", out)
+        self.assertTrue(d_env.is_running)
+        self.assertEqual(
+            mock_run.call_args_list[2][0][0],
+            ["docker", "restart", "-t", "2", "wedged_container"],
+        )
+
+    def test_docker_execute_bash_timeout_marks_stopped_when_restart_fails(self):
+        """Invariant: If container restart fails after unresponsive timeout, is_running becomes False."""
+        import subprocess
+        from unittest.mock import MagicMock, patch
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "dead_container"
+        d_env._container_started = True
+
+        exec_timeout = subprocess.TimeoutExpired(cmd=["docker", "exec"], timeout=1.0)
+        cleanup_timeout = subprocess.TimeoutExpired(cmd=["docker", "exec"], timeout=5.0)
+        restart_fail = MagicMock(returncode=1)
+
+        with patch("subprocess.run", side_effect=[exec_timeout, cleanup_timeout, restart_fail]):
+            code, out = d_env.execute_bash("echo hi", timeout=1.0)
+
+        self.assertEqual(code, 124)
+        self.assertIn("restart failed", out)
+        self.assertFalse(d_env.is_running)
+
+    def test_docker_environment_network_none_and_timeout_process_kill(self):
+        """Integration invariant: --network none blocks outbound HTTP and timeout kills child & pure-shell processes."""
+        if not is_docker_available():
+            self.skipTest("Docker is not available on this host.")
+
+        temp_workspace = tempfile.mkdtemp(prefix="test_docker_net_none_")
+        with DockerEnvironment(
+            image="python:3.11",
+            workspace_dir=temp_workspace,
+            cleanup_on_teardown=True,
+            network="none",
+        ) as d_env:
+            # 1. Verify outbound network is blocked inside container
+            code_net, _ = d_env.execute_bash(
+                "python3 -c \"import urllib.request; urllib.request.urlopen('https://example.com', timeout=2)\""
+            )
+            self.assertNotEqual(code_net, 0)
+
+            # 2. Verify timed-out child process is terminated and not orphaned
+            code_t, out_t = d_env.execute_bash(
+                'python3 -c "import time; time.sleep(60)" # ORPHAN_CANARY_MARKER',
+                timeout=0.5,
+            )
+            self.assertEqual(code_t, 124)
+            self.assertIn("timed out", out_t)
+
+            code_ps, out_ps = d_env.execute_bash(
+                "ps -ef | grep -v grep | grep ORPHAN_CANARY_MARKER || echo NO_ORPHAN"
+            )
+            self.assertEqual(code_ps, 0)
+            self.assertEqual(out_ps.strip(), "NO_ORPHAN")
+
+            # 3. Verify pure-shell infinite loop (no child exec) is also terminated
+            code_sh, out_sh = d_env.execute_bash(
+                "while true; do :; done # PURE_SHELL_CANARY",
+                timeout=0.5,
+            )
+            self.assertEqual(code_sh, 124)
+            self.assertIn("timed out", out_sh)
+
+            code_ps_sh, out_ps_sh = d_env.execute_bash(
+                "ps -ef | grep -v grep | grep PURE_SHELL_CANARY || echo NO_SHELL_ORPHAN"
+            )
+            self.assertEqual(code_ps_sh, 0)
+            self.assertEqual(out_ps_sh.strip(), "NO_SHELL_ORPHAN")
 
 
 if __name__ == "__main__":

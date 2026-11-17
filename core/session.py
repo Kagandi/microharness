@@ -37,6 +37,14 @@ NOT_FOUND = "Session not found: no resumable session available"
 SEARCH_LIMIT = 50
 
 
+DEFAULT_MAX_EMPTY_NUDGES = 3
+DEFAULT_FINISH_NUDGE = (
+    "You did not call any tool in your last response. If you still have work, edits, "
+    "or verification to do, continue using your tools now. Only when the entire task "
+    "is complete and verified, call the `finish` tool with your final summary."
+)
+
+
 @dataclass(frozen=True)
 class StepOutcome:
     """Where a turn stopped, and which step index to continue from."""
@@ -59,6 +67,34 @@ def rate_limit_wait(model: Model) -> float:
         return 0.0
 
 
+def _final_response_text(step_trace: Any) -> str:
+    content = step_trace.model_response.get("content", "")
+    if isinstance(content, str) and content.strip():
+        return content
+    results = getattr(step_trace, "tool_results", None) or []
+    tool_calls = step_trace.model_response.get("tool_calls") or []
+    finish_ids = {
+        tc.get("id")
+        for tc in tool_calls
+        if isinstance(tc, dict) and tc.get("name") == "finish" and tc.get("id")
+    }
+    if finish_ids:
+        for res in results:
+            if isinstance(res, dict) and res.get("call_id") in finish_ids:
+                return str(res.get("output", ""))
+    for idx, tc in enumerate(tool_calls):
+        if (
+            isinstance(tc, dict)
+            and tc.get("name") == "finish"
+            and idx < len(results)
+            and isinstance(results[idx], dict)
+        ):
+            return str(results[idx].get("output", ""))
+    if results and isinstance(results[-1], dict):
+        return str(results[-1].get("output", ""))
+    return content if isinstance(content, str) else ""
+
+
 def run_steps(
     model: Model,
     loop: AgentLoop,
@@ -70,14 +106,21 @@ def run_steps(
     max_retries: int = 3,
     retry_delay: float = 5.0,
     on_finish: Callable[[str], None] | None = None,
+    require_finish_tool: bool = False,
+    max_empty_nudges: int = DEFAULT_MAX_EMPTY_NUDGES,
+    finish_nudge: str = DEFAULT_FINISH_NUDGE,
 ) -> StepOutcome:
     """Drives the agent loop for up to ``max_steps`` steps, retrying transient errors.
 
     Time spent waiting out provider rate limits is added back to the deadline, so
-    a throttled run is not charged for the provider's own backoff.
+    a throttled run is not charged for the provider's own backoff. When
+    ``require_finish_tool`` is enabled, a plain-text turn with no tool calls is
+    treated as a pause rather than completion and nudged to continue or call
+    ``finish`` (up to ``max_empty_nudges`` consecutive times).
     """
     step_idx = start_step
     step_attempts = 0
+    consecutive_empty_nudges = 0
 
     while (step_idx - start_step) < max_steps:
         effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
@@ -110,11 +153,37 @@ def run_steps(
 
         tracer.record_step(step_trace)
         step_attempts = 0
+        completed_step = step_idx
         step_idx += 1
+
+        tool_calls = step_trace.model_response.get("tool_calls") or []
+        if tool_calls:
+            consecutive_empty_nudges = 0
+
         if is_finished:
-            if on_finish:
-                on_finish(step_trace.model_response.get("content", ""))
-            return StepOutcome(True, COMPLETED, step_idx)
+            if not require_finish_tool or tool_calls:
+                if on_finish:
+                    on_finish(_final_response_text(step_trace))
+                return StepOutcome(True, COMPLETED, step_idx)
+
+            consecutive_empty_nudges += 1
+            if consecutive_empty_nudges > max_empty_nudges:
+                tracer.log(
+                    f"\n⚠️ Model stopped without calling finish after {max_empty_nudges} "
+                    "continuation prompts; ending run."
+                )
+                if on_finish:
+                    on_finish(_final_response_text(step_trace))
+                return StepOutcome(True, COMPLETED, step_idx)
+
+            if (step_idx - start_step) >= max_steps:
+                return StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
+
+            tracer.log(
+                f"\n↪️ No tool call at step {completed_step}; prompting model to continue or call "
+                f"finish ({consecutive_empty_nudges}/{max_empty_nudges})..."
+            )
+            loop.memory.add_user(finish_nudge)
 
     return StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
 

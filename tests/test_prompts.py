@@ -104,6 +104,26 @@ class TestBuildSystemPrompt(unittest.TestCase):
         self.assertIn("autonomous software engineering assistant", DEFAULT_SYSTEM_PROMPT)
         self.assertIn("Run tests to verify", DEFAULT_SYSTEM_PROMPT)
 
+    def test_require_finish_tool_replaces_default_stop_instruction(self):
+        """Invariant: require_finish_tool swaps 'without calling any more tools' for finish guidance."""
+        from core.prompts import (
+            DEFAULT_FINISH_TOOL_BULLET,
+            FINISH_TOOL_BULLET,
+            FINISH_TOOL_INSTRUCTION,
+        )
+
+        prompt = build_system_prompt(DEFAULT_SYSTEM_PROMPT, require_finish_tool=True)
+        self.assertIn(FINISH_TOOL_BULLET, prompt)
+        self.assertNotIn(DEFAULT_FINISH_TOOL_BULLET, prompt)
+        self.assertNotIn(FINISH_TOOL_INSTRUCTION, prompt)
+
+    def test_require_finish_tool_appends_guidance_to_custom_prompt(self):
+        """Invariant: custom prompts without the default bullet receive a completion section."""
+        from core.prompts import FINISH_TOOL_INSTRUCTION
+
+        prompt = build_system_prompt("CUSTOM", tool_docs="TOOLS", require_finish_tool=True)
+        self.assertEqual(prompt, f"CUSTOM\n\nTOOLS\n\n{FINISH_TOOL_INSTRUCTION}")
+
 
 if __name__ == "__main__":
     unittest.main()

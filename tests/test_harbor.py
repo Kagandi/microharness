@@ -159,6 +159,41 @@ class TestHarborBenchmark(unittest.TestCase):
             self.assertEqual(res.score, 1.0)
             self.assertIn("PASSED ✅", res.feedback)
 
+    def test_load_harbor_task_parses_network_mode(self):
+        """Invariant: task.toml [agent].network_mode='no-network' enforces docker_network='none' and disables network tools."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            td = Path(tmpdir)
+            (td / "instruction.md").write_text("Solve task offline.")
+
+            # 1. no-network -> isolated container + no network tools
+            (td / "task.toml").write_text(
+                '[metadata]\ntask_id = "offline-task"\n'
+                '[agent]\nnetwork_mode = "no-network"\n'
+                '[environment]\ndocker_image = "python:3.11"\n'
+            )
+            task_offline, _ = load_harbor_task(td)
+            self.assertEqual(task_offline.docker_network, "none")
+            self.assertFalse(task_offline.allow_network_tools)
+
+            # 2. bridge -> bridge network, network tools permitted unless blocked
+            (td / "task.toml").write_text(
+                '[metadata]\ntask_id = "online-task"\n'
+                '[agent]\nnetwork_mode = "bridge"\n'
+                '[environment]\ndocker_image = "python:3.11"\n'
+            )
+            task_online, _ = load_harbor_task(td)
+            self.assertEqual(task_online.docker_network, "bridge")
+            self.assertTrue(task_online.allow_network_tools)
+
+            # 3. omitted -> defaults to None and True
+            (td / "task.toml").write_text(
+                '[metadata]\ntask_id = "default-task"\n'
+                '[environment]\ndocker_image = "python:3.11"\n'
+            )
+            task_default, _ = load_harbor_task(td)
+            self.assertIsNone(task_default.docker_network)
+            self.assertTrue(task_default.allow_network_tools)
+
 
 if __name__ == "__main__":
     unittest.main()

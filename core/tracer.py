@@ -72,6 +72,18 @@ def _format_edit_file_action(args: Any) -> str:
     return f"● Edit {path}"
 
 
+def _format_finish_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Finish ({args})"
+    summary = str(args.get("summary", "")).strip()
+    if summary:
+        first_line = summary.splitlines()[0]
+        if len(first_line) > 80:
+            first_line = f"{first_line[:80]}..."
+        return f"● Finish: {first_line}"
+    return "● Finish"
+
+
 ActionFormatter = Callable[[Any], str]
 # The global registry of tool summaries, mutable via register/unregister.
 _ACTION_FORMATTERS: dict[str, ActionFormatter] = {
@@ -79,6 +91,7 @@ _ACTION_FORMATTERS: dict[str, ActionFormatter] = {
     "read_file": _format_read_file_action,
     "write_file": _format_write_file_action,
     "edit_file": _format_edit_file_action,
+    "finish": _format_finish_action,
 }
 
 

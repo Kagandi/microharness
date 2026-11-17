@@ -213,6 +213,19 @@ class _Cascade:
         return cast(val) if val is not None else default
 
 
+def _coerce_bool(val: Any) -> bool:
+    """Coerces booleans and common string representations cleanly."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        norm = val.strip().lower()
+        if norm in {"0", "false", "no", "off", "disable", "disabled", ""}:
+            return False
+        if norm in {"1", "true", "yes", "on", "enable", "enabled"}:
+            return True
+    return bool(val)
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Settings a caller may supply explicitly. ``None`` means "not specified"."""
@@ -220,7 +233,9 @@ class HarnessConfig:
     sandbox: bool | None = None
     docker: bool | None = None
     docker_image: str | None = None
+    docker_network: str | None = None
     auto_discover_tools: bool | None = None
+    allow_network_tools: bool | None = None
     disable_default_tools: bool | None = None
     runs_dir: str | Path | None = None
     max_tool_tokens: int | None = None
@@ -230,6 +245,7 @@ class HarnessConfig:
     reasoning_effort: str | None = None
     max_step_retries: int | None = None
     step_retry_delay: float | None = None
+    bash_timeout: float | None = None
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
@@ -250,15 +266,30 @@ class HarnessConfig:
         if context_tok is None:
             context_tok = 64000
 
+        raw_network = c.pick("docker_network", self.docker_network, str, None, require_truthy=True)
+        docker_network = raw_network.strip() if isinstance(raw_network, str) else None
+        if docker_network == "":
+            docker_network = None
+
+        bash_timeout = c.pick("bash_timeout", self.bash_timeout, float, 120.0)
+        if bash_timeout <= 0:
+            raise ValueError(f"Unsupported bash_timeout: {bash_timeout}. Must be greater than 0.")
+
         return ResolvedConfig(
-            sandbox=c.pick("sandbox", self.sandbox, bool, False),
-            docker=c.pick("docker", self.docker, bool, False),
+            sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
+            docker=c.pick("docker", self.docker, _coerce_bool, False),
             docker_image=c.pick(
                 "docker_image", self.docker_image, str, "python:3.11", require_truthy=True
             ),
-            auto_discover_tools=c.pick("auto_discover_tools", self.auto_discover_tools, bool, True),
+            docker_network=docker_network,
+            auto_discover_tools=c.pick(
+                "auto_discover_tools", self.auto_discover_tools, _coerce_bool, True
+            ),
+            allow_network_tools=c.pick(
+                "allow_network_tools", self.allow_network_tools, _coerce_bool, True
+            ),
             disable_default_tools=c.pick(
-                "disable_default_tools", self.disable_default_tools, bool, False
+                "disable_default_tools", self.disable_default_tools, _coerce_bool, False
             ),
             runs_dir=c.pick("runs_dir", self.runs_dir, Path, None, require_truthy=True),
             max_tool_tokens=tool_tok,
@@ -268,6 +299,7 @@ class HarnessConfig:
             reasoning_effort=normalize_reasoning_effort(reasoning),
             max_step_retries=c.pick("max_step_retries", self.max_step_retries, int, 3),
             step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
+            bash_timeout=bash_timeout,
         )
 
 
@@ -278,7 +310,9 @@ class ResolvedConfig:
     sandbox: bool
     docker: bool
     docker_image: str
+    docker_network: str | None
     auto_discover_tools: bool
+    allow_network_tools: bool
     disable_default_tools: bool
     runs_dir: Path | None
     max_tool_tokens: int
@@ -288,6 +322,7 @@ class ResolvedConfig:
     reasoning_effort: str | None
     max_step_retries: int
     step_retry_delay: float
+    bash_timeout: float
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:
