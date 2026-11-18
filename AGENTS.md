@@ -7,14 +7,14 @@ Instructions and project conventions for AI agents operating on `microharness`.
 - **Pluggability**: Components must implement minimal protocols (`Model`, `Tool`, `Evaluator`). Never introduce provider-specific subclasses or hardcoded branching.
 - **Testing Standard**: Every feature must include rigorous unit tests in `tests/`. Never write tautological "pass-through" assertions (`assertIn(result, [A, B, C])`). Always use strict equality and test negative failure cases.
 - **Version Bumping**: Bump the package version (SemVer patch/minor/major as appropriate) when making user-facing or functional changes, keeping `pyproject.toml`, `microharness/__init__.py`, `core/__init__.py`, `tests/test_package.py`, and `uv.lock` (via `uv lock`) in sync.
-- **Verification**: Run `uv run pytest` and verify formatting/linting with `uv run ruff check .` and `uv run ruff format --check .` (or `uv run pre-commit run --all-files`) before concluding any changes.
+- **Verification**: Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .` (or `uv run pre-commit run --all-files`), and `uv run ty check` before concluding any changes.
 
 ## CI & Quality Automation
 
 - **PR and Push CI (`.github/workflows/ci.yml`)**:
   - Automatically runs on pull requests targeting `main` and pushes to `main`.
   - Jobs:
-    - `lint`: Validates style and formatting with `ruff check .` and `ruff format --check .`.
+    - `lint`: Validates style, formatting, and static types with `ruff check .`, `ruff format --check .`, and `ty check`.
     - `test`: Executes `pytest` across Python versions (`3.11`, `3.12`, `3.13`).
     - `ci-status`: Umbrella status check aggregating `lint` and `test` results to configure as a required status check in GitHub branch protection rulesets.
 - **Security Scanning (`.github/workflows/codeql.yml`)**:

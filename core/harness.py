@@ -223,7 +223,7 @@ class Harness:
             print(f"Feedback: {result.feedback.strip()}")
         return result
 
-    def _write_patch(self, patch_diff: str, run_dir: Path) -> str | None:
+    def _write_patch(self, patch_diff: str | None, run_dir: Path) -> str | None:
         """Persists the workspace diff next to the trace, returning its path."""
         if not patch_diff:
             return None
@@ -292,7 +292,7 @@ class Harness:
 
     def _canonical_model_spec(
         self, spec: str | dict[str, Any]
-    ) -> tuple[bool, str | dict[str, Any], str]:
+    ) -> tuple[bool, str | dict[str, Any] | None, str]:
         """Turns a /model argument (name or 1-based index) into a buildable spec."""
         if not spec:
             return False, None, EMPTY_SPEC_ERROR
@@ -419,12 +419,13 @@ class Harness:
             global_dir=self.global_dir,
         )
         if hasattr(self.model, "api_key"):
-            self.model.api_key = effective
-        if isinstance(getattr(self.model, "auth_secrets", None), dict):
+            setattr(self.model, "api_key", effective)
+        auth_secrets = getattr(self.model, "auth_secrets", None)
+        if isinstance(auth_secrets, dict):
             if effective is None:
-                self.model.auth_secrets.pop("api_key", None)
+                auth_secrets.pop("api_key", None)
             else:
-                self.model.auth_secrets["api_key"] = effective
+                auth_secrets["api_key"] = effective
 
     def login_provider(self, provider: str, api_key: str) -> tuple[bool, str]:
         """Saves an API key for ``provider`` to ``<global_dir>/auth.json``."""

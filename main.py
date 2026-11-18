@@ -594,13 +594,15 @@ def _run_mini_swe(context: CliContext) -> None:
     from benchmarks.mini_swe import get_mini_swe_suite
     from benchmarks.runner import run_benchmark_suite
 
-    suite = get_mini_swe_suite(task_filter=context.args.task)
+    assert context.args is not None
+    args = context.args
+    suite = get_mini_swe_suite(task_filter=args.task)
     if not suite:
-        print(f"❌ No benchmark tasks found matching filter: '{context.args.task}'")
+        print(f"❌ No benchmark tasks found matching filter: '{args.task}'")
         return
 
     require_finish = _task_requires_finish_tool(context)
-    explicit_docker_net = _normalize_optional_str(getattr(context.args, "docker_network", None))
+    explicit_docker_net = _normalize_optional_str(getattr(args, "docker_network", None))
     requested_net = explicit_docker_net or context.docker_network
     docker_active_any = context.use_docker or any(bool(task.docker_image) for task, _ in suite)
     if requested_net and not docker_active_any:
@@ -611,10 +613,10 @@ def _run_mini_swe(context: CliContext) -> None:
         )
 
     for task, _ in suite:
-        if context.args.max_steps:
-            task.max_steps = context.args.max_steps
-        if context.args.timeout:
-            task.timeout_seconds = context.args.timeout
+        if args.max_steps:
+            task.max_steps = args.max_steps
+        if args.timeout:
+            task.timeout_seconds = args.timeout
         if require_finish:
             task.require_finish_tool = True
         task.allow_network_tools = False
@@ -631,7 +633,7 @@ def _run_mini_swe(context: CliContext) -> None:
         suite_name="Mini-SWE",
         output_dir=context.runs_dir,
         verbose=True,
-        resume=bool(context.args.resume),
+        resume=bool(args.resume),
         config=_benchmark_metadata(context),
     )
 
@@ -641,7 +643,9 @@ def _run_deepswe_mini(context: CliContext) -> None:
     from benchmarks.harbor import get_deepswe_mini_suite
     from benchmarks.runner import run_benchmark_suite
 
-    dataset_dir = _resolve_deepswe_dataset(context.target_dir)
+    assert context.args is not None
+    args = context.args
+    dataset_dir = _resolve_deepswe_dataset(context.target_dir or Path.cwd())
     if dataset_dir is None:
         print("❌ DeepSWE dataset not found at datasets/deep-swe/tasks")
         print(
@@ -650,20 +654,20 @@ def _run_deepswe_mini(context: CliContext) -> None:
         )
         return
 
-    max_steps = context.args.max_steps or int(context.config.get("max_steps", 30))
-    timeout_seconds = context.args.timeout or (max_steps * 30.0 if max_steps > 30 else 900.0)
+    max_steps = args.max_steps or int(context.config.get("max_steps", 30))
+    timeout_seconds = args.timeout or (max_steps * 30.0 if max_steps > 30 else 900.0)
     suite = get_deepswe_mini_suite(
         dataset_dir=dataset_dir,
-        task_filter=context.args.task,
+        task_filter=args.task,
         max_steps=max_steps,
         timeout_seconds=timeout_seconds,
     )
     if not suite:
-        print(f"❌ No DeepSWE tasks found matching filter: '{context.args.task}'")
+        print(f"❌ No DeepSWE tasks found matching filter: '{args.task}'")
         return
 
     require_finish = _task_requires_finish_tool(context)
-    explicit_docker_net = _normalize_optional_str(getattr(context.args, "docker_network", None))
+    explicit_docker_net = _normalize_optional_str(getattr(args, "docker_network", None))
     for task, _ in suite:
         if require_finish:
             task.require_finish_tool = True
@@ -681,7 +685,7 @@ def _run_deepswe_mini(context: CliContext) -> None:
         suite_name="DeepSWE-mini",
         output_dir=context.runs_dir,
         verbose=True,
-        resume=bool(context.args.resume),
+        resume=bool(args.resume),
         config=_benchmark_metadata(context),
     )
 
@@ -705,6 +709,7 @@ BENCHMARK_RUNNERS: dict[str, Callable[[CliContext], None]] = {
 
 def _dispatch_benchmark(context: CliContext) -> bool:
     """Runs the requested benchmark suite or demo. Returns False when none was requested."""
+    assert context.args is not None
     choice = context.args.benchmark or context.args.demo
     runner = BENCHMARK_RUNNERS.get(choice) if choice else None
     if runner is None:
@@ -804,6 +809,7 @@ def _resolve_reasoning_effort(args: argparse.Namespace, config: dict[str, Any]) 
 def _run_single_task(context: CliContext, parser: argparse.ArgumentParser) -> None:
     """One-shot batch mode: run the instruction and print the summary."""
     args = context.args
+    assert args is not None
     if not args.instruction:
         parser.error("--batch requires an instruction argument.")
     task = Task(
