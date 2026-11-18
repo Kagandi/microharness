@@ -979,6 +979,7 @@ def build_model_from_spec(
     else:
         auth_secrets = {}
 
+    assert connection.endpoint is not None
     return HttpChatModel(
         base_url=connection.endpoint,
         model=connection.model,

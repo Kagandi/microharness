@@ -680,7 +680,7 @@ class TUIState:
         rows += [(f"{prefix} {name}", desc) for name, desc in self._subcommand_values(kind, sub)]
         return rows
 
-    def _subcommand_values(self, kind: str, sub: str) -> list[tuple[str, str]]:
+    def _subcommand_values(self, kind: str, sub: str | None) -> list[tuple[str, str]]:
         """The ``(name, description)`` values a value menu can offer."""
         if kind == "reasoning":
             levels = [

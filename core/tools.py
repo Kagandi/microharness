@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -19,7 +20,8 @@ class Tool(Protocol):
     description: str
     parameters: dict[str, Any]
 
-    def execute(self, **kwargs: Any) -> tuple[int, str]:
+    @property
+    def execute(self) -> Callable[..., tuple[int, str]]:
         """Execute tool and return (exit_code, output)."""
         ...
 

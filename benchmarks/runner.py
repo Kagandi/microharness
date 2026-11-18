@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from core.evaluator import Evaluator
 from core.harness import Harness
@@ -193,7 +194,7 @@ def _save_report_json(report: BenchmarkReport, output_dir: Path | str, suite_nam
 
 def run_benchmark_suite(
     harness_factory: Callable[[Evaluator], Harness],
-    tasks: list[tuple[Task, Evaluator]],
+    tasks: Sequence[tuple[Task, Evaluator]],
     suite_name: str = "Mini-SWE",
     output_dir: Path | str | None = None,
     verbose: bool = True,

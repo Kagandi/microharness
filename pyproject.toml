@@ -45,6 +45,7 @@ dev = [
     "pre-commit>=3.7.0",
     "pytest>=8.0.0",
     "ruff>=0.4.0",
+    "ty>=0.0.105,<0.1",
 ]
 
 [build-system]
@@ -68,3 +69,13 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
+
+[tool.ty.src]
+include = ["core", "microharness", "benchmarks", "main.py"]
+
+[[tool.ty.overrides]]
+include = ["benchmarks/pier_agent.py"]
+
+[tool.ty.overrides.rules]
+import-not-found = "ignore"
+unused-type-ignore-comment = "ignore"

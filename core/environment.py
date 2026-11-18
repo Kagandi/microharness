@@ -7,6 +7,7 @@ import signal
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -27,13 +28,17 @@ def _decode_timeout_output(
     exc: subprocess.TimeoutExpired,
     timeout: float,
     note: str | None = None,
+    stdout_override: str | None = None,
 ) -> tuple[int, str]:
     """Decodes subprocess timeout output gracefully, handling bytes or string."""
-    stdout_str = (
-        exc.stdout.decode("utf-8", errors="replace")
-        if isinstance(exc.stdout, bytes)
-        else (exc.stdout or "")
-    )
+    if stdout_override is not None:
+        stdout_str = stdout_override
+    else:
+        stdout_str = (
+            exc.stdout.decode("utf-8", errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
     suffix = f"[Command timed out after {timeout} seconds]"
     if note:
         suffix = f"[Command timed out after {timeout} seconds; {note}]"
@@ -68,7 +73,7 @@ class Environment:
         self,
         workspace_dir: Path | str | None = None,
         logs_dir: Path | str | None = None,
-        allowed_read_dirs: list[Path | str] | None = None,
+        allowed_read_dirs: Sequence[Path | str] | None = None,
         cleanup_on_teardown: bool = False,
     ):
         if workspace_dir:
@@ -255,6 +260,7 @@ class Environment:
             stdout, _ = proc.communicate(timeout=timeout)
             return proc.returncode, stdout
         except subprocess.TimeoutExpired as exc:
+            stdout_override: str | None = None
             if proc is not None:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
@@ -278,8 +284,8 @@ class Environment:
                     existing = exc.stdout or ""
                     if isinstance(existing, bytes):
                         existing = existing.decode("utf-8", errors="replace")
-                    exc.stdout = f"{existing}{tail}" if existing else tail
-            return _decode_timeout_output(exc, timeout)
+                    stdout_override = f"{existing}{tail}" if existing else tail
+            return _decode_timeout_output(exc, timeout, stdout_override=stdout_override)
         except Exception as exc:
             return 1, f"[Execution error: {exc}]"
 
@@ -328,7 +334,7 @@ class DockerEnvironment(Environment):
         image: str = "python:3.11",
         workspace_dir: Path | str | None = None,
         logs_dir: Path | str | None = None,
-        allowed_read_dirs: list[Path | str] | None = None,
+        allowed_read_dirs: Sequence[Path | str] | None = None,
         container_name: str | None = None,
         cleanup_on_teardown: bool = True,
         docker_args: list[str] | None = None,
