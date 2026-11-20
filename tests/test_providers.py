@@ -590,6 +590,41 @@ class TestWave8EndpointRouting(unittest.TestCase):
         self.assertEqual(conn.is_local, True)
         self.assertEqual(conn.missing_credentials, False)
 
+    def test_local_provider_alias_ignores_global_cloud_endpoint(self):
+        """Invariant: a local provider alias (e.g. vllm) never routes to a cloud global endpoint."""
+        registry = {
+            **self.REGISTRY,
+            "openrouter": {
+                "endpoint": "https://openrouter.ai/api/v1",
+                "env_keys": ["OPENROUTER_API_KEY"],
+            },
+            "vllm": {
+                "endpoint": "http://localhost:8000/v1",
+                "default_model": "qwen",
+                "env_keys": [],
+            },
+        }
+        for cfg_ep in ("https://openrouter.ai/api/v1", "https://gateway.internal/v1"):
+            config = {
+                "provider": "openrouter",
+                "endpoint": cfg_ep,
+                "api_key": "sk-or-test",
+                "models": {
+                    "LFM3-1.7B": {"model": "LFM3-1.7B-MLX-8bit", "provider": "vllm"},
+                },
+            }
+            with patch.dict(os.environ, {"MODEL_ENDPOINT": ""}, clear=True):
+                conn = resolve_connection(
+                    self._startup_spec(model="LFM3-1.7B"),
+                    config=config,
+                    registry=registry,
+                )
+            self.assertEqual(conn.provider, "vllm")
+            self.assertEqual(conn.model, "LFM3-1.7B-MLX-8bit")
+            self.assertEqual(conn.endpoint, "http://localhost:8000/v1")
+            self.assertTrue(conn.is_local)
+            self.assertFalse(conn.missing_credentials)
+
     def test_flag_endpoint_beats_alias_profile_and_cfg(self):
         """Invariant: an explicit request endpoint wins over both profile and global endpoints."""
         config = {
