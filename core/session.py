@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from core.loop import AgentLoop
 from core.model import RateLimitError
 from core.protocols import DeadlineAwareModel, Model, ModelCancelledError, RateLimitAwareModel
-from core.types import Message
+from core.types import ASSISTANT_EXTRA_KEYS, Message
 
 if TYPE_CHECKING:
     from core.tracer import Tracer
@@ -507,6 +507,9 @@ def _rebuild_assistant_message(response: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     message: dict[str, Any] = {"role": "assistant", "content": content}
+    for key in ASSISTANT_EXTRA_KEYS:
+        if response.get(key) is not None:
+            message[key] = response[key]
     if tool_calls and (rebuilt := _rebuild_tool_calls(tool_calls)):
         message["tool_calls"] = rebuilt
     return message

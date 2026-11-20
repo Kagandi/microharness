@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from core.memory import Memory
-from core.model import Model, UsageReportingModel
+from core.model import AssistantMetadataModel, Model, UsageReportingModel
 from core.tools import ToolRegistry
 from core.types import StepTrace, ToolResult
 
@@ -41,9 +41,18 @@ class AgentLoop:
             messages=self.memory.get_messages(),
             tools=self.tools.to_openai_schemas(),
         )
+        assistant_fields = (
+            self.model.get_last_assistant_fields()
+            if isinstance(self.model, AssistantMetadataModel)
+            else {}
+        )
 
         # 4. Record assistant thought / intent into memory
-        self.memory.add_assistant(content=content, tool_calls=tool_calls)
+        self.memory.add_assistant(
+            content=content,
+            tool_calls=tool_calls,
+            extra_fields=assistant_fields or None,
+        )
 
         step_usage: dict[str, Any] = {}
         if isinstance(self.model, UsageReportingModel):
@@ -57,7 +66,7 @@ class AgentLoop:
             trace = StepTrace(
                 step_index=step_index,
                 prompt_messages=prompt_snapshot,
-                model_response={"content": content, "tool_calls": []},
+                model_response={"content": content, "tool_calls": [], **assistant_fields},
                 tool_results=[],
                 compaction_applied=compaction_applied,
                 duration_s=duration,
@@ -95,6 +104,7 @@ class AgentLoop:
                 "tool_calls": [
                     {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls
                 ],
+                **assistant_fields,
             },
             tool_results=[tr.to_dict() for tr in tool_results],
             compaction_applied=compaction_applied,

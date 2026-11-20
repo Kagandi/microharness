@@ -90,6 +90,13 @@ class UsageReportingModel(Model, Protocol):
 
 
 @runtime_checkable
+class AssistantMetadataModel(Model, Protocol):
+    """Exposes opaque assistant response fields (e.g. reasoning_content) for replay."""
+
+    def get_last_assistant_fields(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
 class NamedModel(Model, Protocol):
     """Exposes its model name identifier."""
 

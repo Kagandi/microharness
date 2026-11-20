@@ -11,6 +11,7 @@ from typing import Any
 from core import config
 from core.auth import get_signer
 from core.protocols import (
+    AssistantMetadataModel,
     CacheAwareModel,
     CancellableModel,
     DeadlineAwareModel,
@@ -33,7 +34,7 @@ from core.providers import (
     resolve_provider,
     seed_user_providers,
 )
-from core.types import Message, ToolCall
+from core.types import ASSISTANT_EXTRA_KEYS, Message, ToolCall
 from core.usage import UsageTelemetry
 
 
@@ -97,6 +98,7 @@ def extract_retry_delay(headers: Any) -> float | None:
 
 
 __all__ = [
+    "AssistantMetadataModel",
     "CacheAwareModel",
     "CancellableModel",
     "DeadlineAwareModel",
@@ -194,6 +196,7 @@ class HttpChatModel(UsageTelemetry):
         self.cache_strategy = (cache_strategy or default_cache_strategy).lower()
         self._init_cache_telemetry(cache_ttl)
         self._cancel_probe: Callable[[], bool] | None = None
+        self._last_assistant_fields: dict[str, Any] = {}
 
     def set_deadline(self, deadline: float | None) -> None:
         """Sets the task deadline timestamp to strictly bound in-flight HTTP requests."""
@@ -510,9 +513,14 @@ class HttpChatModel(UsageTelemetry):
             )
         return tool_calls
 
+    def get_last_assistant_fields(self) -> dict[str, Any]:
+        """Returns opaque assistant fields captured from the last response."""
+        return dict(self._last_assistant_fields)
+
     def generate(
         self, messages: list[Message], tools: list[dict[str, Any]]
     ) -> tuple[str, list[ToolCall]]:
+        self._last_assistant_fields = {}
         headers = self._build_headers()
         payload = self._build_payload(messages, tools)
         res_body = self._send_request(payload, headers)
@@ -521,6 +529,9 @@ class HttpChatModel(UsageTelemetry):
 
         choice = res_body["choices"][0]["message"]
         content = choice.get("content") or ""
+        for key in ASSISTANT_EXTRA_KEYS:
+            if choice.get(key) is not None:
+                self._last_assistant_fields[key] = choice[key]
         tool_calls = self._parse_tool_calls(choice.get("tool_calls"))
 
         return content, tool_calls
