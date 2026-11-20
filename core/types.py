@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+ASSISTANT_EXTRA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning", "reasoning_details")
+
 
 @dataclass
 class ToolCall:
@@ -20,6 +22,7 @@ class Message:
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] | None = None
     raw_log_path: str | None = None
+    extra_fields: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role, "content": self.content or ""}
@@ -44,6 +47,10 @@ class Message:
                     call_data["extra_content"] = tc.extra_content
                 calls_list.append(call_data)
             data["tool_calls"] = calls_list
+        if self.extra_fields:
+            for key, value in self.extra_fields.items():
+                if key not in data and value is not None:
+                    data[key] = value
         return data
 
     @classmethod
@@ -79,12 +86,18 @@ class Message:
                             extra_content=tc.get("extra_content"),
                         )
                     )
+        raw_extra = data.get("extra_fields")
+        extra_fields: dict[str, Any] = dict(raw_extra) if isinstance(raw_extra, dict) else {}
+        for key in ASSISTANT_EXTRA_KEYS:
+            if key in data and data[key] is not None:
+                extra_fields[key] = data[key]
         return cls(
             role=role,
             content=content,
             tool_call_id=tool_call_id,
             tool_calls=tool_calls,
             raw_log_path=raw_log_path,
+            extra_fields=extra_fields or None,
         )
 
 

@@ -19,6 +19,7 @@ from core.commands import Command, SlashOutcome, resolve_slash_input
 from core.discovery import expand_tagged_files
 from core.memory import Memory
 from core.skills import Skill, resolve_skill_command
+from core.subagents import Subagent, format_subagent_desc, resolve_subagent_command
 from core.tracer import Tracer
 
 if TYPE_CHECKING:
@@ -161,6 +162,7 @@ class CommandContext:
     workspace: Path
     commands: dict[str, Command] = field(default_factory=dict)
     skills: dict[str, Skill] = field(default_factory=dict)
+    subagents: dict[str, Subagent] = field(default_factory=dict)
     tracer: Tracer | None = None
     turns: TurnState = field(default_factory=TurnState)
     runner: Any = None
@@ -270,6 +272,14 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         takes_args=True,
     ),
     CommandSpec(
+        "agent",
+        ("/agent", "/agents", "/subagent", "/subagents"),
+        "/agent [name] [task]",
+        "Show available subagents or delegate a task to one",
+        "_cmd_agent",
+        takes_args=True,
+    ),
+    CommandSpec(
         "login",
         ("/login",),
         "/login [provider]",
@@ -337,8 +347,9 @@ def render_help_lines(
     commands: dict[str, Command],
     skills: dict[str, Skill],
     footer: str = "",
+    subagents: dict[str, Subagent] | None = None,
 ) -> list[str]:
-    """Renders ``/help``: built-in commands first, then discovered commands and skills."""
+    """Renders ``/help``: built-in commands first, then discovered commands, skills, and subagents."""
     lines = ["Available commands:"]
     lines += [
         f"  {spec.usage:<{HELP_USAGE_WIDTH}} - {spec.description}"
@@ -356,6 +367,12 @@ def render_help_lines(
         lines += [
             f"  /{name:<10} - {skill.badge}{skill.summary}"
             for name, skill in sorted(skills.items())
+        ]
+    if subagents:
+        lines.append("\nAvailable subagents (run /agent <name> <task>):")
+        lines += [
+            f"  {name:<12} - {format_subagent_desc(agent)}"
+            for name, agent in sorted(subagents.items())
         ]
     if footer:
         lines.append(footer)
@@ -514,7 +531,9 @@ class CommandRouter:
         return EXIT
 
     def _cmd_help(self, _arg: str) -> str:
-        for line in render_help_lines(self.ctx.commands, self.ctx.skills):
+        for line in render_help_lines(
+            self.ctx.commands, self.ctx.skills, subagents=self.ctx.subagents
+        ):
             self.ctx.ui.status(line)
         self.ctx.ui.status("")
         return SKIP
@@ -622,6 +641,20 @@ class CommandRouter:
     def _cmd_skill(self, arg: str) -> str:
         invocation = f"/skill {arg}".strip()
         outcome = resolve_skill_command(invocation, self.ctx.skills)
+        if outcome.is_error:
+            self.ctx.ui.error(outcome.message)
+            return SKIP
+        if outcome.action == SKIP:
+            self.ctx.ui.info(outcome.message)
+            return SKIP
+
+        self.ctx.ui.info(f"⚡ {outcome.message} ...")
+        self.ctx.ui.refresh()
+        return self._add_user_prompt(outcome.prompt or "", echo=invocation)
+
+    def _cmd_agent(self, arg: str) -> str:
+        invocation = f"/agent {arg}".strip()
+        outcome = resolve_subagent_command(invocation, self.ctx.subagents)
         if outcome.is_error:
             self.ctx.ui.error(outcome.message)
             return SKIP

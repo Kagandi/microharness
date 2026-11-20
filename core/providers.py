@@ -829,11 +829,9 @@ def resolve_connection(
         if norm_profile and norm_cfg and norm_profile != norm_cfg:
             profile_local = _is_local_endpoint(profile_endpoint)
             cfg_local = _is_local_endpoint(cfg_endpoint)
-            if cfg_local and not profile_local:
-                # A loopback global default never hijacks a cloud provider.
+            if profile_local != cfg_local:
+                # Local and cloud endpoints are never cross-routed by global defaults.
                 endpoint = profile_endpoint
-            elif profile_local and not cfg_local:
-                endpoint = cfg_endpoint
             else:
                 attributed, _ = find_provider_by_endpoint(resolved_registry, cfg_endpoint)
                 if attributed is None or _canonical_provider_name(

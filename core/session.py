@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from core.loop import AgentLoop
 from core.model import RateLimitError
-from core.protocols import DeadlineAwareModel, Model, RateLimitAwareModel
-from core.types import Message
+from core.protocols import DeadlineAwareModel, Model, ModelCancelledError, RateLimitAwareModel
+from core.types import ASSISTANT_EXTRA_KEYS, Message
 
 if TYPE_CHECKING:
     from core.tracer import Tracer
@@ -100,7 +100,7 @@ def run_steps(
     loop: AgentLoop,
     tracer: Tracer,
     start_step: int,
-    max_steps: int,
+    max_steps: int | None,
     *,
     deadline: float | None = None,
     max_retries: int = 3,
@@ -109,6 +109,7 @@ def run_steps(
     require_finish_tool: bool = False,
     max_empty_nudges: int = DEFAULT_MAX_EMPTY_NUDGES,
     finish_nudge: str = DEFAULT_FINISH_NUDGE,
+    propagate_interrupts: bool = False,
 ) -> StepOutcome:
     """Drives the agent loop for up to ``max_steps`` steps, retrying transient errors.
 
@@ -122,7 +123,7 @@ def run_steps(
     step_attempts = 0
     consecutive_empty_nudges = 0
 
-    while (step_idx - start_step) < max_steps:
+    while max_steps is None or (step_idx - start_step) < max_steps:
         effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
         if effective_deadline and time.time() > effective_deadline:
             tracer.log("\n⚠️ Task reached maximum allowed timeout.")
@@ -134,7 +135,14 @@ def run_steps(
         try:
             is_finished, step_trace = loop.step(step_index=step_idx)
         except KeyboardInterrupt:
+            if propagate_interrupts:
+                raise
             tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
+            return StepOutcome(False, INTERRUPTED, step_idx)
+        except ModelCancelledError:
+            if propagate_interrupts:
+                raise
+            tracer.log("\n⚠️ Cancelled by user (Esc).")
             return StepOutcome(False, INTERRUPTED, step_idx)
         except TimeoutError as exc:
             tracer.log(f"\n⚠️ Task reached maximum allowed timeout: {exc}")
@@ -176,7 +184,7 @@ def run_steps(
                     on_finish(_final_response_text(step_trace))
                 return StepOutcome(True, COMPLETED, step_idx)
 
-            if (step_idx - start_step) >= max_steps:
+            if max_steps is not None and (step_idx - start_step) >= max_steps:
                 return StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
 
             tracer.log(
@@ -499,6 +507,9 @@ def _rebuild_assistant_message(response: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     message: dict[str, Any] = {"role": "assistant", "content": content}
+    for key in ASSISTANT_EXTRA_KEYS:
+        if response.get(key) is not None:
+            message[key] = response[key]
     if tool_calls and (rebuilt := _rebuild_tool_calls(tool_calls)):
         message["tool_calls"] = rebuilt
     return message

@@ -138,7 +138,7 @@ class TestTools(unittest.TestCase):
     def test_tool_registry_to_system_prompt_snippet(self):
         snippet = self.registry.to_system_prompt_snippet()
         self.assertIn("You have access to tools to interact with the environment:", snippet)
-        self.assertIn("bash(command: string):", snippet)
+        self.assertIn("bash(command: string, timeout: number):", snippet)
         self.assertIn("read_file(path: string, start_line: integer, end_line: integer):", snippet)
         self.assertIn("write_file(path: string, content: string):", snippet)
         self.assertIn("edit_file(path: string, old_str: string, new_str: string):", snippet)
@@ -704,6 +704,53 @@ class ValidTool:
         self.registry.register(WebFetchNamedTool())
         self.assertTrue(self.registry.requires_network("custom_scraper"))
         self.assertTrue(self.registry.requires_network("web_fetch"))
+
+    def test_bash_tool_per_call_timeout_and_validation(self):
+        """Invariant: BashTool uses its configured default unless overridden with a valid bounded timeout."""
+        seen: list[tuple[str, float]] = []
+
+        class RecordingEnv(Environment):
+            def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+                seen.append((command, timeout))
+                return 0, "ok"
+
+        rec_env = RecordingEnv(workspace_dir=self.temp_dir, cleanup_on_teardown=False)
+        try:
+            reg = ToolRegistry(env=rec_env)
+            reg.register(BashTool(rec_env, timeout=120.0))
+
+            res_default = reg.dispatch(
+                ToolCall(id="b1", name="bash", arguments={"command": "echo hi"}), step_index=1
+            )
+            self.assertEqual(res_default.exit_code, 0)
+
+            res_custom = reg.dispatch(
+                ToolCall(id="b2", name="bash", arguments={"command": "pytest", "timeout": 300}),
+                step_index=2,
+            )
+            self.assertEqual(res_custom.exit_code, 0)
+
+            res_clamped = reg.dispatch(
+                ToolCall(id="b3", name="bash", arguments={"command": "build", "timeout": 99999}),
+                step_index=3,
+            )
+            self.assertEqual(res_clamped.exit_code, 0)
+
+            self.assertEqual(seen, [("echo hi", 120.0), ("pytest", 300.0), ("build", 1800.0)])
+
+            for idx, bad in enumerate((0, -5, True, "fast", float("nan"), float("inf")), start=4):
+                res_bad = reg.dispatch(
+                    ToolCall(id=f"b{idx}", name="bash", arguments={"command": "x", "timeout": bad}),
+                    step_index=idx,
+                )
+                self.assertEqual(res_bad.exit_code, 1)
+                self.assertIn("invalid bash timeout", res_bad.output)
+
+            # A configured default above DEFAULT_MAX_BASH_TIMEOUT raises the ceiling accordingly.
+            high_tool = BashTool(rec_env, timeout=2400.0)
+            self.assertEqual(high_tool.max_timeout, 2400.0)
+        finally:
+            rec_env.teardown()
 
 
 if __name__ == "__main__":

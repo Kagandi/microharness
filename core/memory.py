@@ -49,12 +49,18 @@ class Memory:
     def add_user(self, content: str) -> None:
         self.messages.append(Message(role="user", content=content or ""))
 
-    def add_assistant(self, content: str, tool_calls: list[ToolCall] | None = None) -> None:
+    def add_assistant(
+        self,
+        content: str,
+        tool_calls: list[ToolCall] | None = None,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None:
         self.messages.append(
             Message(
                 role="assistant",
                 content=content or "",
                 tool_calls=tool_calls if tool_calls else None,
+                extra_fields=dict(extra_fields) if extra_fields else None,
             )
         )
 

@@ -664,6 +664,33 @@ class TestReconstructMessages(unittest.TestCase):
         call = reconstruct_messages_from_steps(steps)[1]["tool_calls"][0]
         self.assertEqual(call["extra_content"], {"provider": "x"})
 
+    def test_assistant_reasoning_fields_survive_resume(self):
+        """Invariant: reasoning_content, reasoning, and reasoning_details survive reconstruction."""
+        steps = [
+            {
+                "prompt_messages": [{"role": "user", "content": "x"}],
+                "model_response": {
+                    "content": "",
+                    "reasoning": "step think",
+                    "reasoning_content": "raw think",
+                    "reasoning_details": [{"type": "reasoning.text", "text": "step think"}],
+                    "tool_calls": [
+                        {
+                            "id": "1",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "tool_results": [],
+            }
+        ]
+        rebuilt = reconstruct_messages_from_steps(steps)[1]
+        self.assertEqual(rebuilt["reasoning"], "step think")
+        self.assertEqual(rebuilt["reasoning_content"], "raw think")
+        self.assertEqual(
+            rebuilt["reasoning_details"], [{"type": "reasoning.text", "text": "step think"}]
+        )
+
 
 class TestLoadSessionMessagesFallbacks(unittest.TestCase):
     def setUp(self):

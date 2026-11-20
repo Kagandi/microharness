@@ -91,6 +91,116 @@ class TestModel(unittest.TestCase):
             '{"command": "ls -la"}',
         )
 
+    def test_message_reasoning_extra_fields_round_trip(self):
+        """Invariant: Message preserves reasoning_content/reasoning/reasoning_details without clobbering core keys."""
+        msg = Message(
+            role="assistant",
+            content="ok",
+            extra_fields={
+                "role": "system",
+                "reasoning_content": "step trace",
+                "reasoning": "summary trace",
+                "reasoning_details": [{"type": "reasoning.text", "text": "summary trace"}],
+                "ignored_none": None,
+            },
+        )
+        serialized = msg.to_dict()
+        self.assertEqual(serialized["role"], "assistant")
+        self.assertEqual(serialized["content"], "ok")
+        self.assertEqual(serialized["reasoning_content"], "step trace")
+        self.assertEqual(serialized["reasoning"], "summary trace")
+        self.assertEqual(
+            serialized["reasoning_details"],
+            [{"type": "reasoning.text", "text": "summary trace"}],
+        )
+        self.assertNotIn("ignored_none", serialized)
+
+        restored = Message.from_dict(serialized)
+        self.assertEqual(restored.to_dict(), serialized)
+
+    def test_http_chat_model_replays_assistant_reasoning_across_tool_turns(self):
+        """Invariant: HttpChatModel captures reasoning fields and AgentLoop replays them on the next turn."""
+        from core.loop import AgentLoop
+        from core.memory import Memory
+        from core.tools import ToolRegistry
+
+        class EchoTool:
+            name = "echo"
+            description = "Echo"
+            parameters = {"type": "object", "properties": {"text": {"type": "string"}}}
+
+            def execute(self, text: str = "") -> tuple[int, str]:
+                return 0, text
+
+        model = HttpChatModel(
+            base_url="https://ai-gateway.vercel.sh/v1",
+            api_key="test-key",
+            model="reflection/beam",
+        )
+        seen_payloads: list[dict] = []
+        responses = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning": "think 1",
+                            "reasoning_content": "raw think 1",
+                            "reasoning_details": [{"type": "reasoning.text", "text": "think 1"}],
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "echo", "arguments": '{"text": "hi"}'},
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {},
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Done.",
+                        }
+                    }
+                ],
+                "usage": {},
+            },
+        ]
+
+        def fake_send(payload: dict, headers: dict) -> dict:
+            seen_payloads.append(payload)
+            return responses[len(seen_payloads) - 1]
+
+        model._send_request = fake_send  # type: ignore[method-assign]
+        memory = Memory(system_prompt="sys", user_prompt="go")
+        registry = ToolRegistry(env=MagicMock())
+        registry.register(EchoTool())
+        loop = AgentLoop(model=model, memory=memory, tools=registry)
+
+        done1, trace1 = loop.step(1)
+        self.assertFalse(done1)
+        self.assertEqual(trace1.model_response["reasoning_content"], "raw think 1")
+        self.assertEqual(trace1.model_response["reasoning"], "think 1")
+
+        done2, _ = loop.step(2)
+        self.assertTrue(done2)
+        replayed_assistant = seen_payloads[1]["messages"][2]
+        self.assertEqual(replayed_assistant["role"], "assistant")
+        self.assertEqual(replayed_assistant["reasoning_content"], "raw think 1")
+        self.assertEqual(replayed_assistant["reasoning"], "think 1")
+        self.assertEqual(
+            replayed_assistant["reasoning_details"],
+            [{"type": "reasoning.text", "text": "think 1"}],
+        )
+        # Step 2 had no reasoning fields, so last assistant metadata was cleared.
+        self.assertEqual(model.get_last_assistant_fields(), {})
+
     def test_tool_result_to_dict(self):
         from core.types import ToolResult
 
