@@ -84,6 +84,28 @@ def _format_finish_action(args: Any) -> str:
     return "● Finish"
 
 
+def _format_subagent_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Subagent ({args})"
+    tasks = args.get("tasks")
+    if isinstance(tasks, list) and tasks:
+        names = [
+            str(item.get("agent") or "worker").strip() or "worker"
+            if isinstance(item, dict)
+            else "worker"
+            for item in tasks
+        ]
+        return f"● Subagent parallel ({len(names)} tasks: {', '.join(names)})"
+    agent = str(args.get("agent") or "worker").strip() or "worker"
+    task = str(args.get("task") or "").strip()
+    if task:
+        first_line = task.splitlines()[0]
+        if len(first_line) > 60:
+            first_line = f"{first_line[:60]}..."
+        return f"● Subagent [{agent}]: {first_line}"
+    return f"● Subagent [{agent}]"
+
+
 ActionFormatter = Callable[[Any], str]
 # The global registry of tool summaries, mutable via register/unregister.
 _ACTION_FORMATTERS: dict[str, ActionFormatter] = {
@@ -92,6 +114,7 @@ _ACTION_FORMATTERS: dict[str, ActionFormatter] = {
     "write_file": _format_write_file_action,
     "edit_file": _format_edit_file_action,
     "finish": _format_finish_action,
+    "subagent": _format_subagent_action,
 }
 
 

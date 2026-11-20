@@ -164,7 +164,26 @@ Check for:
 * **Argument Substitution**: `$ARGUMENTS` or `{args}` is substituted with your trailing arguments.
 * **Dynamic Help & Shadowing**: `/help` lists all discovered custom commands with their descriptions and scopes (`[project]` or `[global]`). Project commands shadow global ones.
 
-### 5. Custom Tool Plugins (`.microharness/tools/*.py`) — Zero-Commit Extensibility
+### 5. Subagents (`.microharness/agents/*.md`, Presets & Parallel Delegation)
+Delegate isolated subtasks to child agents with a clean `Memory` (zero parent context bias) and scoped tools:
+* **Built-in Presets**: `explore` (read-only `read_file` + `bash`), `reviewer` (unbiased read-only code review), and `worker` (full file + bash tools, excluding recursive `subagent` calls).
+* **Custom Agent Files**: Place Markdown definitions with optional YAML frontmatter in `~/.microharness/agents/*.md` (`[global]`) or `.microharness/agents/*.md` (`[project]`, shadowing global and built-in presets):
+  ```markdown
+  ---
+  name: security-reviewer
+  description: Audits diffs and auth logic for security flaws
+  tools: [read_file, bash]
+  model: fast
+  effort: high
+  max_steps: 10
+  ---
+  You are a focused security reviewer starting with a clean context...
+  ```
+  Supports comma-separated or YAML `tools` lists (with `read`/`write`/`edit` aliases), `effort` (`reasoning_effort` / `thinking` aliases), and optional `max_steps` (`max_turns` alias).
+* **Parallel Fan-Out**: Emitting multiple `subagent` calls in one turn or passing `tasks: [{agent, task, ...}, ...]` runs child loops concurrently and returns aggregated findings.
+* **TUI & Interactive Discovery**: Use `/agent` (or `/agents`, `/subagent`) to list, inspect, or delegate to subagents, with floating Tab autocomplete and live child-step action lines in the TUI.
+
+### 6. Custom Tool Plugins (`.microharness/tools/*.py`) — Zero-Commit Extensibility
 Add new capabilities to the agent dynamically without modifying harness core code or making git commits:
 * **Global Tools** (`~/.microharness/tools/*.py`): Available across all projects on your machine (always trusted and loaded automatically).
 * **Project Tools** (`.microharness/tools/*.py`): Scoped to the current repository. Requires explicit opt-in via `--trust-project-tools` (or `"trust_project_tools": true` in `~/.microharness/config.json`) to prevent untrusted code execution from cloned repositories.
@@ -285,6 +304,7 @@ You can inspect or control the harness runtime directly:
 * **`/login [provider|number] [key]`**: List providers and their effective credential sources without exposing secrets, or store/update an API key for a provider in `~/.microharness/auth.json` (prompts with masked input when the key is omitted; Tab autocompletes providers in TUI mode).
 * **`/logout [provider|number]`**: List providers with keys stored in `~/.microharness/auth.json`, or remove stored credentials for a provider.
 * **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place. Discovery reads only the newest sessions first and falls back to a full scan when your repository has no recent session, so an older session for the same repo stays reachable.
+* **`/agent [name|number] [task]`**: List built-in and discovered subagents (`.microharness/agents/*.md`), inspect an agent's tools/model/effort/max_steps, or delegate a task directly (with Tab autocomplete in the TUI).
 * **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
 * **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
 * **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
@@ -483,6 +503,7 @@ microharness/
 │   ├── model.py        # Generic HttpChatModel & MockModel clients
 │   ├── config.py       # Cascading configuration, JSONC reading & setting resolution
 │   ├── skills.py       # Progressive-disclosure skills (discovery, summaries, activation)
+│   ├── subagents.py    # Subagent presets, .md discovery & isolated child delegation tool
 │   ├── commands.py     # Custom slash commands & slash-input resolution
 │   ├── discovery.py    # Hierarchical resource discovery & @file-tagging
 │   ├── interactive.py  # Interactive command router shared by the CLI session & the TUI
@@ -507,6 +528,7 @@ microharness/
     ├── test_usage.py       # Token normalization & telemetry accounting tests
     ├── test_providers.py   # Provider registry, model specs & available-model tests
     ├── test_skills.py      # Skill discovery, summaries & activation tests
+    ├── test_subagents.py   # Subagent parsing, isolation, overrides, parallel & TUI tests
     ├── test_commands.py    # Slash-command discovery, expansion & resolution tests
     ├── test_prompts.py     # Prompt assembly & AGENTS.md cascading tests
     ├── test_session.py     # Step driver retries, deadlines & session resumption tests

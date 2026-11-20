@@ -51,6 +51,7 @@ microharness/
 │   ├── model.py                # Generic HttpChatModel & MockModel clients
 │   ├── config.py               # Cascading configuration, JSONC reading & setting resolution
 │   ├── skills.py               # Progressive skills: discovery, summaries & activation
+│   ├── subagents.py            # Subagent presets, frontmatter discovery & isolated delegation tool
 │   ├── commands.py             # Custom slash commands & slash-input resolution
 │   ├── discovery.py            # Hierarchical resource discovery & @file-tagging
 │   ├── interactive.py          # Command router shared by the CLI session & the TUI
@@ -73,6 +74,7 @@ microharness/
     ├── test_usage.py           # Token normalization & telemetry accounting
     ├── test_providers.py       # Provider registry, model specs & available models
     ├── test_skills.py          # Skill discovery, summaries & activation
+    ├── test_subagents.py       # Subagent parsing, isolation, overrides, parallel & TUI
     ├── test_commands.py        # Slash-command discovery, expansion & resolution
     ├── test_prompts.py         # Prompt assembly & AGENTS.md cascading
     ├── test_session.py         # Step driver, session index & trace reconstruction
@@ -277,6 +279,11 @@ The harness discovers global machine configuration, steering guidelines, skills,
    * Automatically replaces `$ARGUMENTS` or `{args}` with trailing input, or appends input as context.
    * Expands commands in both batch instructions (`microharness "/review src/auth.py"`) and interactive chat (`👤 You: /review src/auth.py`).
    * `/help` dynamically lists available custom commands alongside built-in meta-commands.
+5. **Subagents (`.microharness/agents/*.md` & `SubagentTool`)**:
+   * Built-in presets (`explore`, `reviewer`, `worker`) plus global (`~/.microharness/agents/*.md`) and project (`.microharness/agents/*.md`, `.microharness/agents/<name>/AGENT.md`) definitions where project files shadow global and built-in definitions.
+   * YAML frontmatter supports `name`, `description`, `tools` (comma-separated, inline `[...]`, or YAML list with `read`/`write`/`edit` aliases; `subagent` and `finish` always stripped), `model` (`inherit` or model spec/alias), `effort` (`reasoning_effort` / `thinking` aliases), and optional `max_steps` (`max_turns` alias).
+   * `SubagentTool` (`name = "subagent"`, `parallel_safe = True`) executes each subagent in-process with a fresh `Memory` (zero parent context bias), a scoped `ToolRegistry`, child traces under `<run_dir>/subagents/`, deadline/cancellation propagation, parallel concurrency (via multiple tool calls in a step or `tasks=[...]`), and parent run token rollup.
+   * Interactive `/agent` (`/agents`, `/subagent`) command and TUI floating autocomplete menu support listing, inspecting, and delegating to subagents with live child-step progress lines.
 
 ---
 

@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.discovery import discover_resources
 from core.environment import Environment
+from core.protocols import ModelCancelledError
 from core.types import ToolCall, ToolResult
 
 
@@ -253,6 +254,15 @@ class ToolRegistry:
     def get(self, tool_name: str) -> Tool | None:
         return self._tools.get(tool_name)
 
+    def registered_tools(self) -> dict[str, Tool]:
+        """Returns a shallow mapping of registered tool names to tool instances."""
+        return dict(self._tools)
+
+    def is_parallel_safe(self, tool_name: str) -> bool:
+        """Checks if a registered tool can be dispatched concurrently across multiple calls in one step."""
+        tool = self._tools.get(tool_name)
+        return bool(getattr(tool, "parallel_safe", False))
+
     def modifies_files(self, tool_name: str) -> bool:
         """Checks if a registered tool is marked as modifying workspace files."""
         tool = self._tools.get(tool_name)
@@ -314,6 +324,8 @@ class ToolRegistry:
 
         try:
             exit_code, raw_output = tool.execute(**tool_call.arguments)
+        except ModelCancelledError:
+            raise
         except Exception as exc:
             exit_code = 1
             raw_output = f"Error executing tool '{tool_call.name}': {exc}"

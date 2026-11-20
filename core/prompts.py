@@ -75,6 +75,7 @@ def build_system_prompt(
     sandboxed: bool = True,
     agents_instructions: str = "",
     skills_index: str = "",
+    subagents_index: str = "",
     require_finish_tool: bool = False,
 ) -> str:
     """Assembles the full system prompt from its optional sections.
@@ -107,7 +108,7 @@ def build_system_prompt(
             "Inspect existing files and git history to understand the codebase before making changes."
         )
 
-    for extra in (agents_instructions, skills_index):
+    for extra in (agents_instructions, skills_index, subagents_index):
         if extra:
             sections.append(extra)
 

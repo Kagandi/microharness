@@ -69,6 +69,12 @@ from core.skills import (
     discover_skills,
     render_skills_index,
 )
+from core.subagents import (
+    Subagent,
+    SubagentTool,
+    discover_subagents,
+    render_subagents_index,
+)
 from core.tools import (
     BashTool,
     EditFileTool,
@@ -80,21 +86,25 @@ from core.tools import (
     discover_tool_plugins,
     is_network_tool,
 )
-from core.tracer import ActionFormatter, Tracer
+from core.tracer import ActionFormatter, Tracer, _format_action_summary
 from core.tui_session import TuiTurnRunner, replay_messages
-from core.types import EvalResult, Message, RunResult, Task
-from core.usage import summarize_run_usage
+from core.types import EvalResult, Message, RunResult, StepTrace, Task
+from core.usage import sum_usage, summarize_run_usage
 
 __all__ = [
     "Command",
     "Harness",
     "Skill",
+    "Subagent",
+    "SubagentTool",
     "discover_commands",
     "discover_skills",
+    "discover_subagents",
     "get_default_global_dir",
     "load_global_config",
     "load_project_config",
     "render_skills_index",
+    "render_subagents_index",
     "resolve_slash_input",
 ]
 
@@ -386,6 +396,28 @@ class Harness:
         name = self.active_model_name() or str(target_spec)
         return True, f"Switched model to {name}{suffix}", new_model
 
+    def build_subagent_model(
+        self, spec: str | dict[str, Any], effort: str | None = None
+    ) -> tuple[bool, str, Model]:
+        """Resolves and constructs a Model for a subagent without mutating the parent model."""
+        ok, target_spec, error = self._canonical_model_spec(spec)
+        if not ok or target_spec is None:
+            return False, error, self.model
+
+        effective_effort = effort if effort is not None else self.reasoning_effort
+        try:
+            new_model = build_model_from_spec(
+                spec=target_spec,
+                config=self.merged_config,
+                registry=self.provider_registry,
+                cache_ttl=self.cache_ttl,
+                reasoning_effort=effective_effort,
+                global_dir=self.global_dir,
+            )
+        except Exception as exc:
+            return False, f"Failed to build subagent model '{spec}': {exc}", self.model
+        return True, "", new_model
+
     def get_auth_statuses(self) -> list[dict[str, Any]]:
         """Returns per-provider credential statuses without exposing full secrets."""
         return inspect_provider_auth_statuses(
@@ -477,7 +509,7 @@ class Harness:
     ) -> Environment:
         allowed_reads: list[Path] = [logs_dir]
         if self.global_dir:
-            for sub in ["skills", ".skills", "commands", ".commands"]:
+            for sub in ["skills", ".skills", "commands", ".commands", "agents", ".agents"]:
                 sub_path = self.global_dir / sub
                 allowed_reads.append(sub_path)
             allowed_reads.append(self.global_dir / "AGENTS.md")
@@ -527,6 +559,26 @@ class Harness:
             registry.register(ReadFileTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
+            ws_dir = self.explicit_workspace_dir or env.workspace_dir
+            subagents = discover_subagents(ws_dir, self.global_dir)
+            registry.register(
+                SubagentTool(
+                    env=env,
+                    parent_registry=registry,
+                    subagents=subagents,
+                    model_getter=lambda: self.model,
+                    model_builder=self.build_subagent_model,
+                    effort_getter=self.get_reasoning_effort,
+                    run_dir_getter=lambda: env.logs_dir.parent,
+                    max_context_tokens_getter=lambda: self.max_context_tokens,
+                    trigger_ratio=self.trigger_ratio,
+                    max_retries=self.max_step_retries,
+                    retry_delay=self.step_retry_delay,
+                    sandboxed=self.sandbox or (self.explicit_workspace_dir is None),
+                    agents_instructions=load_agents_instructions(ws_dir, self.global_dir),
+                    skills_index=render_skills_index(discover_skills(ws_dir, self.global_dir)),
+                )
+            )
         elif self.custom_tools:
             for t in self.custom_tools:
                 if not effective_allow_network and is_network_tool(t):
@@ -573,7 +625,12 @@ class Harness:
         *,
         require_finish_tool: bool = False,
     ) -> str:
-        """Assembles the system prompt from tools, steering, and the skills index."""
+        """Assembles the system prompt from tools, steering, skills, and subagents."""
+        subagents_index = (
+            render_subagents_index(discover_subagents(workspace, self.global_dir))
+            if "subagent" in tool_registry
+            else ""
+        )
         return build_system_prompt(
             base_prompt,
             tool_docs=tool_registry.to_system_prompt_snippet(),
@@ -581,6 +638,7 @@ class Harness:
             sandboxed=use_sandbox,
             agents_instructions=load_agents_instructions(workspace, self.global_dir),
             skills_index=render_skills_index(discover_skills(workspace, self.global_dir)),
+            subagents_index=subagents_index,
             require_finish_tool=require_finish_tool,
         )
 
@@ -678,6 +736,17 @@ class Harness:
         loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
         self.active_loop = loop
 
+        subagent_tool = tool_registry.get("subagent")
+        if isinstance(subagent_tool, SubagentTool):
+            subagent_tool.sandboxed = use_sandbox
+            subagent_tool.agents_instructions = load_agents_instructions(workspace, self.global_dir)
+            subagent_tool.skills_index = render_skills_index(
+                discover_skills(workspace, self.global_dir)
+            )
+            subagent_tool.run_dir_getter = lambda: run_dir
+            subagent_tool.max_context_tokens_getter = lambda: memory.max_context_tokens
+            subagent_tool.on_file_modified = memory.record_modified_file
+
         return env, tool_registry, memory, tracer, loop, run_dir
 
     def _execute_steps(
@@ -728,7 +797,7 @@ class Harness:
                 f"Unsupported bash_timeout: {effective_bash_timeout}. Must be greater than 0."
             )
 
-        env, _, _, tracer, loop, run_dir = self._setup_run(
+        env, tool_registry, _, tracer, loop, run_dir = self._setup_run(
             task_id=task.id,
             system_prompt=system_prompt,
             initial_instruction=task.instruction,
@@ -787,6 +856,15 @@ class Harness:
             score = eval_result.score if eval_result else (1.0 if passed else 0.0)
 
             usage = summarize_run_usage((step.usage for step in tracer.steps), c_stats)
+            subagent_tool = tool_registry.get("subagent")
+            if isinstance(subagent_tool, SubagentTool):
+                sub_usage = subagent_tool.total_usage
+                if sub_usage.prompt_tokens > 0 or sub_usage.completion_tokens > 0:
+                    step_usage = sum_usage(step.usage for step in tracer.steps)
+                    if step_usage.prompt_tokens > 0:
+                        usage = step_usage + sub_usage
+                    elif usage.prompt_tokens == 0:
+                        usage = sub_usage
             task_rl_wait = max(0.0, self._rate_limit_wait() - start_rl_wait)
 
             return RunResult(
@@ -822,16 +900,22 @@ class Harness:
         turns: TurnState,
         *,
         allow_bare_words: bool = True,
+        subagents: dict[str, Subagent] | None = None,
     ) -> CommandRouter:
         """Builds a command router bound to this harness and the caller's session state."""
+        resolved_ws = workspace_dir or self.workspace_dir
+        resolved_subagents = (
+            subagents if subagents is not None else discover_subagents(resolved_ws, self.global_dir)
+        )
         return CommandRouter(
             CommandContext(
                 harness=self,
                 memory=memory,
                 ui=ui,
-                workspace=workspace_dir or self.workspace_dir,
+                workspace=resolved_ws,
                 commands=custom_commands,
                 skills=skills,
+                subagents=resolved_subagents,
                 tracer=tracer,
                 turns=turns,
             ),
@@ -847,6 +931,7 @@ class Harness:
         workspace_dir: Path | None = None,
         tracer: Tracer | None = None,
         step_holder: list[int] | None = None,
+        subagents: dict[str, Subagent] | None = None,
     ) -> str:
         """Processes an interactive user input line.
 
@@ -857,7 +942,14 @@ class Harness:
         """
         turns = TurnState(step_index=step_holder[0] if step_holder else 1)
         router = self._make_router(
-            memory, custom_commands, skills or {}, NullUI(), workspace_dir, tracer, turns
+            memory,
+            custom_commands,
+            skills or {},
+            NullUI(),
+            workspace_dir,
+            tracer,
+            turns,
+            subagents=subagents,
         )
         action = router.dispatch(user_input)
         if step_holder is not None:
@@ -882,7 +974,7 @@ class Harness:
         """Full-screen interactive TUI with bottom-anchored chat and scrollable activity."""
         from core.tui import CursesTUI, TUIState
 
-        env, _, memory, tracer, loop, run_dir = self._setup_run(
+        env, tool_registry, memory, tracer, loop, run_dir = self._setup_run(
             task_id=task_id,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             initial_instruction="",
@@ -893,7 +985,10 @@ class Harness:
 
         commands = discover_commands(env.workspace_dir, self.global_dir)
         skills = discover_skills(env.workspace_dir, self.global_dir)
-        state = self._build_tui_state(TUIState(title="microharness"), env, commands, skills)
+        subagents = discover_subagents(env.workspace_dir, self.global_dir)
+        state = self._build_tui_state(
+            TUIState(title="microharness"), env, commands, skills, subagents=subagents
+        )
         turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
         tui = CursesTUI(state)
@@ -903,7 +998,15 @@ class Harness:
             secret_prompter=tui.request_secret,
         )
         router = self._make_router(
-            memory, commands, skills, ui, env.workspace_dir, tracer, turns, allow_bare_words=True
+            memory,
+            commands,
+            skills,
+            ui,
+            env.workspace_dir,
+            tracer,
+            turns,
+            allow_bare_words=True,
+            subagents=subagents,
         )
         runner = TuiTurnRunner(
             model=self.model,
@@ -916,6 +1019,22 @@ class Harness:
             step_index=turns.step_index,
         )
         router.ctx.runner = runner
+
+        subagent_tool = tool_registry.get("subagent")
+        if isinstance(subagent_tool, SubagentTool):
+
+            def _on_subagent_step(agent_name: str, step_trace: StepTrace) -> None:
+                tool_calls = step_trace.model_response.get("tool_calls") or []
+                if not tool_calls:
+                    return
+                for call in tool_calls:
+                    summary = _format_action_summary(
+                        call.get("name", ""), call.get("arguments", {}), color=False
+                    )
+                    state.add_action(f"  ↳ [{agent_name}] {summary}")
+                runner.refresh()
+
+            subagent_tool.on_step = _on_subagent_step
 
         def on_user_submit(user_text: str) -> None:
             """Handles one submitted line, running a turn when a prompt was queued."""
@@ -944,6 +1063,8 @@ class Harness:
         env: Environment,
         commands: dict[str, Command],
         skills: dict[str, Skill],
+        *,
+        subagents: dict[str, Subagent] | None = None,
     ) -> Any:
         """Seeds the TUI state with session metadata and autocomplete catalogues."""
         state.provider_name = (
@@ -961,6 +1082,11 @@ class Harness:
         state.git_branch = get_git_branch(env.workspace_dir)
         state.set_custom_commands(commands)
         state.set_skills(skills)
+        state.set_subagents(
+            subagents
+            if subagents is not None
+            else discover_subagents(env.workspace_dir, self.global_dir)
+        )
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.set_available_models(self.get_available_models())
         state.set_available_sessions(self.find_recent_sessions(limit=15))

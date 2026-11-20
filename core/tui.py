@@ -15,11 +15,17 @@ from typing import Any
 
 from core.interactive import command_catalog, format_model_desc, format_session_desc
 from core.memory import format_compact_num
+from core.subagents import format_subagent_desc
 
 # Commands that open a value menu instead of the command catalog: their
 # spellings, the menu title, and the hint shown before a value is typed.
 SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "skill": (("/skill", "/skills"), " Available Skills ", "Load or inspect a custom skill prompt"),
+    "agent": (
+        ("/agent", "/agents", "/subagent", "/subagents"),
+        " Available Subagents ",
+        "Inspect a subagent or run /agent <name> <task>",
+    ),
     "model": (
         ("/model", "/models"),
         " Available Models ",
@@ -53,6 +59,7 @@ SUBCOMMAND_MENUS: dict[str, tuple[tuple[str, ...], str, str]] = {
 # their own bounds because their values are paths.
 MENU_COLUMN_BOUNDS: dict[str, tuple[int, int]] = {
     "skill": (22, 22),
+    "agent": (22, 28),
     "model": (20, 36),
     "resume": (26, 38),
     "reasoning": (12, 16),
@@ -529,6 +536,7 @@ class TUIState:
         self.command_catalog: list[tuple[str, str]] = command_catalog()
         self.custom_commands: dict[str, Any] = {}
         self.skills: dict[str, Any] = {}
+        self.subagents: dict[str, Any] = {}
         self.available_models: list[dict[str, Any]] = []
         self.available_sessions: list[dict[str, Any]] = []
         self.available_providers: list[dict[str, Any]] = []
@@ -593,6 +601,10 @@ class TUIState:
         """Loads discovered skills into the auto-completion catalog."""
         self.skills = dict(skills)
         self._rebuild_command_catalog()
+
+    def set_subagents(self, subagents: dict[str, Any]) -> None:
+        """Loads discovered subagents for /agent autocomplete."""
+        self.subagents = dict(subagents)
 
     def get_current_file_tag_query(self) -> tuple[int, str] | None:
         """Detects if cursor is currently inside or right after an @file tag token.
@@ -701,6 +713,12 @@ class TUIState:
                 (name, f"[{getattr(info, 'scope', 'project')}] {getattr(info, 'summary', name)}")
                 for name, info in sorted(self.skills.items())
                 if not sub or name.lower().startswith(sub)
+            ]
+        if kind == "agent":
+            return [
+                (name, format_subagent_desc(info))
+                for name, info in sorted(self.subagents.items())
+                if not sub or name.lower().startswith(sub.lower())
             ]
         if kind == "model":
             return [

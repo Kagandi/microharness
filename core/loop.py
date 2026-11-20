@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from core.memory import Memory
@@ -67,8 +68,15 @@ class AgentLoop:
         # 6. Execute actions and record observations
         tool_results: list[ToolResult] = []
         terminated = False
-        for call in tool_calls:
-            result = self.tools.dispatch(call, step_index=step_index)
+        if len(tool_calls) > 1 and all(self.tools.is_parallel_safe(c.name) for c in tool_calls):
+            with ThreadPoolExecutor(max_workers=min(len(tool_calls), 4)) as pool:
+                dispatched = list(
+                    pool.map(lambda c: self.tools.dispatch(c, step_index=step_index), tool_calls)
+                )
+        else:
+            dispatched = [self.tools.dispatch(call, step_index=step_index) for call in tool_calls]
+
+        for call, result in zip(tool_calls, dispatched):
             if result.exit_code == 0 and self.tools.modifies_files(call.name):
                 target_path = call.arguments.get("path")
                 if target_path:
