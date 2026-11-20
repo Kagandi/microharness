@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -89,6 +90,9 @@ def format_tool_output(
     return truncated_output, True, raw_log_path
 
 
+DEFAULT_MAX_BASH_TIMEOUT = 1800.0
+
+
 class BashTool:
     name = "bash"
     description = "Execute a shell command inside the workspace directory."
@@ -98,17 +102,42 @@ class BashTool:
             "command": {
                 "type": "string",
                 "description": "The shell command to run (e.g. 'pytest', 'ls -la', 'python script.py').",
-            }
+            },
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Optional timeout in seconds for this command (default: harness bash_timeout; "
+                    "set higher for long test suites or builds, max 1800)."
+                ),
+            },
         },
         "required": ["command"],
     }
 
-    def __init__(self, env: Environment, timeout: float = 30.0):
+    def __init__(
+        self,
+        env: Environment,
+        timeout: float = 30.0,
+        max_timeout: float = DEFAULT_MAX_BASH_TIMEOUT,
+    ):
         self.env = env
         self.timeout = timeout
+        self.max_timeout = max(max_timeout, timeout)
 
-    def execute(self, command: str) -> tuple[int, str]:
-        return self.env.execute_bash(command, timeout=self.timeout)
+    def execute(self, command: str, timeout: float | None = None) -> tuple[int, str]:
+        """Executes ``command`` using either the tool default or a validated per-call timeout."""
+        if timeout is None:
+            effective_timeout = self.timeout
+        elif (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            return 1, f"Error: invalid bash timeout {timeout!r}. Must be a positive number."
+        else:
+            effective_timeout = min(float(timeout), self.max_timeout)
+        return self.env.execute_bash(command, timeout=effective_timeout)
 
 
 class ReadFileTool:
