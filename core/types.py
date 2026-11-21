@@ -166,7 +166,7 @@ class RunResult:
     score: float
     total_steps: int
     duration_s: float
-    finish_reason: str  # "completed" | "max_steps_exceeded" | "timeout" | "error" | "interrupted" | "rate_limited" | "doom_loop"
+    finish_reason: str  # "completed" | "max_steps_exceeded" | "timeout" | "error" | "interrupted" | "rate_limited" | "doom_loop" | "hook_blocked"
     trace_path: str
     workspace_path: str
     eval_result: EvalResult | None = None

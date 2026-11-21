@@ -212,7 +212,7 @@ class TestGenericHooks(unittest.TestCase):
         self.assertTrue(outcome.finished)
         self.assertEqual(
             events,
-            ["pre_turn", "pre_step:1", "post_step:1", "pre_step:2", "post_turn"],
+            ["pre_turn", "pre_step:1", "post_step:1", "pre_step:2", "post_step:2", "post_turn"],
         )
 
         # pre_turn block halts run_steps immediately before any model call

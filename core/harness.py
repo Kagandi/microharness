@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -147,7 +147,7 @@ class Harness:
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
         subagent_max_steps: int | None = None,
-        hooks: HookRegistry | Mapping[str, Any] | Sequence[Hook | Mapping[str, Any]] | None = None,
+        hooks: HookRegistry | Mapping[str, Any] | Iterable[Hook | Mapping[str, Any]] | None = None,
         disabled_hooks: Sequence[str] | None = None,
         include_default_hooks: bool | None = None,
         doom_loop_threshold: int | None = None,
@@ -166,8 +166,8 @@ class Harness:
         config_hook_arg: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None
         extra_hook_items: list[Hook | Mapping[str, Any]] = []
         if isinstance(hooks, Mapping):
-            config_hook_arg = hooks
-        elif isinstance(hooks, Sequence) and not isinstance(hooks, (str, bytes)):
+            config_hook_arg = {str(k): v for k, v in hooks.items()}
+        elif isinstance(hooks, Iterable) and not isinstance(hooks, (str, bytes, HookRegistry)):
             for item in hooks:
                 if isinstance(item, Mapping):
                     extra_hook_items.extend(parse_hook_specs([item], scope="explicit"))

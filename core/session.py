@@ -38,6 +38,7 @@ TIMEOUT = "timeout"
 INTERRUPTED = "interrupted"
 RATE_LIMITED = "rate_limited"
 ERROR = "error"
+HOOK_BLOCKED = "hook_blocked"
 
 NOT_FOUND = "Session not found: no resumable session available"
 
@@ -162,10 +163,11 @@ def run_steps(
         if pre_turn.blocked:
             detail = pre_turn.combined_message or "Turn blocked by pre_turn hook."
             tracer.log(f"\n🛑 {detail}")
-            return StepOutcome(False, "hook_blocked", step_idx, detail=detail)
+            return StepOutcome(False, HOOK_BLOCKED, step_idx, detail=detail)
 
+    turn_outcome: StepOutcome | None = None
     try:
-        return _drive_steps(
+        turn_outcome = _drive_steps(
             model=model,
             loop=loop,
             tracer=tracer,
@@ -182,9 +184,19 @@ def run_steps(
             is_real_agent_loop=is_real_agent_loop,
             fallback_detector=fallback_detector,
         )
+        return turn_outcome
     finally:
         if isinstance(hooks, HookRegistry):
-            hooks.run(POST_TURN, HookContext(event=POST_TURN, env=env, step_index=step_idx))
+            post_step_idx = turn_outcome.next_step if turn_outcome is not None else step_idx
+            post_meta = (
+                {"reason": turn_outcome.reason, "finished": turn_outcome.finished}
+                if turn_outcome is not None
+                else {}
+            )
+            hooks.run(
+                POST_TURN,
+                HookContext(event=POST_TURN, env=env, step_index=post_step_idx, metadata=post_meta),
+            )
 
 
 def _drive_steps(

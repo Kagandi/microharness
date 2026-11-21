@@ -389,6 +389,16 @@ class AgentLoop:
                 duration_s=duration,
                 usage=step_usage,
             )
+            if self.hooks is not None:
+                self.hooks.run(
+                    POST_STEP,
+                    HookContext(
+                        event=POST_STEP,
+                        env=env,
+                        step_index=step_index,
+                        metadata={"terminated": True, "stop_reason": None},
+                    ),
+                )
             return True, trace
 
         # 6. Execute actions and record observations
