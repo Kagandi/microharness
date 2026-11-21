@@ -303,177 +303,49 @@ class Environment:
 
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
-
-_SAFE_REDIRECTIONS = (
-    "2>&1",
-    "1>&2",
-    "2>/dev/null",
-    "1>/dev/null",
-    "&>/dev/null",
-    ">/dev/null",
+_SAFE_REDIRECTIONS = ("2>&1", "1>&2", "2>/dev/null", "1>/dev/null", "&>/dev/null", ">/dev/null")
+_READ_ONLY_CMDS = frozenset(
+    "ack ag basename cat cmp comm cut date diff dir dirname echo egrep false fgrep file grep "
+    "head id less ls more nl printenv printf pwd readlink realpath rg stat tail test tr tree "
+    "true type uname uniq wc which whoami [".split()
 )
-
-_READ_ONLY_SIMPLE_COMMANDS: frozenset[str] = frozenset(
-    {
-        "ack",
-        "ag",
-        "basename",
-        "cat",
-        "cmp",
-        "comm",
-        "cut",
-        "date",
-        "diff",
-        "dir",
-        "dirname",
-        "echo",
-        "egrep",
-        "false",
-        "fgrep",
-        "file",
-        "grep",
-        "head",
-        "id",
-        "less",
-        "ls",
-        "more",
-        "nl",
-        "printenv",
-        "printf",
-        "pwd",
-        "readlink",
-        "realpath",
-        "rg",
-        "stat",
-        "tail",
-        "test",
-        "tr",
-        "tree",
-        "true",
-        "type",
-        "uname",
-        "uniq",
-        "wc",
-        "which",
-        "whoami",
-        "[",
-    }
+_FIND_BLOCKED = frozenset(
+    "-delete -exec -execdir -ok -okdir -fprint -fprint0 -fprintf -fls".split()
 )
-
-_FIND_BLOCKED_ARGS: frozenset[str] = frozenset(
-    {
-        "-delete",
-        "-exec",
-        "-execdir",
-        "-ok",
-        "-okdir",
-        "-fprint",
-        "-fprint0",
-        "-fprintf",
-        "-fls",
-    }
+_GIT_READ_SUBS = frozenset(
+    "blame cat-file check-ignore describe diff diff-files diff-index diff-tree for-each-ref "
+    "grep help log ls-files ls-tree merge-base name-rev rev-list rev-parse shortlog show "
+    "show-ref status var version".split()
 )
-
-_FD_BLOCKED_ARGS: frozenset[str] = frozenset({"-x", "--exec", "-X", "--exec-batch"})
-
-_GIT_READ_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "blame",
-        "cat-file",
-        "check-ignore",
-        "describe",
-        "diff",
-        "diff-files",
-        "diff-index",
-        "diff-tree",
-        "for-each-ref",
-        "grep",
-        "help",
-        "log",
-        "ls-files",
-        "ls-tree",
-        "merge-base",
-        "name-rev",
-        "rev-list",
-        "rev-parse",
-        "shortlog",
-        "show",
-        "show-ref",
-        "status",
-        "var",
-        "version",
-    }
+_GIT_GLOBAL_VALUE_FLAGS = frozenset(("-C", "--git-dir", "--work-tree"))
+_GIT_GLOBAL_BOOL_FLAGS = frozenset(
+    "-p --paginate --no-pager --bare --no-replace-objects --literal-pathspecs "
+    "--glob-pathspecs --noglob-pathspecs --icase-pathspecs".split()
 )
-
-_GIT_GLOBAL_VALUE_FLAGS: frozenset[str] = frozenset({"-C", "--git-dir", "--work-tree"})
-_GIT_GLOBAL_BOOL_FLAGS: frozenset[str] = frozenset(
-    {
-        "-p",
-        "--paginate",
-        "--no-pager",
-        "--bare",
-        "--no-replace-objects",
-        "--literal-pathspecs",
-        "--glob-pathspecs",
-        "--noglob-pathspecs",
-        "--icase-pathspecs",
-    }
-)
-_GIT_BRANCH_MUTATING_FLAGS: frozenset[str] = frozenset(
-    {
-        "-d",
-        "-D",
-        "-m",
-        "-M",
-        "-c",
-        "-C",
-        "-u",
-        "-f",
-        "--delete",
-        "--move",
-        "--copy",
-        "--edit-description",
-        "--set-upstream-to",
-        "--unset-upstream",
-        "--force",
-    }
-)
-_GIT_BRANCH_LIST_FLAGS: frozenset[str] = frozenset(
-    {"-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged"}
-)
-_GIT_TAG_MUTATING_FLAGS: frozenset[str] = frozenset(
-    {
-        "-d",
-        "-a",
-        "-s",
-        "-f",
-        "-m",
-        "-F",
-        "-u",
-        "--delete",
-        "--annotate",
-        "--sign",
-        "--force",
-        "--local-user",
-    }
-)
-_GIT_TAG_READ_FLAGS: frozenset[str] = frozenset(
-    {"-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--merged", "--no-merged"}
+_GIT_REF_MUTATING_FLAGS = {
+    "branch": frozenset(
+        "-d -D -m -M -c -C -u -f --delete --move --copy --edit-description "
+        "--set-upstream-to --unset-upstream --force".split()
+    ),
+    "tag": frozenset(
+        "-d -a -s -f -m -F -u --delete --annotate --sign --force --local-user".split()
+    ),
+}
+_GIT_REF_READ_FLAGS = frozenset(
+    "-l --list -v --verify --contains --no-contains --merged --no-merged".split()
 )
 
 
 def _split_shell_segments(command: str) -> tuple[bool, list[str], str]:
     """Splits a shell command into pipeline/chain segments while rejecting unsafe syntax."""
     segments: list[str] = []
-    current: list[str] = []
-    in_single = False
-    in_double = False
-    i = 0
-    n = len(command)
+    cur: list[str] = []
+    in_single = in_double = False
+    i, n = 0, len(command)
 
     def _flush() -> bool:
-        seg = "".join(current).strip()
-        current.clear()
+        seg = "".join(cur).strip()
+        cur.clear()
         if seg:
             segments.append(seg)
             return True
@@ -484,182 +356,126 @@ def _split_shell_segments(command: str) -> tuple[bool, list[str], str]:
         if in_single:
             if ch == "'":
                 in_single = False
-            current.append(ch)
-            i += 1
-            continue
-
-        if in_double:
-            if ch == "\\" and i + 1 < n:
-                current.append(ch)
-                current.append(command[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                in_double = False
-                current.append(ch)
-                i += 1
-                continue
-            if ch == "`":
-                return (
-                    False,
-                    [],
-                    "Command substitution with backticks is not allowed in read-only mode.",
-                )
-            if ch == "$" and i + 1 < n and command[i + 1] == "(":
-                return False, [], "Command substitution `$(...)` is not allowed in read-only mode."
-            current.append(ch)
+            cur.append(ch)
             i += 1
             continue
 
         if ch == "\\" and i + 1 < n:
-            current.append(ch)
-            current.append(command[i + 1])
+            cur.extend((ch, command[i + 1]))
             i += 2
             continue
+        if ch == "`" or command.startswith("$(", i):
+            return False, [], "Command substitution is not allowed in read-only mode."
+        if in_double:
+            if ch == '"':
+                in_double = False
+            cur.append(ch)
+            i += 1
+            continue
+
         if ch == "'":
             in_single = True
-            current.append(ch)
-            i += 1
-            continue
-        if ch == '"':
+        elif ch == '"':
             in_double = True
-            current.append(ch)
-            i += 1
-            continue
-        if ch == "`":
-            return (
-                False,
-                [],
-                "Command substitution with backticks is not allowed in read-only mode.",
-            )
-        if ch == "$" and i + 1 < n and command[i + 1] == "(":
-            return False, [], "Command substitution `$(...)` is not allowed in read-only mode."
-        if ch in ("<", ">") and i + 1 < n and command[i + 1] == "(":
+        elif command.startswith(("<(", ">("), i):
             return False, [], "Process substitution is not allowed in read-only mode."
-        if ch in ("(", ")"):
+        elif ch in ("(", ")"):
             return False, [], "Subshells are not allowed in read-only mode."
-        if ch == "<" and i + 1 < n and command[i + 1] == "<":
+        elif command.startswith("<<", i):
             return False, [], "Here-documents and here-strings are not allowed in read-only mode."
-        if ch == "#" and (not current or current[-1].isspace()):
-            while i < n and command[i] != "\n":
-                i += 1
+        elif ch == "#" and (not cur or cur[-1].isspace()):
+            i = command.find("\n", i)
+            if i == -1:
+                break
             continue
-
-        # Allow safe fd duplication / /dev/null sinks at token boundaries, block all other `>`.
-        if (not current or current[-1].isspace()) and ch in (">", "1", "2", "&"):
-            matched_safe = False
-            rest = command[i:]
-            for pattern in _SAFE_REDIRECTIONS:
-                if rest.startswith(pattern):
-                    end_idx = i + len(pattern)
-                    if end_idx == n or command[end_idx].isspace() or command[end_idx] in ";|&\n":
-                        current.append(" ")
-                        i = end_idx
-                        matched_safe = True
-                        break
-            if matched_safe:
+        elif (not cur or cur[-1].isspace()) and ch in (">", "1", "2", "&"):
+            matched = next(
+                (
+                    pat
+                    for pat in _SAFE_REDIRECTIONS
+                    if command.startswith(pat, i)
+                    and (i + len(pat) == n or command[i + len(pat)] in " \t\r\n;|&")
+                ),
+                None,
+            )
+            if matched:
+                cur.append(" ")
+                i += len(matched)
                 continue
-
-        if ch == ">":
+            if ch == ">":
+                return False, [], "Output redirection is not allowed in read-only mode."
+            if ch == "&" and not command.startswith("&&", i):
+                return False, [], "Background execution `&` is not allowed in read-only mode."
+        elif ch == ">":
             return False, [], "Output redirection is not allowed in read-only mode."
-
-        if command.startswith(";;", i):
+        elif command.startswith(";;", i):
             return False, [], "Shell `;;` operator is not allowed in read-only mode."
-
-        if command.startswith(("&&", "||"), i):
+        elif command.startswith(("&&", "||"), i):
             if not _flush():
                 return False, [], "Empty command segment before operator."
             i += 2
             continue
-
-        if ch in ("|", ";", "\n"):
-            had_content = _flush()
-            if ch == "|" and not had_content:
+        elif ch in ("|", ";", "\n"):
+            if not _flush() and ch == "|":
                 return False, [], "Empty command segment before pipe."
             i += 1
             continue
-
-        if ch == "&":
+        elif ch == "&":
             return False, [], "Background execution `&` is not allowed in read-only mode."
 
-        current.append(ch)
+        cur.append(ch)
         i += 1
 
     if in_single or in_double:
         return False, [], "Unterminated quote in command."
-
     _flush()
-    if not segments:
-        return False, [], "Empty command."
-    return True, segments, ""
+    return (True, segments, "") if segments else (False, [], "Empty command.")
 
 
 def _validate_git_args(args: list[str]) -> tuple[bool, str]:
     """Validates that a `git` invocation uses only read-only subcommands and flags."""
-    idx = 0
-    n = len(args)
+    idx, n = 0, len(args)
     while idx < n:
         tok = args[idx]
         if tok in _GIT_GLOBAL_VALUE_FLAGS:
             if idx + 1 >= n:
                 return False, f"Git option '{tok}' requires an argument."
             idx += 2
-            continue
-        if tok.startswith(("--git-dir=", "--work-tree=")) or tok in _GIT_GLOBAL_BOOL_FLAGS:
+        elif tok.startswith(("--git-dir=", "--work-tree=")) or tok in _GIT_GLOBAL_BOOL_FLAGS:
             idx += 1
-            continue
-        if tok in ("-v", "--version", "-h", "--help"):
+        elif tok in ("-v", "--version", "-h", "--help"):
             return True, ""
-        if tok.startswith("-"):
+        elif tok.startswith("-"):
             return False, f"Git global option '{tok}' is not allowed in read-only mode."
-        break
+        else:
+            break
 
     if idx >= n:
         return False, "Bare `git` command without a read-only subcommand is not allowed."
 
-    sub = args[idx]
-    sub_args = args[idx + 1 :]
-    for arg in sub_args:
-        if arg == "--output" or arg.startswith("--output=") or arg == "--ext-diff":
-            return False, f"Git option '{arg}' is not allowed in read-only mode."
-
-    if sub in _GIT_READ_ONLY_SUBCOMMANDS:
+    sub, sub_args = args[idx], args[idx + 1 :]
+    if any(a == "--output" or a.startswith("--output=") or a == "--ext-diff" for a in sub_args):
+        return False, "Git output/ext-diff flags are not allowed in read-only mode."
+    if sub in _GIT_READ_SUBS:
         return True, ""
-
-    if sub == "branch":
-        has_list_filter = False
-        has_positional = False
+    if sub in _GIT_REF_MUTATING_FLAGS:
+        blocked = _GIT_REF_MUTATING_FLAGS[sub]
+        has_filter = False
+        has_pos = False
         for arg in sub_args:
-            if arg in _GIT_BRANCH_MUTATING_FLAGS or arg.startswith("--set-upstream-to="):
-                return False, f"Git branch flag '{arg}' is not allowed in read-only mode."
-            if arg in _GIT_BRANCH_LIST_FLAGS or arg.startswith(
+            if arg in blocked or arg.startswith(
+                ("--set-upstream-to=", "--local-user=", "--file=", "--message=")
+            ):
+                return False, f"Git {sub} flag '{arg}' is not allowed in read-only mode."
+            if arg in _GIT_REF_READ_FLAGS or arg.startswith(
                 ("--contains=", "--no-contains=", "--merged=", "--no-merged=")
             ):
-                has_list_filter = True
+                has_filter = True
             elif not arg.startswith("-"):
-                has_positional = True
-        if has_positional and not has_list_filter:
-            return False, "Creating or modifying git branches is not allowed in read-only mode."
+                has_pos = True
+        if has_pos and not has_filter:
+            return False, f"Creating or modifying git {sub}s is not allowed in read-only mode."
         return True, ""
-
-    if sub == "tag":
-        has_read_filter = False
-        has_positional = False
-        for arg in sub_args:
-            if arg in _GIT_TAG_MUTATING_FLAGS or arg.startswith(
-                ("--local-user=", "--file=", "--message=")
-            ):
-                return False, f"Git tag flag '{arg}' is not allowed in read-only mode."
-            if arg in _GIT_TAG_READ_FLAGS or arg.startswith(
-                ("--contains=", "--no-contains=", "--merged=", "--no-merged=")
-            ):
-                has_read_filter = True
-            elif not arg.startswith("-"):
-                has_positional = True
-        if has_positional and not has_read_filter:
-            return False, "Creating or modifying git tags is not allowed in read-only mode."
-        return True, ""
-
     return False, f"Git subcommand '{sub}' is not allowed in read-only mode."
 
 
@@ -678,37 +494,40 @@ def _validate_read_only_segment(segment: str) -> tuple[bool, str]:
     cmd, args = tokens[0], tokens[1:]
     if "/" in cmd:
         return False, f"Path-qualified executable '{cmd}' is not allowed in read-only mode."
-
-    if cmd in _READ_ONLY_SIMPLE_COMMANDS:
+    if cmd in _READ_ONLY_CMDS:
         if cmd == "rg" and any(a == "--pre" or a.startswith("--pre=") for a in args):
             return False, "`rg --pre` is not allowed in read-only mode."
         return True, ""
-
+    if cmd == "sort" and any(
+        a in ("-o", "--output") or a.startswith("--output=") or (a.startswith("-o") and len(a) > 2)
+        for a in args
+    ):
+        return False, "`sort -o/--output` is not allowed in read-only mode."
     if cmd == "sort":
-        for arg in args:
-            if (
-                arg in ("-o", "--output")
-                or arg.startswith("--output=")
-                or (arg.startswith("-o") and len(arg) > 2)
-            ):
-                return False, "`sort -o/--output` is not allowed in read-only mode."
         return True, ""
-
     if cmd == "find":
-        for arg in args:
-            if arg in _FIND_BLOCKED_ARGS or arg.startswith(("-exec", "-ok", "-fprint", "-fls")):
-                return False, f"`find {arg}` is not allowed in read-only mode."
-        return True, ""
-
+        bad = next(
+            (
+                a
+                for a in args
+                if a in _FIND_BLOCKED or a.startswith(("-exec", "-ok", "-fprint", "-fls"))
+            ),
+            None,
+        )
+        return (False, f"`find {bad}` is not allowed in read-only mode.") if bad else (True, "")
     if cmd == "fd":
-        for arg in args:
-            if arg in _FD_BLOCKED_ARGS or arg.startswith(("--exec=", "--exec-batch=")):
-                return False, f"`fd {arg}` is not allowed in read-only mode."
-        return True, ""
-
+        bad = next(
+            (
+                a
+                for a in args
+                if a in ("-x", "--exec", "-X", "--exec-batch")
+                or a.startswith(("--exec=", "--exec-batch="))
+            ),
+            None,
+        )
+        return (False, f"`fd {bad}` is not allowed in read-only mode.") if bad else (True, "")
     if cmd == "git":
         return _validate_git_args(args)
-
     return False, f"Command '{cmd}' is not allowed in read-only mode."
 
 
@@ -769,7 +588,6 @@ class ReadOnlyEnvironment(Environment):
         return self._inner.execute_bash(command, timeout=timeout)
 
     def teardown(self) -> None:
-        # Parent owns the underlying environment lifecycle.
         return None
 
 
