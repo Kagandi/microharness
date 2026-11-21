@@ -398,6 +398,19 @@ class ToolRegistry:
                 exit_code=1,
             )
 
+        if tool_call.name not in ("write_file", "edit_file") and modifies:
+            confirm_fn = getattr(self.env, "confirm_action", None)
+            if callable(confirm_fn):
+                res = confirm_fn(tool_call.name, str(tool_call.arguments))
+                if isinstance(res, tuple) and len(res) == 2:
+                    allowed, reason = res
+                    if not allowed:
+                        return ToolResult(
+                            call_id=tool_call.id,
+                            output=f"Error: {reason}",
+                            exit_code=1,
+                        )
+
         try:
             exit_code, raw_output = tool.execute(**tool_call.arguments)
         except ModelCancelledError:

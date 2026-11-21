@@ -11,6 +11,7 @@ from core.config import (
     load_global_config,
     load_project_config,
     normalize_cache_ttl,
+    normalize_permission_mode,
     normalize_reasoning_effort,
     read_jsonc,
     resolve_project_tool_trust,
@@ -133,6 +134,11 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.hooks, ())
         self.assertEqual(cfg.disabled_hooks, ())
         self.assertEqual(cfg.include_default_hooks, True)
+        self.assertEqual(cfg.permission_mode, "auto")
+        self.assertEqual(cfg.checkpoints, True)
+        self.assertIsNone(cfg.docker_memory)
+        self.assertIsNone(cfg.docker_cpus)
+        self.assertIsNone(cfg.docker_pids_limit)
 
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
@@ -457,6 +463,70 @@ class TestNormalizers(unittest.TestCase):
         """Invariant: an unsupported effort raises instead of silently disabling reasoning."""
         with self.assertRaises(ValueError):
             normalize_reasoning_effort("extreme")
+
+    def test_permission_mode_normalization_and_validation(self):
+        """Invariant: permission_mode normalizes aliases and rejects invalid modes loudly."""
+        self.assertEqual(normalize_permission_mode(None), "auto")
+        self.assertEqual(normalize_permission_mode(""), "auto")
+        self.assertEqual(normalize_permission_mode("AUTO"), "auto")
+        self.assertEqual(normalize_permission_mode("Ask"), "ask")
+        self.assertEqual(normalize_permission_mode("read-only"), "read-only")
+        self.assertEqual(normalize_permission_mode("readonly"), "read-only")
+        self.assertEqual(normalize_permission_mode("read_only"), "read-only")
+        with self.assertRaises(ValueError):
+            normalize_permission_mode("yolo")
+
+
+class TestGuardrailAndDockerResourceConfig(unittest.TestCase):
+    def setUp(self):
+        self.global_dir = Path(tempfile.mkdtemp())
+        self.workspace = Path(tempfile.mkdtemp())
+
+    def _resolve(self, explicit: HarnessConfig, global_cfg=None, project_cfg=None):
+        (self.global_dir / "config.json").write_text(json.dumps(global_cfg or {}), encoding="utf-8")
+        (self.workspace / ".microharness").mkdir(parents=True, exist_ok=True)
+        (self.workspace / ".microharness" / "config.json").write_text(
+            json.dumps(project_cfg or {}), encoding="utf-8"
+        )
+        layers = ConfigLayers.load(self.global_dir, self.workspace)
+        return explicit.resolve(layers)
+
+    def test_permission_checkpoints_and_docker_limits_cascade(self):
+        """Invariant: permission_mode, checkpoints, and Docker resource limits follow explicit > project > global."""
+        cfg = self._resolve(
+            HarnessConfig(docker_cpus=1.5),
+            global_cfg={
+                "permission_mode": "ask",
+                "checkpoints": True,
+                "docker_memory": "1g",
+                "docker_cpus": 4.0,
+                "docker_pids_limit": 128,
+            },
+            project_cfg={
+                "permission_mode": "read_only",
+                "checkpoints": False,
+                "docker_memory": " 2g ",
+                "docker_pids_limit": "256",
+            },
+        )
+        self.assertEqual(cfg.permission_mode, "read-only")
+        self.assertEqual(cfg.checkpoints, False)
+        self.assertEqual(cfg.docker_memory, "2g")
+        self.assertEqual(cfg.docker_cpus, 1.5)
+        self.assertEqual(cfg.docker_pids_limit, 256)
+
+    def test_invalid_docker_resource_limits_raise_value_error(self):
+        """Invariant: non-positive or boolean Docker CPU/PID limits are rejected."""
+        for bad_cpus in (0, -1.0, True, "nan", "inf", "abc"):
+            with self.assertRaises(ValueError):
+                self._resolve(HarnessConfig(), project_cfg={"docker_cpus": bad_cpus})
+
+        for bad_pids in (0, -10, True, 1.5, "abc"):
+            with self.assertRaises(ValueError):
+                self._resolve(HarnessConfig(), project_cfg={"docker_pids_limit": bad_pids})
+
+        with self.assertRaises(ValueError):
+            self._resolve(HarnessConfig(permission_mode="unsafe"))
 
 
 class TestGlobalDir(unittest.TestCase):

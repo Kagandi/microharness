@@ -1,6 +1,6 @@
 [project]
 name = "microharness"
-version = "0.1.7"
+version = "0.1.8"
 description = "A minimal, zero-dependency, and pluggable AI agent microframework in Python"
 readme = "README.md"
 requires-python = ">=3.11"

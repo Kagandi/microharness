@@ -3179,6 +3179,215 @@ class TestFinishToolAndContinuation(unittest.TestCase):
         self.assertEqual(captured_tasks[0].docker_network, "none")
         self.assertEqual(captured_tasks[0].bash_timeout, 75.0)
 
+    def test_host_permission_modes_and_custom_mutating_tool_gating(self):
+        """Invariant: permission_mode ('read-only' and 'ask') gates writes, bash, and custom mutating tools."""
+        ws = Path(tempfile.mkdtemp(prefix="mh_perm_ws_")).resolve()
+        global_dir = Path(tempfile.mkdtemp(prefix="mh_perm_global_")).resolve()
+        (ws / "existing.txt").write_text("original\n", encoding="utf-8")
+
+        class CustomWriteTool:
+            name = "custom_mutator"
+            description = "Custom file modifier"
+            parameters = {"type": "object", "properties": {}}
+            modifies_files = True
+
+            def __init__(self):
+                self.called = 0
+
+            def execute(self):
+                self.called += 1
+                return 0, "mutated"
+
+        # 1. read-only mode blocks write_file, edit_file, mutating bash, and custom_mutator
+        custom_ro = CustomWriteTool()
+        model_ro = MockModel(
+            [
+                (
+                    "try mutating",
+                    [
+                        ToolCall(
+                            id="w1",
+                            name="write_file",
+                            arguments={"path": "new.txt", "content": "nope"},
+                        ),
+                        ToolCall(
+                            id="b1",
+                            name="bash",
+                            arguments={"command": "echo hi > hacked.txt"},
+                        ),
+                        ToolCall(id="c1", name="custom_mutator", arguments={}),
+                    ],
+                ),
+                ("done", []),
+            ]
+        )
+        harness_ro = Harness(
+            model=model_ro,
+            workspace_dir=ws,
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=False,
+            permission_mode="read-only",
+            extra_tools=[custom_ro],
+            verbose=False,
+        )
+        res_ro = harness_ro.run(Task(id="ro_test", instruction="inspect"))
+        self.assertTrue(res_ro.passed)
+        self.assertFalse((ws / "new.txt").exists())
+        self.assertFalse((ws / "hacked.txt").exists())
+        self.assertEqual(custom_ro.called, 0)
+
+        # 2. ask mode confirms each action via confirm_handler
+        prompts: list[str] = []
+        model_ask = MockModel(
+            [
+                (
+                    "write then bash",
+                    [
+                        ToolCall(
+                            id="w2",
+                            name="write_file",
+                            arguments={"path": "denied.txt", "content": "x"},
+                        ),
+                        ToolCall(
+                            id="w3",
+                            name="write_file",
+                            arguments={"path": "approved.txt", "content": "ok\n"},
+                        ),
+                        ToolCall(id="b2", name="bash", arguments={"command": "echo ok"}),
+                    ],
+                ),
+                ("done", []),
+            ]
+        )
+
+        def confirm(action: str, detail: str) -> bool:
+            prompts.append(f"{action}:{detail}")
+            return "denied.txt" not in detail
+
+        harness_ask = Harness(
+            model=model_ask,
+            workspace_dir=ws,
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=False,
+            permission_mode="ask",
+            confirm_handler=confirm,
+            verbose=False,
+        )
+        res_ask = harness_ask.run(Task(id="ask_test", instruction="write"))
+        self.assertTrue(res_ask.passed)
+        self.assertFalse((ws / "denied.txt").exists())
+        self.assertEqual((ws / "approved.txt").read_text(encoding="utf-8"), "ok\n")
+        self.assertEqual(len(prompts), 3)
+
+        # Dynamic set_permission_mode validates and updates active_env
+        self.assertEqual(harness_ask.set_permission_mode("read-only"), "read-only")
+        self.assertEqual(harness_ask.get_permission_mode(), "read-only")
+        with self.assertRaises(ValueError):
+            harness_ask.set_permission_mode("invalid")
+
+        # Programmatic harness.undo() reverts edits from Harness.run() on real workspace
+        undo_res = harness_ask.undo()
+        self.assertTrue(undo_res.ok)
+        self.assertFalse((ws / "approved.txt").exists())
+
+    def test_harness_tui_pre_turn_checkpoint_and_undo(self):
+        """Invariant: real-workspace TUI turns record pre-turn checkpoints and /undo reverts edits cleanly."""
+        ws = Path(tempfile.mkdtemp(prefix="mh_tui_undo_ws_")).resolve()
+        global_dir = Path(tempfile.mkdtemp(prefix="mh_tui_undo_global_")).resolve()
+        (ws / "target.txt").write_text("before\n", encoding="utf-8")
+
+        model = MockModel(
+            [
+                (
+                    "editing target",
+                    [
+                        ToolCall(
+                            id="w1",
+                            name="write_file",
+                            arguments={"path": "target.txt", "content": "after\n"},
+                        ),
+                        ToolCall(
+                            id="w2",
+                            name="write_file",
+                            arguments={"path": "created.txt", "content": "extra\n"},
+                        ),
+                    ],
+                ),
+                ("done", []),
+            ]
+        )
+        harness = Harness(
+            model=model,
+            workspace_dir=ws,
+            global_dir=global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=False,
+            verbose=False,
+        )
+
+        env, tool_registry, memory, tracer, loop, run_dir = harness._setup_run(
+            task_id="undo_tui_test",
+            system_prompt="sys",
+            initial_instruction="",
+            initial_files={},
+        )
+        self.assertIsNotNone(harness.checkpoint_manager)
+        assert harness.checkpoint_manager is not None
+        try:
+            from core.interactive import TURN, NullUI, TurnState
+            from core.tui_session import TuiTurnRunner
+
+            class HeadlessTui:
+                stdscr = None
+
+                def request_redraw(self):
+                    pass
+
+                def check_cancel_requested(self):
+                    return False
+
+            state = MagicMock()
+            turns = TurnState()
+            router = harness._make_router(
+                memory,
+                {},
+                {},
+                NullUI(),
+                env.workspace_dir,
+                tracer,
+                turns,
+                checkpoints=harness.checkpoint_manager,
+            )
+            runner = TuiTurnRunner(
+                model=model,
+                loop=loop,
+                memory=memory,
+                tracer=tracer,
+                state=state,
+                tui=HeadlessTui(),
+                cache_stats=harness.get_cache_stats,
+                step_index=turns.step_index,
+            )
+
+            pre_len = len(memory.messages)
+            self.assertEqual(router.dispatch("Edit target.txt"), TURN)
+            harness.checkpoint_manager.create(label="Edit target.txt", memory_len=pre_len)
+            runner.run_turn()
+
+            self.assertEqual((ws / "target.txt").read_text(encoding="utf-8"), "after\n")
+            self.assertTrue((ws / "created.txt").exists())
+
+            # /undo reverts both workspace files and the turn's conversation memory
+            router.dispatch("/undo")
+            self.assertEqual((ws / "target.txt").read_text(encoding="utf-8"), "before\n")
+            self.assertFalse((ws / "created.txt").exists())
+            self.assertEqual(len(memory.messages), pre_len)
+        finally:
+            harness.checkpoint_manager.cleanup()
+            env.teardown()
+
 
 if __name__ == "__main__":
     unittest.main()

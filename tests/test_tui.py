@@ -2301,3 +2301,67 @@ class TestCommandCatalog(unittest.TestCase):
         tui.handle_key(27, submitted.append)
         worker2.join(timeout=2.0)
         self.assertEqual(results, [None])
+
+    def test_mode_subcommand_menu_and_confirm_prompt_lifecycle(self):
+        """Invariant: /mode offers permission modes, status bar shows non-auto mode, and request_confirm handles y/n/Esc."""
+        import threading
+        import time
+
+        state = TUIState()
+        state.input_buffer = "/mode "
+        self.assertEqual(
+            [cmd for cmd, _ in state.get_matching_commands()],
+            ["/mode auto", "/mode ask", "/mode read-only"],
+        )
+        state.input_buffer = "/mode re"
+        self.assertEqual(
+            [cmd for cmd, _ in state.get_matching_commands()],
+            ["/mode read-only"],
+        )
+
+        tui = CursesTUI(state)
+        state.permission_mode = "auto"
+        self.assertFalse(any(p.startswith("mode:") for p in tui._status_parts()))
+        state.permission_mode = "ask"
+        self.assertIn("mode: ask", tui._status_parts())
+
+        # Without stdscr, request_confirm fails closed (False)
+        self.assertFalse(tui.request_confirm("Allow bash? ls"))
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui.stdscr = mock_stdscr
+
+        results: list[bool] = []
+        worker_yes = threading.Thread(
+            target=lambda: results.append(tui.request_confirm("Allow write_file? a.py")),
+            daemon=True,
+        )
+        worker_yes.start()
+        deadline = time.monotonic() + 2.0
+        while tui._confirm_prompt is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        tui.draw(mock_stdscr)
+        drawn_texts = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str)
+        ]
+        self.assertTrue(any("Allow write_file? a.py [y/N]" in t for t in drawn_texts))
+        tui.handle_key("y", lambda _: None)
+        worker_yes.join(timeout=2.0)
+        self.assertEqual(results, [True])
+
+        # Esc denies confirmation
+        results.clear()
+        worker_esc = threading.Thread(
+            target=lambda: results.append(tui.request_confirm("Allow bash? rm -rf .")),
+            daemon=True,
+        )
+        worker_esc.start()
+        deadline = time.monotonic() + 2.0
+        while tui._confirm_prompt is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        tui.handle_key(27, lambda _: None)
+        worker_esc.join(timeout=2.0)
+        self.assertEqual(results, [False])

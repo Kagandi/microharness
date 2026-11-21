@@ -49,6 +49,7 @@ class TuiTurnRunner:
         tui: Any,
         cache_stats: Callable[[], dict[str, Any]],
         step_index: int = 1,
+        on_before_turn: Callable[[], None] | None = None,
     ):
         self.model = model
         self.loop = loop
@@ -58,6 +59,7 @@ class TuiTurnRunner:
         self.tui = tui
         self.cache_stats = cache_stats
         self.step_index = step_index
+        self.on_before_turn = on_before_turn
 
     def refresh(self) -> None:
         """Updates the status area and requests a redraw from the main UI thread."""
@@ -69,6 +71,8 @@ class TuiTurnRunner:
 
     def run_turn(self, max_steps: int = MAX_STEPS_PER_TURN) -> None:
         """Runs one agent turn, honouring Esc cancellation and Ctrl+C interrupts."""
+        if self.on_before_turn is not None:
+            self.on_before_turn()
         turn_start = self.step_index
         self.state.turn_active = True
         self._install_cancel_probe()

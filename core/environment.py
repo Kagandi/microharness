@@ -8,9 +8,9 @@ import signal
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from core.editing import apply_text_edit
 
@@ -595,6 +595,139 @@ class ReadOnlyEnvironment(Environment):
         return None
 
 
+_ENV_PERMISSION_MODES: dict[str, str] = {
+    "auto": "auto",
+    "ask": "ask",
+    "read-only": "read-only",
+    "readonly": "read-only",
+    "read_only": "read-only",
+}
+
+
+class GuardedEnvironment(Environment):
+    """Environment wrapper enforcing configurable host permission modes ('auto', 'ask', 'read-only').
+
+    Delegates read-only mode to :class:`ReadOnlyEnvironment` and prompts via
+    ``confirm_handler`` before mutating files or executing bash commands in ``'ask'`` mode.
+    """
+
+    def __init__(
+        self,
+        inner: Environment,
+        mode: str = "auto",
+        confirm_handler: Callable[[str, str], bool] | None = None,
+    ):
+        self._inner = inner
+        self._ro = ReadOnlyEnvironment(inner)
+        self.workspace_dir = inner.workspace_dir
+        self.logs_dir = inner.logs_dir
+        self.allowed_read_dirs = list(inner.allowed_read_dirs)
+        self.cleanup_on_teardown = False
+        self._is_temp = False
+        self.confirm_handler = confirm_handler
+        self._mode = self._normalize_mode(mode)
+        if isinstance(inner, ContainerEnvironment):
+            self.container_name = inner.container_name
+
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
+        norm = _ENV_PERMISSION_MODES.get(str(mode).strip().lower())
+        if norm is None:
+            raise ValueError(
+                f"Unsupported permission_mode: '{mode}'. Valid options: 'auto', 'ask', 'read-only'."
+            )
+        return norm
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @mode.setter
+    def mode(self, value: str) -> None:
+        self._mode = self._normalize_mode(value)
+
+    @property
+    def permission_mode(self) -> str:
+        return self._mode
+
+    @property
+    def is_running(self) -> bool:
+        return self._inner.is_running
+
+    @property
+    def agent_logs_dir(self) -> str:
+        return self._inner.agent_logs_dir
+
+    def confirm_action(self, action: str, detail: str) -> tuple[bool, str]:
+        """Checks whether ``action`` may execute under the active permission mode."""
+        if self._mode == "read-only":
+            return False, f"Workspace is read-only; '{action}' is not permitted."
+        if self._mode == "auto":
+            return True, ""
+        if self.confirm_handler is None:
+            return (
+                False,
+                f"Action '{action}' requires user confirmation (permission_mode='ask'), "
+                "but no interactive confirmation handler is available.",
+            )
+        if not self.confirm_handler(action, detail):
+            return False, f"Action '{action}' denied by user."
+        return True, ""
+
+    def populate_files(self, files: dict[str, str]) -> None:
+        if self._mode == "read-only":
+            self._ro.populate_files(files)
+            return
+        self._inner.populate_files(files)
+
+    def resolve_path(self, rel_path: str) -> Path:
+        if self._mode == "read-only":
+            return self._ro.resolve_path(rel_path)
+        return self._inner.resolve_path(rel_path)
+
+    def resolve_read_path(self, path_str: str) -> Path:
+        return self._inner.resolve_read_path(path_str)
+
+    def read_file(self, path_str: str, start_line: int = 1, end_line: int = -1) -> str:
+        return self._inner.read_file(path_str, start_line=start_line, end_line=end_line)
+
+    def write_file(self, rel_path: str, content: str) -> None:
+        if self._mode == "read-only":
+            self._ro.write_file(rel_path, content)
+            return
+        ok, reason = self.confirm_action("write_file", f"Write '{rel_path}'")
+        if not ok:
+            raise PermissionError(reason)
+        self._inner.write_file(rel_path, content)
+
+    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
+        if self._mode == "read-only":
+            return self._ro.edit_file(rel_path, old_str, new_str)
+        ok, reason = self.confirm_action("edit_file", f"Edit '{rel_path}'")
+        if not ok:
+            raise PermissionError(reason)
+        return self._inner.edit_file(rel_path, old_str, new_str)
+
+    def get_git_patch(self) -> str | None:
+        if self._mode == "read-only":
+            return None
+        return self._inner.get_git_patch()
+
+    def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+        if self._mode == "read-only":
+            return self._ro.execute_bash(command, timeout=timeout)
+        ok, reason = self.confirm_action("bash", command)
+        if not ok:
+            return 1, f"Error: {reason}"
+        return self._inner.execute_bash(command, timeout=timeout)
+
+    def teardown(self) -> None:
+        self._inner.teardown()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def is_docker_available() -> bool:
     """Checks if the docker CLI is installed and the daemon is responsive."""
     if not shutil.which("docker"):
@@ -623,6 +756,9 @@ class DockerEnvironment(Environment):
     CONTAINER_LOGS_DIR = "/logs"
     container_name: str = ""
     network: str | None = None
+    memory_limit: str | None = None
+    cpu_limit: str | float | None = None
+    pids_limit: int | None = None
 
     def __init__(
         self,
@@ -635,6 +771,9 @@ class DockerEnvironment(Environment):
         docker_args: list[str] | None = None,
         init_workdir: str | None = None,
         network: str | None = None,
+        memory_limit: str | None = None,
+        cpu_limit: str | float | None = None,
+        pids_limit: int | None = None,
     ):
         super().__init__(
             workspace_dir=workspace_dir,
@@ -647,6 +786,9 @@ class DockerEnvironment(Environment):
         self.docker_args = list(docker_args or [])
         self.init_workdir = init_workdir
         self.network = network
+        self.memory_limit = memory_limit
+        self.cpu_limit = cpu_limit
+        self.pids_limit = pids_limit
         self._container_started = False
         try:
             self._start_container()
@@ -655,15 +797,30 @@ class DockerEnvironment(Environment):
             raise
 
     def _effective_docker_args(self) -> list[str]:
-        """Builds docker run arguments, applying network isolation unless already set."""
+        """Builds docker run arguments, applying network and resource limits unless already set."""
         args = list(self.docker_args)
+        prefix: list[str] = []
         if self.network:
             has_network_flag = any(
                 a in ("--network", "--net") or a.startswith(("--network=", "--net=")) for a in args
             )
             if not has_network_flag:
-                args = ["--network", self.network, *args]
-        return args
+                prefix.extend(["--network", self.network])
+        if self.memory_limit:
+            has_mem_flag = any(
+                a in ("-m", "--memory") or a.startswith(("-m=", "--memory=")) for a in args
+            )
+            if not has_mem_flag:
+                prefix.extend(["--memory", str(self.memory_limit)])
+        if self.cpu_limit is not None:
+            has_cpu_flag = any(a == "--cpus" or a.startswith("--cpus=") for a in args)
+            if not has_cpu_flag:
+                prefix.extend(["--cpus", str(self.cpu_limit)])
+        if self.pids_limit is not None:
+            has_pids_flag = any(a == "--pids-limit" or a.startswith("--pids-limit=") for a in args)
+            if not has_pids_flag:
+                prefix.extend(["--pids-limit", str(self.pids_limit)])
+        return [*prefix, *args]
 
     def _start_container(self) -> None:
         """Starts a persistent background container mounting workspace at /workspace and logs at /logs."""

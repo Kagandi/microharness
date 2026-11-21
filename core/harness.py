@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from core.checkpoints import CheckpointManager, UndoResult
 from core.commands import (
     Command,
     discover_commands,
@@ -21,11 +22,12 @@ from core.config import (
     load_global_config,
     load_project_config,
     normalize_cache_ttl,
+    normalize_permission_mode,
     normalize_reasoning_effort,
     resolve_project_tool_trust,
 )
 from core.discovery import discover_workspace_files
-from core.environment import DockerEnvironment, Environment
+from core.environment import DockerEnvironment, Environment, GuardedEnvironment
 from core.evaluator import Evaluator
 from core.hooks import HookProtocol, HookRegistry, build_hook_registry, parse_hook_specs
 from core.interactive import (
@@ -153,6 +155,12 @@ class Harness:
         | None = None,
         disabled_hooks: Sequence[str] | None = None,
         include_default_hooks: bool | None = None,
+        permission_mode: str | None = None,
+        checkpoints: bool | None = None,
+        confirm_handler: Callable[[str, str], bool] | None = None,
+        docker_memory: str | None = None,
+        docker_cpus: float | None = None,
+        docker_pids_limit: int | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
@@ -196,6 +204,11 @@ class Harness:
             hooks=config_hook_arg,
             disabled_hooks=disabled_hooks,
             include_default_hooks=include_default_hooks,
+            permission_mode=permission_mode,
+            checkpoints=checkpoints,
+            docker_memory=docker_memory,
+            docker_cpus=docker_cpus,
+            docker_pids_limit=docker_pids_limit,
         ).resolve(self.layers)
 
         self.sandbox = cfg.sandbox
@@ -217,6 +230,12 @@ class Harness:
         self.step_retry_delay = cfg.step_retry_delay
         self.bash_timeout = cfg.bash_timeout
         self.subagent_max_steps = cfg.subagent_max_steps
+        self.permission_mode = cfg.permission_mode
+        self.checkpoints_enabled = cfg.checkpoints
+        self.confirm_handler = confirm_handler
+        self.docker_memory = cfg.docker_memory
+        self.docker_cpus = cfg.docker_cpus
+        self.docker_pids_limit = cfg.docker_pids_limit
 
         self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
             trust_project_tools, self.layers
@@ -257,6 +276,8 @@ class Harness:
             inline_providers=self.merged_config.get("providers"),
         )
         self.active_loop: AgentLoop | None = None
+        self.active_env: Environment | None = None
+        self.checkpoint_manager: CheckpointManager | None = None
 
     def _evaluate(self, env: Environment, tracer: Tracer) -> EvalResult | None:
         """Grades a finished run when an evaluator is configured."""
@@ -320,6 +341,25 @@ class Harness:
             if isinstance(effort, str) or effort is None:
                 return effort
         return getattr(self, "reasoning_effort", None)
+
+    def get_permission_mode(self) -> str:
+        """Returns the active host permission mode ('auto', 'ask', or 'read-only')."""
+        return getattr(self, "permission_mode", "auto")
+
+    def set_permission_mode(self, mode: str) -> str:
+        """Dynamically switches permission mode ('auto', 'ask', or 'read-only')."""
+        normalized = normalize_permission_mode(mode)
+        self.permission_mode = normalized
+        if isinstance(self.active_env, GuardedEnvironment):
+            self.active_env.mode = normalized
+        return normalized
+
+    def undo(self) -> UndoResult:
+        """Reverts workspace changes (and turn memory) to the latest pre-turn checkpoint."""
+        if self.checkpoint_manager is None:
+            return UndoResult(ok=False, message="No workspace checkpoints available.")
+        memory = self.active_loop.memory if self.active_loop is not None else None
+        return self.checkpoint_manager.undo(memory=memory)
 
     def get_available_models(self) -> list[dict[str, Any]]:
         """Returns configured and available models for dynamic /model switching."""
@@ -561,6 +601,9 @@ class Harness:
                 cleanup_on_teardown=True,
                 init_workdir=init_workdir,
                 network=active_network,
+                memory_limit=self.docker_memory,
+                cpu_limit=self.docker_cpus,
+                pids_limit=self.docker_pids_limit,
             )
         else:
             env = Environment(
@@ -571,7 +614,11 @@ class Harness:
             )
         if initial_files:
             env.populate_files(initial_files)
-        return env
+        return GuardedEnvironment(
+            env,
+            mode=self.permission_mode,
+            confirm_handler=self.confirm_handler,
+        )
 
     def _init_tools(
         self,
@@ -727,6 +774,14 @@ class Harness:
             initial_files=initial_files,
             docker_network=effective_network,
         )
+        self.active_env = env
+        if (not use_sandbox) and self.checkpoints_enabled:
+            self.checkpoint_manager = CheckpointManager(
+                workspace_dir=workspace,
+                storage_dir=run_dir / "checkpoints",
+            )
+        else:
+            self.checkpoint_manager = None
         tool_registry = self._init_tools(
             env,
             require_finish_tool=require_finish_tool,
@@ -868,6 +923,9 @@ class Harness:
         if isinstance(self.model, DeadlineAwareModel):
             self.model.set_deadline(task_deadline)
 
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.create(label=task.id)
+
         try:
             is_finished, finish_reason, _ = self._execute_steps(
                 loop=loop,
@@ -930,6 +988,8 @@ class Harness:
         finally:
             if isinstance(self.model, DeadlineAwareModel):
                 self.model.set_deadline(None)
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.cleanup()
             env.teardown()
 
     def _make_router(
@@ -944,12 +1004,14 @@ class Harness:
         *,
         allow_bare_words: bool = True,
         subagents: dict[str, Subagent] | None = None,
+        checkpoints: CheckpointManager | None = None,
     ) -> CommandRouter:
         """Builds a command router bound to this harness and the caller's session state."""
         resolved_ws = workspace_dir or self.workspace_dir
         resolved_subagents = (
             subagents if subagents is not None else discover_subagents(resolved_ws, self.global_dir)
         )
+        resolved_checkpoints = checkpoints if checkpoints is not None else self.checkpoint_manager
         return CommandRouter(
             CommandContext(
                 harness=self,
@@ -961,6 +1023,7 @@ class Harness:
                 subagents=resolved_subagents,
                 tracer=tracer,
                 turns=turns,
+                checkpoints=resolved_checkpoints,
             ),
             allow_bare_words=allow_bare_words,
         )
@@ -1039,7 +1102,13 @@ class Harness:
             state,
             redraw=lambda: tui.request_redraw() if tui.stdscr else None,
             secret_prompter=tui.request_secret,
+            confirm_prompter=tui.request_confirm,
         )
+        previous_confirm_handler = (
+            env.confirm_handler if isinstance(env, GuardedEnvironment) else None
+        )
+        if isinstance(env, GuardedEnvironment) and env.confirm_handler is None:
+            env.confirm_handler = ui.confirm_action
         router = self._make_router(
             memory,
             commands,
@@ -1050,6 +1119,7 @@ class Harness:
             turns,
             allow_bare_words=True,
             subagents=subagents,
+            checkpoints=self.checkpoint_manager,
         )
         runner = TuiTurnRunner(
             model=self.model,
@@ -1084,7 +1154,17 @@ class Harness:
             if not user_text.strip():
                 return
             runner.step_index = turns.step_index
+            pre_memory_len = len(memory.messages)
+            pre_modified = frozenset(memory.modified_files)
             if router.dispatch(user_text) == TURN:
+                if self.checkpoint_manager is not None:
+                    self.checkpoint_manager.create(
+                        label=user_text.strip()[:60],
+                        memory_len=pre_memory_len,
+                        modified_files=pre_modified,
+                    )
+                    if self.checkpoint_manager.last_warning:
+                        state.add_system(f"⚠️ {self.checkpoint_manager.last_warning}")
                 runner.run_turn()
                 turns.step_index = runner.step_index
 
@@ -1092,6 +1172,10 @@ class Harness:
         try:
             tui.run(on_user_submit=on_user_submit, initial_instruction=initial_instruction)
         finally:
+            if isinstance(env, GuardedEnvironment):
+                env.confirm_handler = previous_confirm_handler
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.cleanup()
             env.teardown()
             _, md_path = tracer.finalize(
                 finish_reason="session_ended",
@@ -1119,6 +1203,7 @@ class Harness:
         state.cache_ttl = self.cache_ttl.upper() if self.cache_ttl else ""
         reasoning = self.get_reasoning_effort()
         state.reasoning = reasoning.upper() if reasoning else ""
+        state.permission_mode = self.permission_mode
         from core.tui import compact_path, get_git_branch
 
         state.cwd = compact_path(str(env.workspace_dir))
