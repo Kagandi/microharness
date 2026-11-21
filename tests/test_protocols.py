@@ -3,6 +3,7 @@ import unittest
 from core.protocols import (
     CacheAwareModel,
     CancellableModel,
+    ContextWindowAwareModel,
     DeadlineAwareModel,
     EndpointAwareModel,
     Model,
@@ -51,6 +52,9 @@ class FullFeaturedModel:
     def get_last_step_usage(self):
         return {"prompt_tokens": 1}
 
+    def get_context_window(self):
+        return 128000
+
 
 class MinimalModel:
     """A model with nothing but the required generate() method."""
@@ -72,6 +76,7 @@ class TestCapabilityProtocols(unittest.TestCase):
         NamedModel,
         EndpointAwareModel,
         ProviderAwareModel,
+        ContextWindowAwareModel,
     )
 
     def test_minimal_model_satisfies_only_the_base_protocol(self):

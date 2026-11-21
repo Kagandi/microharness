@@ -115,3 +115,10 @@ class ProviderAwareModel(Model, Protocol):
     """Exposes its underlying provider name."""
 
     provider: str
+
+
+@runtime_checkable
+class ContextWindowAwareModel(Model, Protocol):
+    """Supports querying the model's live context window size."""
+
+    def get_context_window(self) -> int | None: ...

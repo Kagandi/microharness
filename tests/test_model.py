@@ -1726,6 +1726,83 @@ class TestWave6SigningFreshness(unittest.TestCase):
             self.assertEqual(mock_urlopen.call_count, 1)
             mock_sleep.assert_not_called()
 
+    @patch("urllib.request.urlopen")
+    def test_get_context_window_probes_models_endpoint_and_caches(self, mock_urlopen):
+        """Invariant: HttpChatModel probes GET /models once, parses context length, and caches it."""
+        from core.model import ContextWindowAwareModel
+
+        payload = {
+            "object": "list",
+            "data": [
+                {"id": "other-model", "max_model_len": 131072},
+                {"id": "LFM3-1.7B-MLX-8bit", "max_model_len": 262144},
+            ],
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(payload).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        m = HttpChatModel(base_url="http://localhost:8000/v1", model="LFM3-1.7B-MLX-8bit")
+        self.assertIsInstance(m, ContextWindowAwareModel)
+        self.assertEqual(m.get_context_window(), 262144)
+        self.assertEqual(m.get_context_window(), 262144)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "http://localhost:8000/v1/models")
+        self.assertEqual(req.get_method(), "GET")
+
+    @patch("urllib.request.urlopen")
+    def test_get_context_window_metadata_variants_and_failures(self, mock_urlopen):
+        """Invariant: supports context_length/top_provider/models variants and returns None safely on failures."""
+        # OpenRouter top_provider.context_length + models key variant + auth header
+        resp_top = MagicMock()
+        resp_top.read.return_value = json.dumps(
+            {
+                "models": [
+                    {
+                        "name": "openrouter/test",
+                        "context_length": False,  # strict positive int check skips bool
+                        "top_provider": {"context_length": 200000},
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        resp_top.__enter__.return_value = resp_top
+        mock_urlopen.return_value = resp_top
+
+        m1 = HttpChatModel(
+            base_url="https://openrouter.ai/api/v1", model="openrouter/test", api_key="sk-or-1"
+        )
+        self.assertEqual(m1.get_context_window(), 200000)
+        self.assertEqual(mock_urlopen.call_args[0][0].headers["Authorization"], "Bearer sk-or-1")
+
+        # Network/timeout errors fail silently -> None (and remain cached)
+        mock_urlopen.reset_mock()
+        mock_urlopen.side_effect = OSError("connection refused")
+        m2 = HttpChatModel(base_url="http://localhost:8000/v1", model="missing-server")
+        self.assertEqual(m2.get_context_window(), None)
+        self.assertEqual(m2.get_context_window(), None)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+        # SigV4 and custom non-/chat/completions endpoints skip HTTP probing altogether
+        mock_urlopen.reset_mock()
+        m_sigv4 = HttpChatModel(
+            base_url="https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            model="us.openai.gpt-5.6-sol",
+            auth_scheme="sigv4",
+        )
+        self.assertEqual(m_sigv4.get_context_window(), None)
+        mock_urlopen.assert_not_called()
+
+        m_custom = HttpChatModel(
+            base_url="http://localhost:8000/custom/generate",
+            model="x",
+        )
+        m_custom.endpoint = "http://localhost:8000/custom/generate"
+        self.assertEqual(m_custom.get_context_window(), None)
+        mock_urlopen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
