@@ -11,6 +11,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from core.editing import apply_text_edit
+
 
 @runtime_checkable
 class ContainerEnvironment(Protocol):
@@ -167,7 +169,7 @@ class Environment:
         path.write_text(content, encoding="utf-8")
 
     def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
-        """Replaces a unique exact occurrence of old_str with new_str in a workspace file."""
+        """Replaces a unique occurrence of old_str with new_str in a workspace file."""
         if not old_str:
             raise ValueError("old_str cannot be empty.")
         path = self.resolve_path(rel_path)
@@ -177,20 +179,9 @@ class Environment:
             raise IsADirectoryError(f"Path is a directory: {rel_path}")
 
         content = path.read_text(encoding="utf-8", errors="replace")
-        occurrences = content.count(old_str)
-        if occurrences == 0:
-            raise ValueError(
-                f"Target string not found in '{rel_path}'. Make sure old_str matches exactly, including indentation."
-            )
-        if occurrences > 1:
-            raise ValueError(
-                f"Target string found {occurrences} times in '{rel_path}'. "
-                "The target string must be unique. Provide more surrounding context lines to disambiguate."
-            )
-
-        updated_content = content.replace(old_str, new_str, 1)
+        updated_content, message = apply_text_edit(content, old_str, new_str, path_label=rel_path)
         path.write_text(updated_content, encoding="utf-8")
-        return occurrences, f"Successfully replaced 1 occurrence in '{rel_path}'."
+        return 1, message
 
     @property
     def is_running(self) -> bool:
