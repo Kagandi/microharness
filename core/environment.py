@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from core.editing import apply_text_edit
+from core.types import normalize_permission_mode
 
 
 @runtime_checkable
@@ -595,15 +596,6 @@ class ReadOnlyEnvironment(Environment):
         return None
 
 
-_ENV_PERMISSION_MODES: dict[str, str] = {
-    "auto": "auto",
-    "ask": "ask",
-    "read-only": "read-only",
-    "readonly": "read-only",
-    "read_only": "read-only",
-}
-
-
 class GuardedEnvironment(Environment):
     """Environment wrapper enforcing configurable host permission modes ('auto', 'ask', 'read-only').
 
@@ -631,12 +623,11 @@ class GuardedEnvironment(Environment):
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:
-        norm = _ENV_PERMISSION_MODES.get(str(mode).strip().lower())
-        if norm is None:
+        if not isinstance(mode, str) or not mode.strip():
             raise ValueError(
                 f"Unsupported permission_mode: '{mode}'. Valid options: 'auto', 'ask', 'read-only'."
             )
-        return norm
+        return normalize_permission_mode(mode)
 
     @property
     def mode(self) -> str:

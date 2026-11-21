@@ -9,6 +9,31 @@ ASSISTANT_EXTRA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning", "reas
 DOOM_LOOP = "doom_loop"
 HOOK_BLOCKED = "hook_blocked"
 
+PERMISSION_MODES: frozenset[str] = frozenset({"auto", "ask", "read-only"})
+_PERMISSION_MODE_ALIASES: dict[str, str] = {
+    "auto": "auto",
+    "ask": "ask",
+    "read-only": "read-only",
+    "readonly": "read-only",
+    "read_only": "read-only",
+    "ro": "read-only",
+}
+
+
+def normalize_permission_mode(mode: str | None) -> str:
+    """Normalizes a permission mode to ``'auto'``, ``'ask'``, or ``'read-only'``."""
+    if mode is None:
+        return "auto"
+    val = str(mode).strip().lower()
+    if not val:
+        return "auto"
+    canonical = _PERMISSION_MODE_ALIASES.get(val)
+    if canonical is not None:
+        return canonical
+    raise ValueError(
+        f"Unsupported permission_mode: '{mode}'. Valid options: 'auto', 'ask', 'read-only'."
+    )
+
 
 @dataclass
 class ToolCall:

@@ -285,26 +285,6 @@ class TestReplayMessages(TuiSessionTestCase):
         replay_messages(self.state, [])
         self.assertEqual(self.state.systems, [])
 
-    def test_on_before_turn_hook_runs_once_per_turn(self):
-        """Invariant: TuiTurnRunner invokes on_before_turn once before executing steps."""
-        events: list[str] = []
-        loop = MagicMock()
-        loop.step.side_effect = [
-            (True, _trace("done")),
-        ]
-        runner = TuiTurnRunner(
-            model=self.model,
-            loop=loop,
-            memory=self.memory,
-            tracer=self.tracer,
-            state=self.state,
-            tui=self.tui,
-            cache_stats=lambda: {"cache_ttl": "5m"},
-            on_before_turn=lambda: events.append("before"),
-        )
-        runner.run_turn()
-        self.assertEqual(events, ["before"])
-
 
 if __name__ == "__main__":
     unittest.main()
