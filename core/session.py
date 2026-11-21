@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from core.hooks import POST_TURN, PRE_TURN, HookContext, HookOutcome, HookRegistry
 from core.loop import AgentLoop
-from core.model import RateLimitError
+from core.model import NonRetryableModelError, RateLimitError
 from core.protocols import DeadlineAwareModel, Model, ModelCancelledError, RateLimitAwareModel
 from core.types import ASSISTANT_EXTRA_KEYS, HOOK_BLOCKED, Message
 from core.types import DOOM_LOOP as DOOM_LOOP
@@ -173,6 +173,10 @@ def run_steps(
                     "Progress has been saved. You can resume this benchmark with --resume once rate limits reset."
                 )
                 turn_outcome = StepOutcome(False, RATE_LIMITED, step_idx)
+                return turn_outcome
+            except NonRetryableModelError as exc:
+                tracer.log(f"\n❌ Step {step_idx} failed with non-retryable model error: {exc}")
+                turn_outcome = StepOutcome(False, ERROR, step_idx)
                 return turn_outcome
             except Exception as exc:
                 if _retry_step(exc, step_idx, step_attempts + 1, max_retries, retry_delay, tracer):

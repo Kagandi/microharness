@@ -46,6 +46,14 @@ class RateLimitError(RuntimeError):
         self.retry_after = retry_after
 
 
+class NonRetryableModelError(RuntimeError):
+    """Raised when the model API returns a permanent HTTP 4xx client error."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 # 402 means "pay before we serve you", so it never warrants a retry. 429 is a
 # throttle: worth waiting out, using the delay the server asked for when it sent one.
 RATE_LIMIT_STATUS = 429
@@ -108,6 +116,7 @@ __all__ = [
     "Model",
     "ModelCancelledError",
     "NamedModel",
+    "NonRetryableModelError",
     "ProviderAwareModel",
     "RateLimitAwareModel",
     "RateLimitError",
@@ -423,9 +432,10 @@ class HttpChatModel(UsageTelemetry):
         if exc.code in TRANSIENT_STATUS and self.retry.can_retry(attempt):
             self._sleep_before_retry(self.retry.backoff(attempt), f" HTTP {exc.code}")
             return
-        raise RuntimeError(
-            f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{body}"
-        ) from exc
+        msg = f"Model API returned HTTP {exc.code} from {self.endpoint}:\n{body}"
+        if 400 <= exc.code < 500:
+            raise NonRetryableModelError(msg, status_code=exc.code) from exc
+        raise RuntimeError(msg) from exc
 
     def _wait_out_rate_limit(self, exc: urllib.error.HTTPError, body: str, attempt: int) -> None:
         """Waits out a 429, or fails immediately on 402 (no credit, no point retrying)."""

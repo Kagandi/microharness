@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from core.model import (
     HttpChatModel,
     MockModel,
+    NonRetryableModelError,
     RateLimitError,
     ReasoningAwareModel,
     build_model_from_spec,
@@ -1692,9 +1693,38 @@ class TestWave6SigningFreshness(unittest.TestCase):
         )
         mock_urlopen.side_effect = err
         m = HttpChatModel(base_url="https://api.example.com/v1", model="m", api_key=secret)
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(NonRetryableModelError) as ctx:
             m.generate([Message(role="user", content="hi")], [])
+        self.assertEqual(ctx.exception.status_code, 401)
         self.assertNotIn(secret, str(ctx.exception))
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_non_retryable_4xx_errors_fail_immediately(self, mock_urlopen, mock_sleep):
+        """Invariant: permanent HTTP 4xx errors raise NonRetryableModelError without retrying."""
+        import urllib.error
+
+        for code in (400, 401, 403, 404):
+            mock_urlopen.reset_mock()
+            mock_sleep.reset_mock()
+            err = urllib.error.HTTPError(
+                url="https://api.example.com/v1/chat/completions",
+                code=code,
+                msg="Client Error",
+                hdrs=None,
+                fp=MagicMock(read=MagicMock(return_value=b'{"error": "permanent failure"}')),
+            )
+            mock_urlopen.side_effect = err
+            m = HttpChatModel(
+                base_url="https://api.example.com/v1",
+                model="m",
+                api_key="k",
+            )
+            with self.assertRaises(NonRetryableModelError) as ctx:
+                m.generate([Message(role="user", content="hi")], [])
+            self.assertEqual(ctx.exception.status_code, code)
+            self.assertEqual(mock_urlopen.call_count, 1)
+            mock_sleep.assert_not_called()
 
 
 if __name__ == "__main__":

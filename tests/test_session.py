@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from core.model import MockModel, RateLimitError
+from core.model import MockModel, NonRetryableModelError, RateLimitError
 from core.session import (
     DOOM_LOOP,
     ERROR,
@@ -141,6 +141,30 @@ class TestRunSteps(unittest.TestCase):
         outcome = run_steps(MockModel([]), loop, FakeTracer(), start_step=1, max_steps=5)
         self.assertEqual(outcome.reason, "rate_limited")
         self.assertEqual(loop.step.call_count, 1)
+
+    def test_non_retryable_model_error_stops_without_retrying(self):
+        """Invariant: permanent HTTP 4xx errors stop immediately without step retries or sleep."""
+        loop = MagicMock()
+        loop.step.side_effect = NonRetryableModelError("HTTP 404 Not Found", status_code=404)
+        tracer = FakeTracer()
+
+        with patch("time.sleep") as sleep:
+            outcome = run_steps(
+                MockModel([]),
+                loop,
+                tracer,
+                start_step=1,
+                max_steps=5,
+                max_retries=3,
+                retry_delay=5.0,
+            )
+
+        self.assertFalse(outcome.finished)
+        self.assertEqual(outcome.reason, ERROR)
+        self.assertEqual(outcome.next_step, 1)
+        self.assertEqual(loop.step.call_count, 1)
+        sleep.assert_not_called()
+        self.assertTrue(any("non-retryable model error" in line for line in tracer.logs))
 
     def test_timeout_error_is_not_retried(self):
         """Invariant: an expired task deadline must surface immediately."""

@@ -744,7 +744,7 @@ class DockerEnvironment(Environment):
     - Guarantees complete operating system, process, filesystem, and network isolation.
     """
 
-    CONTAINER_LOGS_DIR = "/logs"
+    CONTAINER_LOGS_DIR = "/var/log/microharness"
     container_name: str = ""
     network: str | None = None
     memory_limit: str | None = None
@@ -814,7 +814,7 @@ class DockerEnvironment(Environment):
         return [*prefix, *args]
 
     def _start_container(self) -> None:
-        """Starts a persistent background container mounting workspace at /workspace and logs at /logs."""
+        """Starts a persistent background container mounting workspace at /workspace and logs read-only."""
         cmd = [
             "docker",
             "run",
@@ -879,11 +879,29 @@ class DockerEnvironment(Environment):
 
     @property
     def agent_logs_dir(self) -> str:
-        """Spilled logs are mounted read-only at /logs inside the container."""
+        """Spilled logs are mounted read-only at CONTAINER_LOGS_DIR inside the container."""
         return self.CONTAINER_LOGS_DIR
 
+    def _map_container_workspace_path(self, path_str: str) -> str:
+        """Maps container workspace paths (`/workspace/...`, `init_workdir/...`) to workspace-relative paths."""
+        prefixes = ["/workspace"]
+        init_workdir = getattr(self, "init_workdir", None)
+        if isinstance(init_workdir, str):
+            normalized = init_workdir.rstrip("/")
+            if normalized and normalized not in prefixes:
+                prefixes.append(normalized)
+        for prefix in prefixes:
+            if path_str == prefix or path_str.startswith(f"{prefix}/"):
+                rel = path_str[len(prefix) :].lstrip("/")
+                return rel or "."
+        return path_str
+
+    def resolve_path(self, rel_path: str) -> Path:
+        """Resolves host or container workspace paths safely inside `workspace_dir`."""
+        return super().resolve_path(self._map_container_workspace_path(rel_path))
+
     def resolve_read_path(self, path_str: str) -> Path:
-        """Resolves container `/logs/...` paths to host `logs_dir` in addition to normal read paths."""
+        """Resolves container log or workspace paths in addition to normal read paths."""
         prefix = self.CONTAINER_LOGS_DIR
         if path_str == prefix or path_str.startswith(f"{prefix}/"):
             rel = path_str[len(prefix) :].lstrip("/")
@@ -893,7 +911,7 @@ class DockerEnvironment(Environment):
                     f"Access denied: path '{path_str}' resolves outside logs directory."
                 )
             return target
-        return super().resolve_read_path(path_str)
+        return super().resolve_read_path(self._map_container_workspace_path(path_str))
 
     @property
     def is_running(self) -> bool:
