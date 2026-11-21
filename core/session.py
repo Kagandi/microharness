@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.defaults import load_defaults
 from core.hooks import POST_TURN, PRE_TURN, HookContext, HookOutcome, HookRegistry
 from core.loop import AgentLoop
 from core.model import NonRetryableModelError, RateLimitError
@@ -24,6 +25,8 @@ from core.types import DOOM_LOOP as DOOM_LOOP
 
 if TYPE_CHECKING:
     from core.tracer import Tracer
+
+_DEFAULTS = load_defaults()
 
 # finish_reason values, matching RunResult.finish_reason
 COMPLETED = "completed"
@@ -36,10 +39,10 @@ ERROR = "error"
 NOT_FOUND = "Session not found: no resumable session available"
 
 # Enough history for numeric / substring session selectors to resolve.
-SEARCH_LIMIT = 50
+SEARCH_LIMIT: int = int(_DEFAULTS["session_search_limit"])
 
 
-DEFAULT_MAX_EMPTY_NUDGES = 3
+DEFAULT_MAX_EMPTY_NUDGES: int = int(_DEFAULTS["max_empty_nudges"])
 DEFAULT_FINISH_NUDGE = (
     "You did not call any tool in your last response. If you still have work, edits, "
     "or verification to do, continue using your tools now. Only when the entire task "

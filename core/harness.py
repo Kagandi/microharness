@@ -15,6 +15,7 @@ from core.commands import (
     resolve_slash_input,
 )
 from core.config import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
     PROJECT_TRUST_NOTICE,
     ConfigLayers,
     HarnessConfig,
@@ -468,7 +469,7 @@ class Harness:
         applied = self.apply_model_context_tokens(target_spec)
         if applied is None:
             cfg = self.merged_config if isinstance(self.merged_config, dict) else {}
-            fallback = 64000
+            fallback = DEFAULT_MAX_CONTEXT_TOKENS
             for key in ("max_context_tokens", "max_tokens", "context_tokens"):
                 value = cfg.get(key)
                 if type(value) is int and value > 0:

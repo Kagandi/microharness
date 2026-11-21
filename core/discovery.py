@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
+from core.defaults import get_default
+
 T = TypeVar("T")
+DEFAULT_MAX_DISCOVERY_FILES: int = int(get_default("max_discovery_files"))
 
 
 @dataclass(frozen=True)
@@ -215,7 +218,7 @@ def _git_ignored(ws: Path, rel_paths: list[str]) -> set[str]:
 
 def discover_workspace_files(
     workspace_dir: Path | str,
-    max_files: int = 2000,
+    max_files: int = DEFAULT_MAX_DISCOVERY_FILES,
 ) -> list[str]:
     """Finds relative file paths within the workspace for @ file-tagging and autocomplete.
 

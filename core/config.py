@@ -18,12 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.defaults import get_default, load_defaults
 from core.hooks import parse_hook_specs
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
 from core.types import PERMISSION_MODES as PERMISSION_MODES
 from core.types import normalize_permission_mode as normalize_permission_mode
 
-DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
+DEFAULT_MAX_CONTEXT_TOKENS: int = int(get_default("max_context_tokens"))
+DEFAULT_TRIGGER_RATIO: float = float(get_default("trigger_ratio"))
+DEFAULT_SUBAGENT_MAX_STEPS: int | None = get_default("subagent_max_steps")
 
 GLOBAL_CONFIG_FILENAME = "config.json"
 PROJECT_CONFIG_RELPATH = ".microharness/config.json"
@@ -308,9 +311,10 @@ class HarnessConfig:
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
+        defaults = load_defaults()
         c = _Cascade(layers.merged)
         _warn_legacy_char_keys(layers.merged)
-        cache_ttl = c.pick("cache_ttl", self.cache_ttl, str, "5m")
+        cache_ttl = c.pick("cache_ttl", self.cache_ttl, str, defaults["cache_ttl"])
         reasoning = c.pick("reasoning_effort", self.reasoning_effort, str, None)
 
         tool_tok = c.pick("max_tool_tokens", self.max_tool_tokens, int, None)
@@ -323,14 +327,14 @@ class HarnessConfig:
             or c.pick("context_tokens", None, int, None)
         )
         if context_tok is None:
-            context_tok = 64000
+            context_tok = DEFAULT_MAX_CONTEXT_TOKENS
 
         raw_network = c.pick("docker_network", self.docker_network, str, None, require_truthy=True)
         docker_network = raw_network.strip() if isinstance(raw_network, str) else None
         if docker_network == "":
             docker_network = None
 
-        bash_timeout = c.pick("bash_timeout", self.bash_timeout, float, 120.0)
+        bash_timeout = c.pick("bash_timeout", self.bash_timeout, float, defaults["bash_timeout"])
         if bash_timeout <= 0:
             raise ValueError(f"Unsupported bash_timeout: {bash_timeout}. Must be greater than 0.")
 
@@ -357,7 +361,11 @@ class HarnessConfig:
                 disabled_seen.append(candidate)
 
         raw_permission = c.pick(
-            "permission_mode", self.permission_mode, str, "auto", require_truthy=True
+            "permission_mode",
+            self.permission_mode,
+            str,
+            defaults["permission_mode"],
+            require_truthy=True,
         )
         permission_mode = normalize_permission_mode(raw_permission)
 
@@ -384,7 +392,11 @@ class HarnessConfig:
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
             docker=c.pick("docker", self.docker, _coerce_bool, False),
             docker_image=c.pick(
-                "docker_image", self.docker_image, str, "python:3.11", require_truthy=True
+                "docker_image",
+                self.docker_image,
+                str,
+                defaults["docker_image"],
+                require_truthy=True,
             ),
             docker_network=docker_network,
             auto_discover_tools=c.pick(
@@ -399,11 +411,15 @@ class HarnessConfig:
             runs_dir=c.pick("runs_dir", self.runs_dir, Path, None, require_truthy=True),
             max_tool_tokens=tool_tok,
             max_context_tokens=context_tok,
-            trigger_ratio=c.pick("trigger_ratio", self.trigger_ratio, float, 0.80),
+            trigger_ratio=c.pick("trigger_ratio", self.trigger_ratio, float, DEFAULT_TRIGGER_RATIO),
             cache_ttl=normalize_cache_ttl(cache_ttl),
             reasoning_effort=normalize_reasoning_effort(reasoning),
-            max_step_retries=c.pick("max_step_retries", self.max_step_retries, int, 3),
-            step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
+            max_step_retries=c.pick(
+                "max_step_retries", self.max_step_retries, int, defaults["max_step_retries"]
+            ),
+            step_retry_delay=c.pick(
+                "step_retry_delay", self.step_retry_delay, float, defaults["step_retry_delay"]
+            ),
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
             hooks=tuple(hook_specs),

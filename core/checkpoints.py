@@ -15,12 +15,14 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.defaults import load_defaults
 from core.memory import Memory
 
+_DEFAULTS = load_defaults()
 _SKIP_DIRS: frozenset[str] = frozenset({".git", ".logs", "__pycache__", ".venv", "node_modules"})
 _EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-DEFAULT_MAX_SNAPSHOT_FILES = 5000
-DEFAULT_MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024
+DEFAULT_MAX_SNAPSHOT_FILES: int = int(_DEFAULTS["max_snapshot_files"])
+DEFAULT_MAX_SNAPSHOT_BYTES: int = int(_DEFAULTS["max_snapshot_bytes"])
 
 
 @dataclass(frozen=True)

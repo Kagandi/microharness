@@ -21,11 +21,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.config import (
-    DEFAULT_SUBAGENT_MAX_STEPS as DEFAULT_SUBAGENT_MAX_STEPS,
-)
-from core.config import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    DEFAULT_TRIGGER_RATIO,
     DISABLED_VALUES,
     normalize_reasoning_effort,
+)
+from core.config import (
+    DEFAULT_SUBAGENT_MAX_STEPS as DEFAULT_SUBAGENT_MAX_STEPS,
 )
 from core.discovery import discover_resources
 from core.environment import Environment, ReadOnlyEnvironment
@@ -646,7 +648,7 @@ class SubagentTool:
         effort_getter: Callable[[], str | None] | None = None,
         run_dir_getter: Callable[[], Path | None] | None = None,
         max_context_tokens_getter: Callable[[], int] | None = None,
-        trigger_ratio: float = 0.80,
+        trigger_ratio: float = DEFAULT_TRIGGER_RATIO,
         max_retries: int = 3,
         retry_delay: float = 5.0,
         sandboxed: bool = False,
@@ -955,7 +957,7 @@ class SubagentTool:
         max_ctx = (
             self.max_context_tokens_getter()
             if self.max_context_tokens_getter is not None
-            else 64000
+            else DEFAULT_MAX_CONTEXT_TOKENS
         )
         child_memory = Memory(
             system_prompt=child_system_prompt,
