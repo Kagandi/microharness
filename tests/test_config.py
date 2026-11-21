@@ -129,6 +129,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.max_step_retries, 3)
         self.assertEqual(cfg.step_retry_delay, 5.0)
         self.assertEqual(cfg.bash_timeout, 120.0)
+        self.assertIsNone(cfg.subagent_max_steps)
 
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
@@ -318,6 +319,27 @@ class TestHarnessConfigCascade(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     self._resolve(HarnessConfig(bash_timeout=bad_timeout))
                 self.assertIn("bash_timeout", str(ctx.exception))
+
+    def test_subagent_max_steps_cascade_and_validation(self):
+        """Invariant: subagent_max_steps follows cascade precedence and rejects non-positive/non-int values."""
+        cfg_project = self._resolve(
+            HarnessConfig(),
+            global_cfg={"subagent_max_steps": 20},
+            project_cfg={"subagent_max_steps": "12"},
+        )
+        self.assertEqual(cfg_project.subagent_max_steps, 12)
+
+        cfg_explicit = self._resolve(
+            HarnessConfig(subagent_max_steps=8),
+            project_cfg={"subagent_max_steps": 12},
+        )
+        self.assertEqual(cfg_explicit.subagent_max_steps, 8)
+
+        for bad_steps in (0, -3, True, False, 2.5, "abc"):
+            with self.subTest(bad_steps=bad_steps):
+                with self.assertRaises(ValueError) as ctx:
+                    self._resolve(HarnessConfig(subagent_max_steps=bad_steps))  # type: ignore[arg-type]
+                self.assertIn("subagent_max_steps", str(ctx.exception))
 
 
 class TestProjectToolTrust(unittest.TestCase):

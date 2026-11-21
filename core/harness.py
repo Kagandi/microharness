@@ -144,6 +144,7 @@ class Harness:
         docker_network: str | None = None,
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
+        subagent_max_steps: int | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
@@ -172,6 +173,7 @@ class Harness:
             max_step_retries=max_step_retries,
             step_retry_delay=step_retry_delay,
             bash_timeout=bash_timeout,
+            subagent_max_steps=subagent_max_steps,
         ).resolve(self.layers)
 
         self.sandbox = cfg.sandbox
@@ -192,6 +194,7 @@ class Harness:
         self.max_step_retries = cfg.max_step_retries
         self.step_retry_delay = cfg.step_retry_delay
         self.bash_timeout = cfg.bash_timeout
+        self.subagent_max_steps = cfg.subagent_max_steps
 
         self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
             trust_project_tools, self.layers
@@ -577,6 +580,7 @@ class Harness:
                     sandboxed=self.sandbox or (self.explicit_workspace_dir is None),
                     agents_instructions=load_agents_instructions(ws_dir, self.global_dir),
                     skills_index=render_skills_index(discover_skills(ws_dir, self.global_dir)),
+                    default_max_steps=self.subagent_max_steps,
                 )
             )
         elif self.custom_tools:
