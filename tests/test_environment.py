@@ -654,6 +654,21 @@ class TestEnvironment(unittest.TestCase):
                     d_env.read_file("/logs_evil/secret.txt")
                 with self.assertRaises(PermissionError):
                     d_env.write_file("/logs/evil.log", "nope")
+
+                # ReadOnlyEnvironment wrapping DockerEnvironment delegates /logs access & grep
+                from core.environment import ReadOnlyEnvironment
+
+                ro_env = ReadOnlyEnvironment(d_env)
+                self.assertEqual(ro_env.agent_logs_dir, "/logs")
+                self.assertEqual(
+                    ro_env.read_file("/logs/step_01_bash_abc123.log"),
+                    "   1 | line1\n   2 | MATCH_TOKEN\n   3 | line3\n",
+                )
+                with self.assertRaises(PermissionError):
+                    ro_env.write_file("/logs/evil.log", "nope")
+                code_rm, out_rm = ro_env.execute_bash("rm /logs/step_01_bash_abc123.log")
+                self.assertEqual(code_rm, 1)
+                self.assertIn("blocked bash command", out_rm)
             finally:
                 d_env.teardown()
 
