@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from core.loop import AgentLoop
+from core.loop import (
+    DEFAULT_DOOM_LOOP_MAX_NUDGES,
+    DEFAULT_DOOM_LOOP_THRESHOLD,
+    DOOM_LOOP,
+    AgentLoop,
+    DoomLoopCheck,
+    DoomLoopDetector,
+)
 from core.model import RateLimitError
 from core.protocols import DeadlineAwareModel, Model, ModelCancelledError, RateLimitAwareModel
 from core.types import ASSISTANT_EXTRA_KEYS, Message
@@ -52,6 +59,7 @@ class StepOutcome:
     finished: bool
     reason: str
     next_step: int
+    detail: str | None = None
 
 
 def rate_limit_wait(model: Model) -> float:
@@ -110,6 +118,8 @@ def run_steps(
     max_empty_nudges: int = DEFAULT_MAX_EMPTY_NUDGES,
     finish_nudge: str = DEFAULT_FINISH_NUDGE,
     propagate_interrupts: bool = False,
+    doom_loop_threshold: int | None = None,
+    doom_loop_max_nudges: int | None = None,
 ) -> StepOutcome:
     """Drives the agent loop for up to ``max_steps`` steps, retrying transient errors.
 
@@ -117,11 +127,34 @@ def run_steps(
     a throttled run is not charged for the provider's own backoff. When
     ``require_finish_tool`` is enabled, a plain-text turn with no tool calls is
     treated as a pause rather than completion and nudged to continue or call
-    ``finish`` (up to ``max_empty_nudges`` consecutive times).
+    ``finish`` (up to ``max_empty_nudges`` consecutive times). Repeated identical
+    failing tool calls or edit oscillations trigger a step-back nudge and halt
+    with ``doom_loop`` if they persist.
     """
     step_idx = start_step
     step_attempts = 0
     consecutive_empty_nudges = 0
+    is_real_agent_loop = isinstance(loop, AgentLoop)
+
+    if is_real_agent_loop:
+        if doom_loop_threshold is not None:
+            loop.doom_loop_detector.threshold = int(doom_loop_threshold)
+        if doom_loop_max_nudges is not None:
+            loop.doom_loop_detector.max_nudges = max(0, int(doom_loop_max_nudges))
+        fallback_detector: DoomLoopDetector | None = None
+    else:
+        fallback_detector = DoomLoopDetector(
+            threshold=(
+                DEFAULT_DOOM_LOOP_THRESHOLD
+                if doom_loop_threshold is None
+                else int(doom_loop_threshold)
+            ),
+            max_nudges=(
+                DEFAULT_DOOM_LOOP_MAX_NUDGES
+                if doom_loop_max_nudges is None
+                else int(doom_loop_max_nudges)
+            ),
+        )
 
     while max_steps is None or (step_idx - start_step) < max_steps:
         effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
@@ -164,9 +197,40 @@ def run_steps(
         completed_step = step_idx
         step_idx += 1
 
+        stop_reason = getattr(step_trace, "stop_reason", None)
+        if stop_reason == DOOM_LOOP:
+            raw_detail = getattr(step_trace, "stop_detail", None)
+            detail = (
+                raw_detail if isinstance(raw_detail, str) and raw_detail else "Doom loop detected."
+            )
+            tracer.log(f"\n🛑 Stopping loop ({DOOM_LOOP}): {detail}")
+            return StepOutcome(False, DOOM_LOOP, step_idx, detail=detail)
+
         tool_calls = step_trace.model_response.get("tool_calls") or []
         if tool_calls:
             consecutive_empty_nudges = 0
+
+        if is_real_agent_loop:
+            check = getattr(loop, "last_doom_loop_check", None)
+            if isinstance(check, DoomLoopCheck) and check.action == "nudge":
+                tracer.log(
+                    f"\n↪️ Doom-loop warning at step {completed_step}: {check.reason} "
+                    "Nudging model to change approach..."
+                )
+        elif fallback_detector is not None and not is_finished and tool_calls:
+            check = fallback_detector.observe_step(
+                tool_calls,
+                getattr(step_trace, "tool_results", None) or [],
+            )
+            if check.action == "nudge":
+                tracer.log(
+                    f"\n↪️ Doom-loop warning at step {completed_step}: {check.reason} "
+                    "Nudging model to change approach..."
+                )
+                loop.memory.add_user(check.nudge_message)
+            elif check.action == "stop":
+                tracer.log(f"\n🛑 Stopping loop ({DOOM_LOOP}): {check.reason}")
+                return StepOutcome(False, DOOM_LOOP, step_idx, detail=check.reason)
 
         if is_finished:
             if not require_finish_tool or tool_calls:

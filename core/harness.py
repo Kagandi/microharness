@@ -79,6 +79,7 @@ from core.tools import (
     BashTool,
     EditFileTool,
     FinishTool,
+    PostEditHook,
     ReadFileTool,
     Tool,
     ToolRegistry,
@@ -145,6 +146,11 @@ class Harness:
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
         subagent_max_steps: int | None = None,
+        post_edit_diagnostics: bool | None = None,
+        post_edit_command: str | None = None,
+        post_edit_hook: PostEditHook | None = None,
+        doom_loop_threshold: int | None = None,
+        doom_loop_max_nudges: int | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
@@ -174,6 +180,10 @@ class Harness:
             step_retry_delay=step_retry_delay,
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
+            post_edit_diagnostics=post_edit_diagnostics,
+            post_edit_command=post_edit_command,
+            doom_loop_threshold=doom_loop_threshold,
+            doom_loop_max_nudges=doom_loop_max_nudges,
         ).resolve(self.layers)
 
         self.sandbox = cfg.sandbox
@@ -195,6 +205,11 @@ class Harness:
         self.step_retry_delay = cfg.step_retry_delay
         self.bash_timeout = cfg.bash_timeout
         self.subagent_max_steps = cfg.subagent_max_steps
+        self.post_edit_diagnostics = cfg.post_edit_diagnostics
+        self.post_edit_command = cfg.post_edit_command
+        self.post_edit_hook = post_edit_hook
+        self.doom_loop_threshold = cfg.doom_loop_threshold
+        self.doom_loop_max_nudges = cfg.doom_loop_max_nudges
 
         self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
             trust_project_tools, self.layers
@@ -560,8 +575,22 @@ class Harness:
         if not self.disable_default_tools and not self.custom_tools:
             registry.register(BashTool(env, timeout=effective_bash_timeout))
             registry.register(ReadFileTool(env))
-            registry.register(WriteFileTool(env))
-            registry.register(EditFileTool(env))
+            registry.register(
+                WriteFileTool(
+                    env,
+                    enable_diagnostics=self.post_edit_diagnostics,
+                    diagnostic_hook=self.post_edit_hook,
+                    diagnostic_command=self.post_edit_command,
+                )
+            )
+            registry.register(
+                EditFileTool(
+                    env,
+                    enable_diagnostics=self.post_edit_diagnostics,
+                    diagnostic_hook=self.post_edit_hook,
+                    diagnostic_command=self.post_edit_command,
+                )
+            )
             ws_dir = self.explicit_workspace_dir or env.workspace_dir
             subagents = discover_subagents(ws_dir, self.global_dir)
             registry.register(
@@ -581,6 +610,8 @@ class Harness:
                     agents_instructions=load_agents_instructions(ws_dir, self.global_dir),
                     skills_index=render_skills_index(discover_skills(ws_dir, self.global_dir)),
                     default_max_steps=self.subagent_max_steps,
+                    doom_loop_threshold=self.doom_loop_threshold,
+                    doom_loop_max_nudges=self.doom_loop_max_nudges,
                 )
             )
         elif self.custom_tools:
@@ -737,7 +768,13 @@ class Harness:
             verbose=self.verbose,
             formatters=self.action_formatters,
         )
-        loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
+        loop = AgentLoop(
+            model=self.model,
+            memory=memory,
+            tools=tool_registry,
+            doom_loop_threshold=self.doom_loop_threshold,
+            doom_loop_max_nudges=self.doom_loop_max_nudges,
+        )
         self.active_loop = loop
 
         subagent_tool = tool_registry.get("subagent")

@@ -29,7 +29,7 @@ from core.config import (
 )
 from core.discovery import discover_resources
 from core.environment import Environment, ReadOnlyEnvironment
-from core.loop import AgentLoop
+from core.loop import DEFAULT_DOOM_LOOP_MAX_NUDGES, DEFAULT_DOOM_LOOP_THRESHOLD, AgentLoop
 from core.memory import Memory
 from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from core.protocols import (
@@ -653,6 +653,8 @@ class SubagentTool:
         agents_instructions: str = "",
         skills_index: str = "",
         default_max_steps: int | None = DEFAULT_SUBAGENT_MAX_STEPS,
+        doom_loop_threshold: int = DEFAULT_DOOM_LOOP_THRESHOLD,
+        doom_loop_max_nudges: int = DEFAULT_DOOM_LOOP_MAX_NUDGES,
         on_file_modified: Callable[[str], None] | None = None,
         on_step: Callable[[str, StepTrace], None] | None = None,
     ):
@@ -677,6 +679,8 @@ class SubagentTool:
         ):
             raise ValueError("default_max_steps must be a positive integer or None.")
         self.default_max_steps = default_max_steps
+        self.doom_loop_threshold = doom_loop_threshold
+        self.doom_loop_max_nudges = doom_loop_max_nudges
         self.on_file_modified = on_file_modified
         self.on_step = on_step
         self._write_lock = threading.Lock()
@@ -834,9 +838,19 @@ class SubagentTool:
         if isinstance(tool, ReadFileTool):
             return ReadFileTool(child_env)
         if isinstance(tool, WriteFileTool):
-            return WriteFileTool(child_env)
+            return WriteFileTool(
+                child_env,
+                enable_diagnostics=tool.enable_diagnostics,
+                diagnostic_hook=tool.diagnostic_hook,
+                diagnostic_command=tool.diagnostic_command,
+            )
         if isinstance(tool, EditFileTool):
-            return EditFileTool(child_env)
+            return EditFileTool(
+                child_env,
+                enable_diagnostics=tool.enable_diagnostics,
+                diagnostic_hook=tool.diagnostic_hook,
+                diagnostic_command=tool.diagnostic_command,
+            )
         if getattr(tool, "env", None) is self.env:
             cloned = copy.copy(tool)
             setattr(cloned, "env", child_env)
@@ -995,7 +1009,13 @@ class SubagentTool:
             if isinstance(child_model, CancellableModel) and callable(parent_probe):
                 child_model.set_cancel_probe(parent_probe)
 
-        child_loop = AgentLoop(model=child_model, memory=child_memory, tools=child_registry)
+        child_loop = AgentLoop(
+            model=child_model,
+            memory=child_memory,
+            tools=child_registry,
+            doom_loop_threshold=self.doom_loop_threshold,
+            doom_loop_max_nudges=self.doom_loop_max_nudges,
+        )
 
         with contextlib.ExitStack() as stack:
             if is_write_capable:

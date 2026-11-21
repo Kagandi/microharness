@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import textwrap
+import warnings
 from collections.abc import Callable, Sequence
 
 
@@ -209,3 +211,32 @@ def apply_text_edit(
                 )
 
     raise ValueError(_format_closest_match_feedback(content, old_str, path_label))
+
+
+def check_python_syntax(content: str, path_label: str = "file") -> str | None:
+    """Checks Python syntax with ``ast.parse`` and returns a concise line/column diagnostic, or ``None``."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            ast.parse(content, filename=path_label)
+        return None
+    except SyntaxError as exc:
+        msg = exc.msg or "invalid syntax"
+        if exc.lineno is not None and exc.offset is not None:
+            header = (
+                f"Syntax error in '{path_label}' at line {exc.lineno}, column {exc.offset}: {msg}"
+            )
+        elif exc.lineno is not None:
+            header = f"Syntax error in '{path_label}' at line {exc.lineno}: {msg}"
+        else:
+            header = f"Syntax error in '{path_label}': {msg}"
+
+        if exc.text:
+            raw_line = exc.text.rstrip("\r\n")
+            if exc.offset is not None and 1 <= exc.offset <= len(raw_line) + 1:
+                caret = " " * (exc.offset - 1) + "^"
+                return f"{header}\n  {raw_line}\n  {caret}"
+            return f"{header}\n  {raw_line}"
+        return header
+    except ValueError as exc:
+        return f"Syntax error in '{path_label}': {exc}"

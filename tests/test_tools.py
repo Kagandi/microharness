@@ -928,6 +928,170 @@ class ValidTool:
         self.assertIn("Invalid JSON arguments for tool 'bash'", res2.output)
         self.assertIn("Expecting value", res2.output)
 
+    def test_write_and_edit_python_syntax_diagnostics(self):
+        """Invariant: invalid .py writes/edits succeed on disk and append exact line/col diagnostics."""
+        from core.editing import check_python_syntax
+
+        reg = ToolRegistry(env=self.env, max_tool_tokens=2000)
+        reg.register(WriteFileTool(self.env))
+        reg.register(EditFileTool(self.env))
+
+        self.assertIsNone(
+            check_python_syntax("def ok(x: int) -> int:\n    return x + 1\n", "ok.py")
+        )
+        bad_diag = check_python_syntax("def broken()\n    return 1\n", "broken.py")
+        self.assertIsNotNone(bad_diag)
+        assert bad_diag is not None
+        self.assertIn("Syntax error in 'broken.py' at line 1, column", bad_diag)
+        self.assertIn("expected ':'", bad_diag)
+
+        # WriteFileTool with invalid Python
+        write_res = reg.dispatch(
+            ToolCall(
+                id="w_bad",
+                name="write_file",
+                arguments={"path": "broken.py", "content": "def broken()\n    return 1\n"},
+            ),
+            step_index=1,
+        )
+        self.assertEqual(write_res.exit_code, 0)
+        self.assertIn("Successfully wrote", write_res.output)
+        self.assertIn("[Post-edit diagnostics]", write_res.output)
+        self.assertIn("Syntax error in 'broken.py' at line 1, column", write_res.output)
+        self.assertEqual(
+            (Path(self.temp_dir) / "broken.py").read_text(encoding="utf-8"),
+            "def broken()\n    return 1\n",
+        )
+
+        # EditFileTool fixing the syntax error clears diagnostics
+        fix_res = reg.dispatch(
+            ToolCall(
+                id="e_fix",
+                name="edit_file",
+                arguments={
+                    "path": "broken.py",
+                    "old_str": "def broken()",
+                    "new_str": "def broken():",
+                },
+            ),
+            step_index=2,
+        )
+        self.assertEqual(fix_res.exit_code, 0)
+        self.assertEqual(fix_res.output, "Successfully replaced 1 occurrence in 'broken.py'.")
+
+        # EditFileTool introducing an IndentationError reports it
+        indent_res = reg.dispatch(
+            ToolCall(
+                id="e_bad",
+                name="edit_file",
+                arguments={
+                    "path": "broken.py",
+                    "old_str": "    return 1",
+                    "new_str": "return 1",
+                },
+            ),
+            step_index=3,
+        )
+        self.assertEqual(indent_res.exit_code, 0)
+        self.assertIn("Successfully replaced 1 occurrence in 'broken.py'.", indent_res.output)
+        self.assertIn("[Post-edit diagnostics]", indent_res.output)
+        self.assertIn("line 2", indent_res.output)
+
+        # Non-.py files do not run Python syntax checks
+        txt_res = reg.dispatch(
+            ToolCall(
+                id="w_txt",
+                name="write_file",
+                arguments={"path": "notes.txt", "content": "def not python {{{\n"},
+            ),
+            step_index=4,
+        )
+        self.assertEqual(txt_res.exit_code, 0)
+        self.assertNotIn("[Post-edit diagnostics]", txt_res.output)
+
+    def test_failed_edit_does_not_emit_post_edit_diagnostics(self):
+        """Invariant: failed edits return exit_code=1 without running post-edit diagnostics."""
+        self.env.write_file("broken.py", "def broken()\n    return 1\n")
+        res = self.registry.dispatch(
+            ToolCall(
+                id="e_miss",
+                name="edit_file",
+                arguments={"path": "broken.py", "old_str": "missing", "new_str": "other"},
+            ),
+            step_index=1,
+        )
+        self.assertEqual(res.exit_code, 1)
+        self.assertNotIn("[Post-edit diagnostics]", res.output)
+
+    def test_post_edit_diagnostics_can_be_disabled_and_supports_hooks_and_commands(self):
+        """Invariant: pluggable hook (1-arg or 2-arg) and command diagnostics append concisely and handle errors."""
+        reg = ToolRegistry(env=self.env, max_tool_tokens=2000)
+
+        # 1. Disabled diagnostics suppress syntax warnings
+        disabled_write = WriteFileTool(self.env, enable_diagnostics=False)
+        code, out = disabled_write.execute("still_bad.py", "def bad(\n")
+        self.assertEqual(code, 0)
+        self.assertNotIn("[Post-edit diagnostics]", out)
+
+        # 2. 1-arg callback hook and 2-arg (path, env) callback hook
+        seen_calls: list[tuple[str, object]] = []
+
+        def hook_two_args(path: str, env: Environment) -> str | None:
+            seen_calls.append((path, env))
+            if path.endswith(".txt"):
+                return "Custom lint: trailing note"
+            return None
+
+        reg.register(WriteFileTool(self.env, diagnostic_hook=hook_two_args))
+        reg.register(
+            EditFileTool(
+                self.env,
+                diagnostic_hook=lambda p: f"Single-arg check on {p}",
+            )
+        )
+        res_w = reg.dispatch(
+            ToolCall(id="hw", name="write_file", arguments={"path": "a.txt", "content": "hi\n"}),
+            step_index=1,
+        )
+        self.assertEqual(res_w.exit_code, 0)
+        self.assertEqual(seen_calls, [("a.txt", self.env)])
+        self.assertIn("[Post-edit diagnostics]\nCustom lint: trailing note", res_w.output)
+
+        res_e = reg.dispatch(
+            ToolCall(
+                id="he",
+                name="edit_file",
+                arguments={"path": "a.txt", "old_str": "hi", "new_str": "hello"},
+            ),
+            step_index=2,
+        )
+        self.assertEqual(res_e.exit_code, 0)
+        self.assertIn("Single-arg check on a.txt", res_e.output)
+
+        # 3. Crashing hook does not fail the write
+        crashing_write = WriteFileTool(
+            self.env, diagnostic_hook=lambda _p: (_ for _ in ()).throw(RuntimeError("hook boom"))
+        )
+        c_code, c_out = crashing_write.execute("ok.py", "x = 1\n")
+        self.assertEqual(c_code, 0)
+        self.assertIn("Successfully wrote", c_out)
+        self.assertIn("Diagnostic hook error: hook boom", c_out)
+
+        # 4. Command hook with {path} quoting for filenames with spaces
+        cmd = "python -c \"import sys; print('checked:' + sys.argv[1]); sys.exit(1)\" {path}"
+        cmd_write = WriteFileTool(self.env, diagnostic_command=cmd)
+        cmd_code, cmd_out = cmd_write.execute("dir with space/mod.py", "x = 1\n")
+        self.assertEqual(cmd_code, 0)
+        self.assertIn("checked:dir with space/mod.py", cmd_out)
+
+        # 5. Clean command (exit 0) appends nothing
+        ok_cmd_write = WriteFileTool(
+            self.env, diagnostic_command='python -c "import sys; sys.exit(0)"'
+        )
+        ok_code, ok_out = ok_cmd_write.execute("clean.py", "x = 1\n")
+        self.assertEqual(ok_code, 0)
+        self.assertNotIn("[Post-edit diagnostics]", ok_out)
+
 
 if __name__ == "__main__":
     unittest.main()

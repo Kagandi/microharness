@@ -6,6 +6,10 @@ from typing import Any
 
 ASSISTANT_EXTRA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning", "reasoning_details")
 
+DOOM_LOOP = "doom_loop"
+DEFAULT_DOOM_LOOP_THRESHOLD = 3
+DEFAULT_DOOM_LOOP_MAX_NUDGES = 1
+
 
 @dataclass
 class ToolCall:
@@ -144,6 +148,8 @@ class StepTrace:
     compaction_applied: bool = False
     duration_s: float = 0.0
     usage: dict[str, Any] = field(default_factory=dict)
+    stop_reason: str | None = None
+    stop_detail: str | None = None
 
 
 @dataclass
@@ -160,7 +166,7 @@ class RunResult:
     score: float
     total_steps: int
     duration_s: float
-    finish_reason: str  # "completed" | "max_steps_exceeded" | "timeout" | "error" | "interrupted"
+    finish_reason: str  # "completed" | "max_steps_exceeded" | "timeout" | "error" | "interrupted" | "rate_limited" | "doom_loop"
     trace_path: str
     workspace_path: str
     eval_result: EvalResult | None = None

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
+from core.types import DEFAULT_DOOM_LOOP_MAX_NUDGES, DEFAULT_DOOM_LOOP_THRESHOLD
 
 DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
 
@@ -228,6 +229,19 @@ def _coerce_bool(val: Any) -> bool:
     return bool(val)
 
 
+def _coerce_non_negative_int(raw: Any, name: str) -> int:
+    """Validates and converts a non-negative integer setting, rejecting booleans and floats."""
+    if isinstance(raw, (bool, float)):
+        raise ValueError(f"Unsupported {name}: {raw!r}. Must be a non-negative integer.")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported {name}: {raw!r}. Must be a non-negative integer.") from exc
+    if value < 0:
+        raise ValueError(f"Unsupported {name}: {value}. Must be a non-negative integer.")
+    return value
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Settings a caller may supply explicitly. ``None`` means "not specified"."""
@@ -249,6 +263,10 @@ class HarnessConfig:
     step_retry_delay: float | None = None
     bash_timeout: float | None = None
     subagent_max_steps: int | None = None
+    post_edit_diagnostics: bool | None = None
+    post_edit_command: str | None = None
+    doom_loop_threshold: int | None = None
+    doom_loop_max_nudges: int | None = None
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
@@ -273,6 +291,15 @@ class HarnessConfig:
         docker_network = raw_network.strip() if isinstance(raw_network, str) else None
         if docker_network == "":
             docker_network = None
+
+        raw_post_edit_cmd = c.pick(
+            "post_edit_command", self.post_edit_command, str, None, require_truthy=True
+        )
+        post_edit_command = (
+            raw_post_edit_cmd.strip() if isinstance(raw_post_edit_cmd, str) else None
+        )
+        if post_edit_command == "":
+            post_edit_command = None
 
         bash_timeout = c.pick("bash_timeout", self.bash_timeout, float, 120.0)
         if bash_timeout <= 0:
@@ -301,6 +328,28 @@ class HarnessConfig:
                     f"Unsupported subagent_max_steps: {subagent_max_steps}. Must be a positive integer."
                 )
 
+        raw_doom_threshold = (
+            self.doom_loop_threshold
+            if self.doom_loop_threshold is not None
+            else layers.merged.get("doom_loop_threshold")
+        )
+        doom_loop_threshold = (
+            DEFAULT_DOOM_LOOP_THRESHOLD
+            if raw_doom_threshold is None
+            else _coerce_non_negative_int(raw_doom_threshold, "doom_loop_threshold")
+        )
+
+        raw_doom_nudges = (
+            self.doom_loop_max_nudges
+            if self.doom_loop_max_nudges is not None
+            else layers.merged.get("doom_loop_max_nudges")
+        )
+        doom_loop_max_nudges = (
+            DEFAULT_DOOM_LOOP_MAX_NUDGES
+            if raw_doom_nudges is None
+            else _coerce_non_negative_int(raw_doom_nudges, "doom_loop_max_nudges")
+        )
+
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
             docker=c.pick("docker", self.docker, _coerce_bool, False),
@@ -327,6 +376,12 @@ class HarnessConfig:
             step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
+            post_edit_diagnostics=c.pick(
+                "post_edit_diagnostics", self.post_edit_diagnostics, _coerce_bool, True
+            ),
+            post_edit_command=post_edit_command,
+            doom_loop_threshold=doom_loop_threshold,
+            doom_loop_max_nudges=doom_loop_max_nudges,
         )
 
 
@@ -351,6 +406,10 @@ class ResolvedConfig:
     step_retry_delay: float
     bash_timeout: float
     subagent_max_steps: int | None
+    post_edit_diagnostics: bool
+    post_edit_command: str | None
+    doom_loop_threshold: int
+    doom_loop_max_nudges: int
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:

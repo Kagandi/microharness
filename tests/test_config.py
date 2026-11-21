@@ -130,6 +130,10 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.step_retry_delay, 5.0)
         self.assertEqual(cfg.bash_timeout, 120.0)
         self.assertIsNone(cfg.subagent_max_steps)
+        self.assertEqual(cfg.post_edit_diagnostics, True)
+        self.assertIsNone(cfg.post_edit_command)
+        self.assertEqual(cfg.doom_loop_threshold, 3)
+        self.assertEqual(cfg.doom_loop_max_nudges, 1)
 
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
@@ -340,6 +344,54 @@ class TestHarnessConfigCascade(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     self._resolve(HarnessConfig(subagent_max_steps=bad_steps))  # type: ignore[arg-type]
                 self.assertIn("subagent_max_steps", str(ctx.exception))
+
+    def test_post_edit_diagnostics_and_doom_loop_cascade_and_validation(self):
+        """Invariant: post-edit diagnostic and doom-loop settings follow cascade precedence and validate bounds."""
+        cfg_project = self._resolve(
+            HarnessConfig(),
+            global_cfg={
+                "post_edit_diagnostics": True,
+                "post_edit_command": "ruff check {path}",
+                "doom_loop_threshold": 5,
+                "doom_loop_max_nudges": 2,
+            },
+            project_cfg={
+                "post_edit_diagnostics": "false",
+                "post_edit_command": "  ty check  ",
+                "doom_loop_threshold": 0,
+                "doom_loop_max_nudges": 0,
+            },
+        )
+        self.assertEqual(cfg_project.post_edit_diagnostics, False)
+        self.assertEqual(cfg_project.post_edit_command, "ty check")
+        self.assertEqual(cfg_project.doom_loop_threshold, 0)
+        self.assertEqual(cfg_project.doom_loop_max_nudges, 0)
+
+        cfg_explicit = self._resolve(
+            HarnessConfig(
+                post_edit_diagnostics=True,
+                post_edit_command="",
+                doom_loop_threshold=4,
+                doom_loop_max_nudges=2,
+            ),
+            project_cfg={
+                "post_edit_diagnostics": False,
+                "post_edit_command": "ruff check {path}",
+                "doom_loop_threshold": 0,
+                "doom_loop_max_nudges": 0,
+            },
+        )
+        self.assertEqual(cfg_explicit.post_edit_diagnostics, True)
+        self.assertIsNone(cfg_explicit.post_edit_command)
+        self.assertEqual(cfg_explicit.doom_loop_threshold, 4)
+        self.assertEqual(cfg_explicit.doom_loop_max_nudges, 2)
+
+        for key in ("doom_loop_threshold", "doom_loop_max_nudges"):
+            for bad_val in (-1, True, False, 1.5, "abc"):
+                with self.subTest(key=key, bad_val=bad_val):
+                    with self.assertRaises(ValueError) as ctx:
+                        self._resolve(HarnessConfig(**{key: bad_val}))  # type: ignore[arg-type]
+                    self.assertIn(key, str(ctx.exception))
 
 
 class TestProjectToolTrust(unittest.TestCase):

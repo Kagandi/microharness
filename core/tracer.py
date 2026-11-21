@@ -281,7 +281,7 @@ class Tracer:
 
     def _append_jsonl(self, step: StepTrace) -> None:
         try:
-            record = {
+            record: dict[str, Any] = {
                 "step_index": step.step_index,
                 "duration_s": step.duration_s,
                 "compaction_applied": step.compaction_applied,
@@ -290,6 +290,10 @@ class Tracer:
                 "model_response": step.model_response,
                 "tool_results": step.tool_results,
             }
+            if step.stop_reason:
+                record["stop_reason"] = step.stop_reason
+            if step.stop_detail:
+                record["stop_detail"] = step.stop_detail
             with self.jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
                 f.flush()
@@ -460,6 +464,8 @@ class Tracer:
                     "prompt_messages": s.prompt_messages,
                     "model_response": s.model_response,
                     "tool_results": s.tool_results,
+                    **({"stop_reason": s.stop_reason} if s.stop_reason else {}),
+                    **({"stop_detail": s.stop_detail} if s.stop_detail else {}),
                 }
                 for s in self.steps
             ],
