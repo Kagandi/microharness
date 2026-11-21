@@ -2,12 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from core.harness import Harness
 from core.interactive import CommandContext, CommandRouter, TurnState
 from core.memory import Memory
-from core.model import MockModel
+from core.model import HttpChatModel, MockModel
 from core.providers import resolve_model_context_tokens
 
 
@@ -390,6 +390,97 @@ class TestModelSwitchFooterRefresh(unittest.TestCase):
         router.dispatch("/model big")
         self.assertEqual(harness.max_context_tokens, 200000)
         self.assertEqual(memory.max_context_tokens, 200000)
+
+
+class TestContextWindowAutoDetection(unittest.TestCase):
+    def test_harness_init_autodetects_context_window_when_unset(self):
+        """Invariant: HttpChatModel probes /models at Harness init when no cap is configured."""
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(
+            {"data": [{"id": "LFM3-1.7B-MLX-8bit", "max_model_len": 262144}]}
+        ).encode("utf-8")
+        resp.__enter__.return_value = resp
+
+        with patch("urllib.request.urlopen", return_value=resp) as mock_urlopen:
+            http_model = HttpChatModel(
+                base_url="http://localhost:8000/v1", model="LFM3-1.7B-MLX-8bit"
+            )
+            harness = Harness(
+                model=http_model,
+                workspace_dir=Path(tempfile.mkdtemp()),
+                global_dir=Path(tempfile.mkdtemp()),
+                runs_dir=Path(tempfile.mkdtemp()),
+                verbose=False,
+            )
+
+        self.assertEqual(harness.max_context_tokens, 262144)
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_explicit_cap_beats_models_endpoint_probe(self):
+        """Invariant: explicit Harness kwarg or alias cap skips /models auto-detection."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            http_model = HttpChatModel(
+                base_url="http://localhost:8000/v1", model="LFM3-1.7B-MLX-8bit"
+            )
+            harness = Harness(
+                model=http_model,
+                workspace_dir=Path(tempfile.mkdtemp()),
+                global_dir=Path(tempfile.mkdtemp()),
+                runs_dir=Path(tempfile.mkdtemp()),
+                max_context_tokens=32000,
+                verbose=False,
+            )
+
+        self.assertEqual(harness.max_context_tokens, 32000)
+        mock_urlopen.assert_not_called()
+
+    def test_apply_model_context_tokens_uses_live_probe_and_falls_back_cleanly(self):
+        """Invariant: switch_model applies /models cap when static config has none, else 64000."""
+        tmp = tempfile.mkdtemp()
+        ws = Path(tmp)
+        cfg_dir = ws / ".microharness"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "models": {
+                        "local-lfm": {"model": "LFM3-1.7B-MLX-8bit", "provider": "vllm"},
+                        "local-gemma": {"model": "gemma-4-E4B", "provider": "vllm"},
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        harness = Harness(
+            model=MockModel([("hi", [])]),
+            workspace_dir=ws,
+            global_dir=Path(tempfile.mkdtemp()),
+            runs_dir=Path(tempfile.mkdtemp()),
+            verbose=False,
+        )
+        memory = Memory(system_prompt="s", user_prompt="")
+        loop = MagicMock()
+        loop.memory = memory
+        harness.active_loop = loop
+
+        resp_lfm = MagicMock()
+        resp_lfm.read.return_value = json.dumps(
+            {"data": [{"id": "LFM3-1.7B-MLX-8bit", "max_model_len": 262144}]}
+        ).encode("utf-8")
+        resp_lfm.__enter__.return_value = resp_lfm
+
+        with patch("urllib.request.urlopen", return_value=resp_lfm):
+            ok, _, _ = harness.switch_model("local-lfm")
+        self.assertEqual(ok, True)
+        self.assertEqual(harness.max_context_tokens, 262144)
+        self.assertEqual(memory.max_context_tokens, 262144)
+
+        # Negative case: probe failure reverts to 64000 instead of keeping previous 262144
+        with patch("urllib.request.urlopen", side_effect=OSError("down")):
+            ok2, _, _ = harness.switch_model("local-gemma")
+        self.assertEqual(ok2, True)
+        self.assertEqual(harness.max_context_tokens, 64000)
+        self.assertEqual(memory.max_context_tokens, 64000)
 
 
 if __name__ == "__main__":

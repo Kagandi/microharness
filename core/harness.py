@@ -43,6 +43,7 @@ from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import (
     CacheAwareModel,
+    ContextWindowAwareModel,
     DeadlineAwareModel,
     Model,
     ProviderAwareModel,
@@ -223,6 +224,14 @@ class Harness:
         )
         self.max_tool_tokens = cfg.max_tool_tokens
         self.max_context_tokens = cfg.max_context_tokens
+        if (
+            max_context_tokens is None
+            and resolve_model_context_tokens(None, self.layers.merged, {}) is None
+            and isinstance(self.model, ContextWindowAwareModel)
+        ):
+            detected = self.model.get_context_window()
+            if type(detected) is int and detected > 0:
+                self.max_context_tokens = detected
         self.trigger_ratio = cfg.trigger_ratio
         self.cache_ttl = cfg.cache_ttl
         self.reasoning_effort = cfg.reasoning_effort
@@ -424,6 +433,8 @@ class Harness:
             self.merged_config if cfg is None else cfg,
             self.provider_registry if registry is None else registry,
         )
+        if value is None and isinstance(self.model, ContextWindowAwareModel):
+            value = self.model.get_context_window()
         if type(value) is not int or value <= 0:
             return None
         self.max_context_tokens = value

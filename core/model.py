@@ -14,6 +14,7 @@ from core.protocols import (
     AssistantMetadataModel,
     CacheAwareModel,
     CancellableModel,
+    ContextWindowAwareModel,
     DeadlineAwareModel,
     EndpointAwareModel,
     Model,
@@ -109,6 +110,7 @@ __all__ = [
     "AssistantMetadataModel",
     "CacheAwareModel",
     "CancellableModel",
+    "ContextWindowAwareModel",
     "DeadlineAwareModel",
     "EndpointAwareModel",
     "HttpChatModel",
@@ -144,6 +146,39 @@ __all__ = [
 normalize_cache_ttl = config.normalize_cache_ttl
 normalize_reasoning_effort = config.normalize_reasoning_effort
 strip_json_comments = config.strip_json_comments
+
+
+_MODEL_METADATA_TIMEOUT_S = 1.5
+_CONTEXT_WINDOW_KEYS: tuple[str, ...] = (
+    "max_model_len",
+    "context_length",
+    "context_window",
+    "max_context_length",
+    "max_context_tokens",
+    "input_token_limit",
+)
+
+
+def _strict_positive_int(value: Any) -> int | None:
+    """Returns ``value`` only when it is a genuine positive int (never bool/float/str)."""
+    return value if type(value) is int and value > 0 else None
+
+
+def _extract_context_window(entry: Any) -> int | None:
+    """Extracts a context window size from an OpenAI/OpenRouter/oMLX model metadata item."""
+    if not isinstance(entry, dict):
+        return None
+    for key in _CONTEXT_WINDOW_KEYS:
+        hit = _strict_positive_int(entry.get(key))
+        if hit is not None:
+            return hit
+    top_provider = entry.get("top_provider")
+    if isinstance(top_provider, dict):
+        for key in ("context_length", "max_model_len", "context_window"):
+            hit = _strict_positive_int(top_provider.get(key))
+            if hit is not None:
+                return hit
+    return None
 
 
 class HttpChatModel(UsageTelemetry):
@@ -206,6 +241,58 @@ class HttpChatModel(UsageTelemetry):
         self._init_cache_telemetry(cache_ttl)
         self._cancel_probe: Callable[[], bool] | None = None
         self._last_assistant_fields: dict[str, Any] = {}
+        self._context_window_probed: bool = False
+        self._cached_context_window: int | None = None
+
+    def _models_endpoint(self) -> str | None:
+        """Returns the sibling `/models` URL when `endpoint` ends with `/chat/completions`."""
+        suffix = "/chat/completions"
+        if not self.endpoint.endswith(suffix):
+            return None
+        return f"{self.endpoint[: -len(suffix)]}/models"
+
+    def get_context_window(self, timeout: float = _MODEL_METADATA_TIMEOUT_S) -> int | None:
+        """Queries `GET /models` once to auto-detect the model's context length.
+
+        Returns ``None`` silently if the endpoint is non-bearer, unreachable,
+        does not advertise the active model, or omits context-length fields.
+        """
+        if self._context_window_probed:
+            return self._cached_context_window
+        self._context_window_probed = True
+
+        if self.auth_scheme != "bearer":
+            return None
+        models_url = self._models_endpoint()
+        if not models_url:
+            return None
+
+        headers = {**self.extra_headers, "Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(models_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        items = payload.get("data")
+        if not isinstance(items, list):
+            items = payload.get("models")
+        if not isinstance(items, list):
+            return None
+
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") == self.model or entry.get("name") == self.model:
+                detected = _extract_context_window(entry)
+                self._cached_context_window = detected
+                return detected
+        return None
 
     def set_deadline(self, deadline: float | None) -> None:
         """Sets the task deadline timestamp to strictly bound in-flight HTTP requests."""
