@@ -128,6 +128,10 @@ class Environment:
         if target.is_relative_to(self.workspace_dir):
             return target
 
+        # Check logs directory (spilled tool outputs)
+        if target.is_relative_to(self.logs_dir):
+            return target
+
         # Check allowed external read directories (e.g. ~/.microharness/)
         for allowed in self.allowed_read_dirs:
             if target.is_relative_to(allowed):
@@ -136,6 +140,11 @@ class Environment:
         raise PermissionError(
             f"Access denied: path '{path_str}' resolves outside workspace and allowed read directories."
         )
+
+    @property
+    def agent_logs_dir(self) -> str:
+        """Directory path where spilled logs are accessible to tools (bash/read_file)."""
+        return str(self.logs_dir)
 
     def read_file(self, path_str: str, start_line: int = 1, end_line: int = -1) -> str:
         """Read file contents with optional line slice (1-indexed, inclusive)."""
@@ -326,6 +335,7 @@ class DockerEnvironment(Environment):
     - Guarantees complete operating system, process, filesystem, and network isolation.
     """
 
+    CONTAINER_LOGS_DIR = "/logs"
     container_name: str = ""
     network: str | None = None
 
@@ -371,7 +381,7 @@ class DockerEnvironment(Environment):
         return args
 
     def _start_container(self) -> None:
-        """Starts a persistent background container mounting workspace at /workspace."""
+        """Starts a persistent background container mounting workspace at /workspace and logs at /logs."""
         cmd = [
             "docker",
             "run",
@@ -380,6 +390,8 @@ class DockerEnvironment(Environment):
             self.container_name,
             "-v",
             f"{self.workspace_dir}:/workspace",
+            "-v",
+            f"{self.logs_dir}:{self.CONTAINER_LOGS_DIR}:ro",
             "-w",
             "/workspace",
             *self._effective_docker_args(),
@@ -431,6 +443,24 @@ class DockerEnvironment(Environment):
                     stderr=subprocess.DEVNULL,
                     check=False,
                 )
+
+    @property
+    def agent_logs_dir(self) -> str:
+        """Spilled logs are mounted read-only at /logs inside the container."""
+        return self.CONTAINER_LOGS_DIR
+
+    def resolve_read_path(self, path_str: str) -> Path:
+        """Resolves container `/logs/...` paths to host `logs_dir` in addition to normal read paths."""
+        prefix = self.CONTAINER_LOGS_DIR
+        if path_str == prefix or path_str.startswith(f"{prefix}/"):
+            rel = path_str[len(prefix) :].lstrip("/")
+            target = (self.logs_dir / rel).resolve()
+            if not target.is_relative_to(self.logs_dir):
+                raise PermissionError(
+                    f"Access denied: path '{path_str}' resolves outside logs directory."
+                )
+            return target
+        return super().resolve_read_path(path_str)
 
     @property
     def is_running(self) -> bool:

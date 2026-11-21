@@ -752,6 +752,46 @@ class ValidTool:
         finally:
             rec_env.teardown()
 
+    def test_dispatch_aligns_spilled_log_path_for_host_and_container_envs(self):
+        """Invariant: ToolRegistry.dispatch reports env.agent_logs_dir paths in both marker and raw_log_path."""
+
+        class BigOutputTool:
+            name = "big_out"
+            description = "Produces long output"
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self):
+                return 0, "A" * 500
+
+        # 1. Host Environment uses host logs_dir path
+        self.registry.register(BigOutputTool())
+        host_res = self.registry.dispatch(
+            ToolCall(id="host1234", name="big_out", arguments={}),
+            step_index=2,
+        )
+        expected_host_path = str(self.env.logs_dir / "step_02_big_out_host12.log")
+        self.assertTrue(host_res.was_truncated)
+        self.assertEqual(host_res.raw_log_path, expected_host_path)
+        self.assertIn(f"Full raw output saved to {expected_host_path}", host_res.output)
+
+        # 2. Container-like Environment with agent_logs_dir='/logs' uses /logs/... path
+        class ContainerLikeEnv(Environment):
+            @property
+            def agent_logs_dir(self) -> str:
+                return "/logs"
+
+        c_env = ContainerLikeEnv(workspace_dir=self.temp_dir, cleanup_on_teardown=False)
+        c_reg = ToolRegistry(env=c_env, max_tool_tokens=30)
+        c_reg.register(BigOutputTool())
+        c_res = c_reg.dispatch(
+            ToolCall(id="dock1234", name="big_out", arguments={}),
+            step_index=3,
+        )
+        self.assertTrue(c_res.was_truncated)
+        self.assertEqual(c_res.raw_log_path, "/logs/step_03_big_out_dock12.log")
+        self.assertIn("Full raw output saved to /logs/step_03_big_out_dock12.log", c_res.output)
+        self.assertTrue((c_env.logs_dir / "step_03_big_out_dock12.log").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

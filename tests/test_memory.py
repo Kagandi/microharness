@@ -1,6 +1,8 @@
 import unittest
 
-from core.memory import Memory, format_compact_num
+from core.loop import AgentLoop
+from core.memory import COMPACTION_SUMMARY_HEADER, Memory, format_compact_num
+from core.tools import ToolRegistry
 from core.types import Message, ToolCall, ToolResult
 
 
@@ -51,7 +53,7 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(mem.messages[0].content, huge_system)
         self.assertEqual(mem.messages[1].content, huge_task)
 
-    def test_compaction_preserves_recent_turns_and_assistant_thoughts(self):
+    def test_compaction_preserves_recent_turns_and_summarizes_middle(self):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="GOAL",
@@ -70,12 +72,13 @@ class TestMemory(unittest.TestCase):
         compacted = mem.compact_if_needed()
         self.assertTrue(compacted)
 
-        # Invariant: Assistant plan thought in middle is NOT pruned
-        self.assertEqual(mem.messages[2].content, "My crucial plan for step 1")
-
-        # Invariant: Middle tool result IS pruned to tombstone
-        self.assertIn("[Tool output collapsed", mem.messages[3].content)
-        self.assertNotIn("X" * 300, mem.messages[3].content)
+        # Invariant: Prefix stays immutable and middle is collapsed into one structured summary
+        self.assertEqual(mem.messages[0].content, "SYS")
+        self.assertEqual(mem.messages[1].content, "GOAL")
+        self.assertEqual(len(mem.messages), 5)
+        self.assertTrue(mem.messages[2].content.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertIn("My crucial plan for step 1", mem.messages[2].content)
+        self.assertNotIn("X" * 300, mem.messages[2].content)
 
         # Invariant: Recent turns are NOT pruned
         self.assertEqual(mem.messages[-2].content, "Recent turn thought")
@@ -126,8 +129,10 @@ class TestMemory(unittest.TestCase):
 
         # Invariant: Compaction triggers proactively at 80% (200 tokens / 800 chars), well before hitting 100%
         self.assertTrue(mem.compact_if_needed(force=False))
-        # Verify middle output was collapsed
-        self.assertIn("[Tool output collapsed", mem.messages[3].content)
+        # Verify middle turns were replaced by structured summary
+        self.assertTrue(mem.messages[2].content.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertNotIn("X" * 750, mem.messages[2].content)
+        self.assertEqual(mem.messages[-1].content, "Latest")
 
     def test_drop_incomplete_tool_turn_removes_dangling_tool_calls(self):
         """Invariant: an interrupted tool turn is trimmed so the next request stays valid."""
@@ -177,9 +182,10 @@ class TestMemory(unittest.TestCase):
         # Under budget: standard compact does nothing
         self.assertFalse(mem.compact_if_needed(force=False))
 
-        # Force compact: collapses even under budget
+        # Force compact: summarizes middle even under budget
         self.assertTrue(mem.compact_if_needed(force=True))
-        self.assertIn("[Tool output collapsed", mem.messages[3].content)
+        self.assertTrue(mem.messages[2].content.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertNotIn("A" * 200, mem.messages[2].content)
 
         # Reset: preserves system prompt, clears history
         mem.reset(new_instruction="FRESH_START")
@@ -209,76 +215,93 @@ class TestMemory(unittest.TestCase):
         # Initial user task is preserved
         self.assertEqual(mem.messages[0].role, "user")
         self.assertEqual(mem.messages[0].content, "TASK")
-        # Middle tool output is collapsed
-        self.assertIn("[Tool output collapsed", mem.messages[2].content)
+        # Middle turns replaced by structured compaction summary
+        self.assertTrue(mem.messages[1].content.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertNotIn("A" * 300, mem.messages[1].content)
         # Recent turn is preserved
         self.assertEqual(mem.messages[-1].content, "Recent")
 
-    def test_compaction_prunes_thinking_tags(self):
+    def test_compaction_prunes_thinking_tags_and_extra_fields(self):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
             max_context_tokens=25,
-            keep_recent_turns=2,
+            keep_recent_turns=4,
         )
-        # Turn 1: thinking with actual response and tool call
+        # Turn 1 (compacted): thinking with actual response and tool call
         mem.add_assistant(
             "<think>Analyzing dependencies and planning changes...</think>I will now inspect the project.",
             [ToolCall(id="c1", name="bash", arguments={"command": "ls"})],
+            extra_fields={"reasoning_content": "secret chain 1"},
         )
         mem.add_tool_result(ToolResult(call_id="c1", output="output1"))
 
-        # Turn 2: thinking-only response
+        # Turn 2 (retained older assistant turn): thinking + extra_fields reasoning
         mem.add_assistant(
-            "<thinking>\nInternal step-by-step reasoning that should be discarded.\n</thinking>"
+            "<thinking>\nInternal step-by-step reasoning that should be discarded.\n</thinking>Checked status.",
+            [ToolCall(id="c2", name="bash", arguments={"command": "pwd"})],
+            extra_fields={
+                "reasoning_content": "stale reasoning text",
+                "reasoning": "stale summary",
+                "reasoning_details": [{"type": "reasoning.text", "text": "detail"}],
+                "provider_tag": "keep_me",
+            },
         )
         mem.add_tool_result(ToolResult(call_id="c2", output="output2"))
 
-        # Recent turns: should keep thinking intact
-        mem.add_assistant("<think>Recent reasoning stream</think>Recent answer")
+        # Turn 3 (latest active assistant turn): should keep thinking and extra_fields intact
+        mem.add_assistant(
+            "<think>Recent reasoning stream</think>Recent answer",
+            [ToolCall(id="c3", name="bash", arguments={"command": "echo ok"})],
+            extra_fields={"reasoning_content": "active reasoning"},
+        )
         mem.add_tool_result(ToolResult(call_id="c3", output="recent output"))
 
         self.assertTrue(mem.compact_if_needed(force=True))
 
         messages = mem.get_messages()
-        # Middle turn 1: <think> pruned, visible answer preserved, tool call preserved
-        self.assertEqual(messages[2].content, "I will now inspect the project.")
-        self.assertIsNotNone(messages[2].tool_calls)
-        self.assertEqual(len(messages[2].tool_calls), 1)
-        self.assertEqual(messages[2].tool_calls[0].id, "c1")
+        # Compacted summary preserves visible finding and drops <think> content
+        summary = messages[2].content
+        self.assertTrue(summary.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertIn("I will now inspect the project.", summary)
+        self.assertNotIn("Analyzing dependencies", summary)
 
-        # Middle turn 2: pure thinking tag collapsed to fallback tombstone
-        self.assertEqual(
-            messages[4].content,
-            "[Reasoning stream collapsed to conserve context window]",
-        )
+        # Older retained assistant turn: <thinking> and reasoning extra_fields pruned, non-reasoning kept
+        older_asst = messages[3]
+        self.assertEqual(older_asst.content, "Checked status.")
+        self.assertEqual(older_asst.extra_fields, {"provider_tag": "keep_me"})
 
-        # Recent turn: not compacted, <think> is preserved
-        self.assertEqual(
-            messages[-2].content,
-            "<think>Recent reasoning stream</think>Recent answer",
-        )
+        # Latest active assistant turn: reasoning intact
+        latest_asst = messages[5]
+        self.assertEqual(latest_asst.content, "<think>Recent reasoning stream</think>Recent answer")
+        self.assertEqual(latest_asst.extra_fields, {"reasoning_content": "active reasoning"})
 
-    def test_compaction_enriches_tombstone_with_log_path(self):
+    def test_compaction_retains_structured_findings_errors_and_log_paths(self):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_tokens=25,
+            max_context_tokens=2000,
             keep_recent_turns=1,
         )
-        mem.add_assistant("Step 1")
+        mem.add_assistant(
+            "Running tests",
+            [ToolCall(id="c1", name="bash", arguments={"command": "pytest -q"})],
+        )
         mem.add_tool_result(
             ToolResult(
                 call_id="c1",
-                output="Log line\n" * 30,  # > 120 chars
-                raw_log_path="/tmp/workspace/runs/logs/step_01_bash_c1.log",
+                output="Log line\n" * 30,
+                raw_log_path="/logs/step_01_bash_c1.log",
             )
         )
-        mem.add_assistant("Step 2")
+        mem.add_assistant(
+            "Inspecting failure",
+            [ToolCall(id="c2", name="read_file", arguments={"path": "core/app.py"})],
+        )
         mem.add_tool_result(
             ToolResult(
                 call_id="c2",
-                output="Another line\n" * 30,
+                output="def broken():\n    raise ValueError('bad config')\n",
                 raw_log_path=None,
             )
         )
@@ -287,35 +310,41 @@ class TestMemory(unittest.TestCase):
         self.assertTrue(mem.compact_if_needed(force=True))
 
         msgs = mem.get_messages()
-        len1 = len("Log line\n" * 30)
-        len2 = len("Another line\n" * 30)
-        # Message with raw_log_path includes exact log path and tip
-        self.assertEqual(
-            msgs[3].content,
-            f"[Tool output collapsed ({len1} chars). "
-            f"Full log: `/tmp/workspace/runs/logs/step_01_bash_c1.log`. Use `read_file` to inspect if needed.]",
-        )
-        # Message without raw_log_path uses standard collapse message
-        self.assertEqual(
-            msgs[5].content,
-            f"[Tool output collapsed ({len2} chars) to conserve context window]",
-        )
+        self.assertEqual(len(msgs), 4)
+        summary = msgs[2].content
+        self.assertTrue(summary.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertIn("bash(pytest -q)", summary)
+        self.assertIn("/logs/step_01_bash_c1.log", summary)
+        self.assertIn("read_file(core/app.py)", summary)
+        self.assertIn("bad config", summary)
+        self.assertIn("Errors / warnings:", summary)
 
-    def test_compaction_injects_and_updates_modified_files_ledger(self):
+    def test_prefix_immutability_across_normal_turns_and_compaction_boundaries(self):
         mem = Memory(
             system_prompt="SYS",
             user_prompt="TASK",
-            max_context_tokens=25,
+            max_context_tokens=500,
             keep_recent_turns=1,
         )
         mem.record_modified_file("src/main.py")
-        mem.record_modified_file("src/utils.py")
-
         mem.add_assistant("Step 1")
-        mem.add_tool_result(ToolResult(call_id="c1", output="A" * 300))
-        mem.add_assistant("Recent")
+        mem.add_tool_result(ToolResult(call_id="c1", output="ok1"))
 
-        # First compaction: injects ledger at index 2 (after system & user)
+        # Normal turns under budget must NOT insert index-2 ledger or mutate prefix
+        self.assertFalse(mem.compact_if_needed(force=False))
+        self.assertEqual(len(mem.messages), 4)
+        self.assertEqual(mem.messages[0].content, "SYS")
+        self.assertEqual(mem.messages[1].content, "TASK")
+        self.assertEqual(mem.messages[2].content, "Step 1")
+        self.assertEqual(mem.messages[3].content, "ok1")
+
+        # Recording another modified file during normal turns leaves messages untouched
+        mem.record_modified_file("src/utils.py")
+        self.assertFalse(mem.compact_if_needed(force=False))
+        self.assertEqual([m.content for m in mem.messages], ["SYS", "TASK", "Step 1", "ok1"])
+
+        # Add recent turn and force compaction boundary
+        mem.add_assistant("Recent")
         self.assertTrue(mem.compact_if_needed(force=True))
 
         msgs = mem.get_messages()
@@ -323,38 +352,43 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(msgs[0].content, "SYS")
         self.assertEqual(msgs[1].role, "user")
         self.assertEqual(msgs[1].content, "TASK")
-        self.assertEqual(msgs[2].role, "system")
-        self.assertEqual(
-            msgs[2].content,
-            "[Session Files Modified: src/main.py, src/utils.py]",
-        )
+        summary1 = msgs[2].content
+        self.assertTrue(summary1.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertIn("Modified files: src/main.py, src/utils.py", summary1)
 
-        # Record another modified file and run compaction again
+        # Normal turns after compaction must NOT mutate summary1 in-place
         mem.record_modified_file("tests/test_main.py")
-        mem.add_tool_result(ToolResult(call_id="c2", output="B" * 300))
+        mem.add_tool_result(ToolResult(call_id="c2", output="ok2"))
+        self.assertFalse(mem.compact_if_needed(force=False))
+        self.assertEqual(mem.messages[2].content, summary1)
+
+        # Calling compact_if_needed(force=True) with no new middle turns is a no-op (keeps summary1 immutable)
+        mem2_msgs_before = [m.content for m in mem.messages]
+        # Note: here recent is [assistant("Recent"), tool("ok2")] with keep_recent_turns=1;
+        # walking back avoids orphaning tool("ok2") so split_idx lands at summary1 -> no new middle turns.
+        self.assertFalse(mem.compact_if_needed(force=True))
+        self.assertEqual([m.content for m in mem.messages], mem2_msgs_before)
+
+        # Adding another turn moves [Recent, ok2] into middle and updates summary at new boundary
         mem.add_assistant("Latest")
-
         self.assertTrue(mem.compact_if_needed(force=True))
-
-        msgs = mem.get_messages()
-        # Ledger was updated in-place at index 2, not duplicated
-        self.assertEqual(msgs[2].role, "system")
-        self.assertEqual(
-            msgs[2].content,
-            "[Session Files Modified: src/main.py, src/utils.py, tests/test_main.py]",
+        msgs_after = mem.get_messages()
+        self.assertEqual(msgs_after[0].content, "SYS")
+        self.assertEqual(msgs_after[1].content, "TASK")
+        self.assertIn(
+            "Modified files: src/main.py, src/utils.py, tests/test_main.py",
+            msgs_after[2].content,
         )
-        self.assertNotEqual(msgs[3].content, msgs[2].content)
+        self.assertEqual(msgs_after[-1].content, "Latest")
 
-        # Stats reflect modified files
-        stats = mem.stats()
+        # Stats reflect modified files and reset clears them
         self.assertEqual(
-            stats["modified_files"],
+            mem.stats()["modified_files"],
             ["src/main.py", "src/utils.py", "tests/test_main.py"],
         )
-
-        # Reset clears modified files
         mem.reset(new_instruction="NEW_TASK")
         self.assertEqual(mem.stats()["modified_files"], [])
+        self.assertIsNone(mem.stats()["calibrated_prompt_tokens"])
 
     def test_message_from_dict_deserialization(self):
         """Invariant: Message.from_dict deserializes all message shapes, tool calls, and handles malformed args."""
@@ -456,6 +490,148 @@ class TestMemory(unittest.TestCase):
         self.assertEqual(msgs_prepended[0].role, "system")
         self.assertEqual(msgs_prepended[0].content, "PREPENDED_SYSTEM")
         self.assertEqual(msgs_prepended[1].content, "Direct prompt")
+
+    def test_token_estimation_counts_tool_calls_and_extra_fields(self):
+        """Invariant: estimated_tokens accounts for tool_calls arguments and extra_fields."""
+        mem = Memory(system_prompt="", user_prompt="")
+        mem.add_assistant(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="write_file",
+                    arguments={"path": "big.py", "content": "A" * 400},
+                )
+            ],
+            extra_fields={"reasoning_content": "B" * 200},
+        )
+        tokens = mem.estimated_tokens()
+        # content is empty, yet tool_calls + extra_fields contribute > 150 tokens
+        self.assertGreaterEqual(tokens, 150)
+
+    def test_token_calibration_and_agent_loop_telemetry(self):
+        """Invariant: AgentLoop calibrates Memory from actual prompt_tokens and scales across compaction."""
+        from unittest.mock import MagicMock
+
+        class TelemetryModel:
+            def __init__(self):
+                self.last_usage = {}
+                self.step = 0
+
+            def generate(self, messages, tools):
+                self.step += 1
+                if self.step == 1:
+                    self.last_usage = {"prompt_tokens": 1200, "completion_tokens": 50}
+                    return "Step 1", [ToolCall(id="c1", name="echo", arguments={"text": "hi"})]
+                self.last_usage = {"input_tokens": 2400, "output_tokens": 40}
+                return "Done", []
+
+            def get_last_step_usage(self):
+                return dict(self.last_usage)
+
+        class EchoTool:
+            name = "echo"
+            description = "Echo"
+            parameters = {"type": "object", "properties": {"text": {"type": "string"}}}
+
+            def execute(self, text: str = "") -> tuple[int, str]:
+                return 0, "R" * 400  # 100 raw tokens
+
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="TASK",
+            max_context_tokens=5000,
+            keep_recent_turns=1,
+        )
+        registry = ToolRegistry(env=MagicMock())
+        registry.register(EchoTool())
+        loop = AgentLoop(model=TelemetryModel(), memory=mem, tools=registry)
+
+        raw_before_step1 = mem.raw_estimated_tokens()
+        finished1, _ = loop.step(1)
+        self.assertFalse(finished1)
+        self.assertEqual(mem.stats()["calibrated_prompt_tokens"], 1200)
+        # Estimate reflects actual 1200 prompt tokens + delta from step 1 assistant & tool result
+        expected_delta = mem.raw_estimated_tokens() - raw_before_step1
+        self.assertEqual(mem.estimated_tokens(), 1200 + expected_delta)
+
+        # Negative test: invalid / zero calibration does not overwrite valid calibration
+        mem.calibrate_tokens(0)
+        self.assertEqual(mem.stats()["calibrated_prompt_tokens"], 1200)
+
+        # Second step reports Anthropic-style input_tokens=2400
+        finished2, _ = loop.step(2)
+        self.assertTrue(finished2)
+        self.assertEqual(mem.stats()["calibrated_prompt_tokens"], 2400)
+
+        # Compaction shrinks raw tokens and calibrated estimate scales down proportionally
+        before_compact = mem.estimated_tokens()
+        self.assertTrue(mem.compact_if_needed(force=True))
+        after_compact = mem.estimated_tokens()
+        self.assertLess(after_compact, before_compact)
+
+        # restore_messages clears calibration
+        mem.restore_messages([Message(role="user", content="12345678")])
+        self.assertIsNone(mem.stats()["calibrated_prompt_tokens"])
+        self.assertEqual(mem.estimated_tokens(), 2)
+
+    def test_compaction_handles_assistant_tool_call_dominated_sessions(self):
+        """Invariant: compaction shrinks sessions dominated by assistant/tool-call payloads without orphaning tool results."""
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="GOAL",
+            max_context_tokens=150,
+            trigger_ratio=0.80,
+            keep_recent_turns=1,
+        )
+        for idx in range(5):
+            mem.add_assistant(
+                f"Applying edit {idx}",
+                [
+                    ToolCall(
+                        id=f"c{idx}",
+                        name="write_file",
+                        arguments={
+                            "path": f"file_{idx}.py",
+                            "content": f"x_{idx} = " + ("1" * 200),
+                        },
+                    )
+                ],
+                extra_fields={"reasoning_content": "R" * 160},
+            )
+            mem.add_tool_result(ToolResult(call_id=f"c{idx}", output="ok"))
+
+        before_tokens = mem.estimated_tokens()
+        self.assertTrue(mem.compact_if_needed())
+        after_tokens = mem.estimated_tokens()
+        self.assertLess(after_tokens, before_tokens)
+
+        msgs = mem.get_messages()
+        # Prefix preserved, summary emitted, recent [assistant, tool] pair kept intact (not orphaned!)
+        self.assertEqual(msgs[0].content, "SYS")
+        self.assertEqual(msgs[1].content, "GOAL")
+        self.assertTrue(msgs[2].content.startswith(COMPACTION_SUMMARY_HEADER))
+        self.assertEqual(msgs[3].role, "assistant")
+        self.assertEqual(msgs[4].role, "tool")
+
+    def test_compaction_prunes_assistant_reasoning_followed_by_user_message(self):
+        """Invariant: an assistant turn followed by a user turn is stale and gets reasoning pruned."""
+        mem = Memory(
+            system_prompt="SYS",
+            user_prompt="GOAL",
+            max_context_tokens=500,
+            keep_recent_turns=4,
+        )
+        mem.add_assistant(
+            "Done part 1",
+            extra_fields={"reasoning_content": "stale thinking", "reasoning_details": [{"x": 1}]},
+        )
+        mem.add_user("Now do part 2")
+
+        self.assertTrue(mem.compact_if_needed(force=True))
+        msgs = mem.get_messages()
+        self.assertEqual(msgs[2].content, "Done part 1")
+        self.assertIsNone(msgs[2].extra_fields)
 
 
 class TestFormatCompactNum(unittest.TestCase):

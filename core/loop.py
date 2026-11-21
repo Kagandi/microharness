@@ -8,6 +8,7 @@ from core.memory import Memory
 from core.model import AssistantMetadataModel, Model, UsageReportingModel
 from core.tools import ToolRegistry
 from core.types import StepTrace, ToolResult
+from core.usage import normalize_usage
 
 
 class AgentLoop:
@@ -33,12 +34,14 @@ class AgentLoop:
         # 1. Compaction check before sending context to LLM
         compaction_applied = self.memory.compact_if_needed()
 
-        # 2. Snapshot current prompt state
-        prompt_snapshot = [msg.to_dict() for msg in self.memory.get_messages()]
+        # 2. Snapshot current prompt state & raw token estimate for calibration
+        prompt_messages = self.memory.get_messages()
+        prompt_raw_tokens = self.memory.raw_estimated_tokens()
+        prompt_snapshot = [msg.to_dict() for msg in prompt_messages]
 
         # 3. Model generation
         content, tool_calls = self.model.generate(
-            messages=self.memory.get_messages(),
+            messages=prompt_messages,
             tools=self.tools.to_openai_schemas(),
         )
         assistant_fields = (
@@ -59,6 +62,13 @@ class AgentLoop:
             step_usage = self.model.get_last_step_usage()
         elif hasattr(self.model, "last_usage"):
             step_usage = dict(getattr(self.model, "last_usage", {}) or {})
+
+        actual_prompt_tokens = normalize_usage(step_usage).prompt_tokens
+        if actual_prompt_tokens > 0:
+            self.memory.calibrate_tokens(
+                actual_prompt_tokens,
+                baseline_raw_tokens=prompt_raw_tokens,
+            )
 
         # 5. Stop condition: If no tools called, the agent has finished reasoning
         if not tool_calls:

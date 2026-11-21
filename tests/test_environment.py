@@ -485,6 +485,94 @@ class TestEnvironment(unittest.TestCase):
             self.assertEqual(code_ps_sh, 0)
             self.assertEqual(out_ps_sh.strip(), "NO_SHELL_ORPHAN")
 
+    def test_docker_mounts_logs_dir_read_only_and_resolves_container_log_paths(self):
+        """Invariant: DockerEnvironment mounts logs_dir at /logs:ro and resolves /logs/... reads safely."""
+        from unittest.mock import MagicMock, patch
+
+        temp_ws = tempfile.mkdtemp(prefix="docker_logs_ws_")
+        temp_logs = tempfile.mkdtemp(prefix="docker_logs_dir_")
+        log_file = Path(temp_logs) / "step_01_bash_abc123.log"
+        log_file.write_text("line1\nMATCH_TOKEN\nline3\n", encoding="utf-8")
+
+        with patch(
+            "subprocess.run", return_value=MagicMock(returncode=0, stdout="cid", stderr="")
+        ) as mock_run:
+            d_env = DockerEnvironment(
+                image="python:3.11",
+                workspace_dir=temp_ws,
+                logs_dir=temp_logs,
+                cleanup_on_teardown=True,
+            )
+            try:
+                docker_run_cmd = mock_run.call_args_list[0][0][0]
+                self.assertIn(f"{Path(temp_logs).resolve()}:/logs:ro", docker_run_cmd)
+                self.assertEqual(d_env.agent_logs_dir, "/logs")
+
+                # read_file works on /logs/<file>
+                content = d_env.read_file("/logs/step_01_bash_abc123.log")
+                self.assertEqual(content, "   1 | line1\n   2 | MATCH_TOKEN\n   3 | line3\n")
+
+                # Negative cases: traversal and writes into /logs are denied
+                with self.assertRaises(PermissionError):
+                    d_env.read_file("/logs/../../etc/passwd")
+                with self.assertRaises(PermissionError):
+                    d_env.read_file("/logs_evil/secret.txt")
+                with self.assertRaises(PermissionError):
+                    d_env.write_file("/logs/evil.log", "nope")
+            finally:
+                d_env.teardown()
+
+    def test_docker_spilled_logs_accessible_via_grep_and_read_file(self):
+        """Integration invariant: in-container grep and host read_file both access spilled logs at /logs."""
+        if not is_docker_available():
+            self.skipTest("Docker is not available on this host.")
+
+        from core.tools import ReadFileTool, ToolRegistry
+
+        temp_ws = tempfile.mkdtemp(prefix="docker_spill_ws_")
+        temp_logs = tempfile.mkdtemp(prefix="docker_spill_logs_")
+        with DockerEnvironment(
+            image="python:3.11",
+            workspace_dir=temp_ws,
+            logs_dir=temp_logs,
+            cleanup_on_teardown=True,
+        ) as d_env:
+
+            class BigTool:
+                name = "big_tool"
+                description = "Emits big output"
+                parameters = {"type": "object", "properties": {}}
+
+                def execute(self):
+                    return 0, (
+                        "HEAD\n" + ("noise line\n" * 40) + "NEEDLE_LINE\n" + ("tail line\n" * 40)
+                    )
+
+            reg = ToolRegistry(env=d_env, max_tool_tokens=30)
+            reg.register(BigTool())
+            reg.register(ReadFileTool(d_env))
+
+            res = reg.dispatch(
+                type("TC", (), {"id": "call123456", "name": "big_tool", "arguments": {}})(),
+                step_index=1,
+            )
+            self.assertTrue(res.was_truncated)
+            self.assertEqual(res.raw_log_path, "/logs/step_01_big_tool_call12.log")
+            self.assertIn("/logs/step_01_big_tool_call12.log", res.output)
+
+            # In-container grep works on res.raw_log_path
+            code, grep_out = d_env.execute_bash(f"grep NEEDLE_LINE {res.raw_log_path}")
+            self.assertEqual(code, 0)
+            self.assertEqual(grep_out.strip(), "NEEDLE_LINE")
+
+            # read_file works on the exact same path
+            read_out = d_env.read_file(res.raw_log_path)
+            self.assertIn("NEEDLE_LINE", read_out)
+
+            # Mount is read-only inside container
+            ro_code, _ = d_env.execute_bash("touch /logs/should_fail.log")
+            self.assertNotEqual(ro_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
