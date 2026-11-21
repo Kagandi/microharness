@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import time
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,7 @@ from core.config import (
 from core.discovery import discover_workspace_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
+from core.hooks import Hook, HookRegistry, build_hook_registry, parse_hook_specs
 from core.interactive import (
     TURN,
     CommandContext,
@@ -79,7 +81,6 @@ from core.tools import (
     BashTool,
     EditFileTool,
     FinishTool,
-    PostEditHook,
     ReadFileTool,
     Tool,
     ToolRegistry,
@@ -146,9 +147,9 @@ class Harness:
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
         subagent_max_steps: int | None = None,
-        post_edit_diagnostics: bool | None = None,
-        post_edit_command: str | None = None,
-        post_edit_hook: PostEditHook | None = None,
+        hooks: HookRegistry | Mapping[str, Any] | Sequence[Hook | Mapping[str, Any]] | None = None,
+        disabled_hooks: Sequence[str] | None = None,
+        include_default_hooks: bool | None = None,
         doom_loop_threshold: int | None = None,
         doom_loop_max_nudges: int | None = None,
     ):
@@ -161,6 +162,17 @@ class Harness:
         self.global_config = self.layers.global_config
         self.project_config = self.layers.project_config
         self.merged_config = self.layers.merged
+
+        config_hook_arg: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None
+        extra_hook_items: list[Hook | Mapping[str, Any]] = []
+        if isinstance(hooks, Mapping):
+            config_hook_arg = hooks
+        elif isinstance(hooks, Sequence) and not isinstance(hooks, (str, bytes)):
+            for item in hooks:
+                if isinstance(item, Mapping):
+                    extra_hook_items.extend(parse_hook_specs([item], scope="explicit"))
+                else:
+                    extra_hook_items.append(item)
 
         cfg = HarnessConfig(
             sandbox=sandbox,
@@ -180,8 +192,9 @@ class Harness:
             step_retry_delay=step_retry_delay,
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
-            post_edit_diagnostics=post_edit_diagnostics,
-            post_edit_command=post_edit_command,
+            hooks=config_hook_arg,
+            disabled_hooks=disabled_hooks,
+            include_default_hooks=include_default_hooks,
             doom_loop_threshold=doom_loop_threshold,
             doom_loop_max_nudges=doom_loop_max_nudges,
         ).resolve(self.layers)
@@ -205,9 +218,6 @@ class Harness:
         self.step_retry_delay = cfg.step_retry_delay
         self.bash_timeout = cfg.bash_timeout
         self.subagent_max_steps = cfg.subagent_max_steps
-        self.post_edit_diagnostics = cfg.post_edit_diagnostics
-        self.post_edit_command = cfg.post_edit_command
-        self.post_edit_hook = post_edit_hook
         self.doom_loop_threshold = cfg.doom_loop_threshold
         self.doom_loop_max_nudges = cfg.doom_loop_max_nudges
 
@@ -216,6 +226,19 @@ class Harness:
         )
         if project_claim_ignored:
             print(f"⚠️ Notice: {PROJECT_TRUST_NOTICE}", file=sys.stderr)
+
+        if isinstance(hooks, HookRegistry):
+            self.hooks = hooks
+            for name in cfg.disabled_hooks:
+                self.hooks.disable(name)
+        else:
+            self.hooks = build_hook_registry(
+                include_defaults=cfg.include_default_hooks,
+                hook_specs=cfg.hooks,
+                extra_hooks=extra_hook_items,
+                disabled_hooks=cfg.disabled_hooks,
+                trust_project_hooks=self.trust_project_tools,
+            )
 
         if isinstance(self.model, CacheAwareModel):
             self.model.set_cache_ttl(self.cache_ttl)
@@ -561,7 +584,11 @@ class Harness:
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
     ) -> ToolRegistry:
-        registry = ToolRegistry(env=env, max_tool_tokens=self.max_tool_tokens)
+        registry = ToolRegistry(
+            env=env,
+            max_tool_tokens=self.max_tool_tokens,
+            hooks=self.hooks,
+        )
         effective_bash_timeout = bash_timeout if bash_timeout is not None else self.bash_timeout
         if effective_bash_timeout <= 0:
             raise ValueError(
@@ -575,22 +602,8 @@ class Harness:
         if not self.disable_default_tools and not self.custom_tools:
             registry.register(BashTool(env, timeout=effective_bash_timeout))
             registry.register(ReadFileTool(env))
-            registry.register(
-                WriteFileTool(
-                    env,
-                    enable_diagnostics=self.post_edit_diagnostics,
-                    diagnostic_hook=self.post_edit_hook,
-                    diagnostic_command=self.post_edit_command,
-                )
-            )
-            registry.register(
-                EditFileTool(
-                    env,
-                    enable_diagnostics=self.post_edit_diagnostics,
-                    diagnostic_hook=self.post_edit_hook,
-                    diagnostic_command=self.post_edit_command,
-                )
-            )
+            registry.register(WriteFileTool(env))
+            registry.register(EditFileTool(env))
             ws_dir = self.explicit_workspace_dir or env.workspace_dir
             subagents = discover_subagents(ws_dir, self.global_dir)
             registry.register(

@@ -838,19 +838,9 @@ class SubagentTool:
         if isinstance(tool, ReadFileTool):
             return ReadFileTool(child_env)
         if isinstance(tool, WriteFileTool):
-            return WriteFileTool(
-                child_env,
-                enable_diagnostics=tool.enable_diagnostics,
-                diagnostic_hook=tool.diagnostic_hook,
-                diagnostic_command=tool.diagnostic_command,
-            )
+            return WriteFileTool(child_env)
         if isinstance(tool, EditFileTool):
-            return EditFileTool(
-                child_env,
-                enable_diagnostics=tool.enable_diagnostics,
-                diagnostic_hook=tool.diagnostic_hook,
-                diagnostic_command=tool.diagnostic_command,
-            )
+            return EditFileTool(child_env)
         if getattr(tool, "env", None) is self.env:
             cloned = copy.copy(tool)
             setattr(cloned, "env", child_env)
@@ -861,6 +851,7 @@ class SubagentTool:
         child_registry = ToolRegistry(
             env=child_env,
             max_tool_tokens=self.parent_registry.max_tool_tokens,
+            hooks=self.parent_registry.hooks,
         )
         for name, tool in self.parent_registry.registered_tools().items():
             if name in BLOCKED_CHILD_TOOLS:

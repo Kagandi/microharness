@@ -1024,29 +1024,52 @@ class ValidTool:
         self.assertNotIn("[Post-edit diagnostics]", res.output)
 
     def test_post_edit_diagnostics_can_be_disabled_and_supports_hooks_and_commands(self):
-        """Invariant: pluggable hook (1-arg or 2-arg) and command diagnostics append concisely and handle errors."""
-        reg = ToolRegistry(env=self.env, max_tool_tokens=2000)
+        """Invariant: default syntax hook can be removed and custom post_tool FunctionHook/CommandHook attach via ToolRegistry."""
+        from core.hooks import (
+            POST_TOOL,
+            PYTHON_SYNTAX_HOOK_NAME,
+            CommandHook,
+            FunctionHook,
+            HookContext,
+            HookRegistry,
+        )
 
-        # 1. Disabled diagnostics suppress syntax warnings
-        disabled_write = WriteFileTool(self.env, enable_diagnostics=False)
-        code, out = disabled_write.execute("still_bad.py", "def bad(\n")
-        self.assertEqual(code, 0)
-        self.assertNotIn("[Post-edit diagnostics]", out)
+        # 1. Removing the default syntax hook suppresses syntax warnings
+        reg_no_default = ToolRegistry(
+            env=self.env, max_tool_tokens=2000, hooks=HookRegistry.with_defaults()
+        )
+        reg_no_default.register(WriteFileTool(self.env))
+        self.assertTrue(reg_no_default.hooks.unregister(PYTHON_SYNTAX_HOOK_NAME))
+        res_disabled = reg_no_default.dispatch(
+            ToolCall(
+                id="w_nod",
+                name="write_file",
+                arguments={"path": "still_bad.py", "content": "def bad(\n"},
+            ),
+            step_index=1,
+        )
+        self.assertEqual(res_disabled.exit_code, 0)
+        self.assertNotIn("[Post-edit diagnostics]", res_disabled.output)
 
-        # 2. 1-arg callback hook and 2-arg (path, env) callback hook
-        seen_calls: list[tuple[str, object]] = []
+        # 2. Custom FunctionHook on POST_TOOL receives HookContext(path, env, ...)
+        seen_calls: list[tuple[str | None, object]] = []
 
-        def hook_two_args(path: str, env: Environment) -> str | None:
-            seen_calls.append((path, env))
-            if path.endswith(".txt"):
+        def custom_fn(ctx: HookContext) -> str | None:
+            seen_calls.append((ctx.path, ctx.env))
+            if ctx.path and ctx.path.endswith(".txt"):
                 return "Custom lint: trailing note"
             return None
 
-        reg.register(WriteFileTool(self.env, diagnostic_hook=hook_two_args))
-        reg.register(
-            EditFileTool(
-                self.env,
-                diagnostic_hook=lambda p: f"Single-arg check on {p}",
+        reg = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.with_defaults())
+        reg.register(WriteFileTool(self.env))
+        reg.register(EditFileTool(self.env))
+        reg.hooks.register(
+            FunctionHook(
+                name="custom_txt_lint",
+                event=POST_TOOL,
+                fn=custom_fn,
+                matcher="write_file|edit_file",
+                only_on_success=True,
             )
         )
         res_w = reg.dispatch(
@@ -1055,7 +1078,7 @@ class ValidTool:
         )
         self.assertEqual(res_w.exit_code, 0)
         self.assertEqual(seen_calls, [("a.txt", self.env)])
-        self.assertIn("[Post-edit diagnostics]\nCustom lint: trailing note", res_w.output)
+        self.assertIn("Custom lint: trailing note", res_w.output)
 
         res_e = reg.dispatch(
             ToolCall(
@@ -1066,31 +1089,69 @@ class ValidTool:
             step_index=2,
         )
         self.assertEqual(res_e.exit_code, 0)
-        self.assertIn("Single-arg check on a.txt", res_e.output)
+        self.assertIn("Custom lint: trailing note", res_e.output)
 
         # 3. Crashing hook does not fail the write
-        crashing_write = WriteFileTool(
-            self.env, diagnostic_hook=lambda _p: (_ for _ in ()).throw(RuntimeError("hook boom"))
+        reg_crash = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
+        reg_crash.register(WriteFileTool(self.env))
+        reg_crash.hooks.register(
+            FunctionHook(
+                name="boom_hook",
+                event=POST_TOOL,
+                fn=lambda _ctx: (_ for _ in ()).throw(RuntimeError("hook boom")),
+            )
         )
-        c_code, c_out = crashing_write.execute("ok.py", "x = 1\n")
-        self.assertEqual(c_code, 0)
-        self.assertIn("Successfully wrote", c_out)
-        self.assertIn("Diagnostic hook error: hook boom", c_out)
+        c_res = reg_crash.dispatch(
+            ToolCall(id="hc", name="write_file", arguments={"path": "ok.py", "content": "x = 1\n"}),
+            step_index=1,
+        )
+        self.assertEqual(c_res.exit_code, 0)
+        self.assertIn("Successfully wrote", c_res.output)
+        self.assertIn("Hook 'boom_hook' error: hook boom", c_res.output)
 
-        # 4. Command hook with {path} quoting for filenames with spaces
+        # 4. CommandHook with {path} quoting for filenames with spaces
         cmd = "python -c \"import sys; print('checked:' + sys.argv[1]); sys.exit(1)\" {path}"
-        cmd_write = WriteFileTool(self.env, diagnostic_command=cmd)
-        cmd_code, cmd_out = cmd_write.execute("dir with space/mod.py", "x = 1\n")
-        self.assertEqual(cmd_code, 0)
-        self.assertIn("checked:dir with space/mod.py", cmd_out)
+        reg_cmd = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
+        reg_cmd.register(WriteFileTool(self.env))
+        reg_cmd.hooks.register(
+            CommandHook(
+                name="cmd_lint",
+                event=POST_TOOL,
+                command=cmd,
+                matcher="write_file",
+                only_on_success=True,
+            )
+        )
+        cmd_res = reg_cmd.dispatch(
+            ToolCall(
+                id="hs",
+                name="write_file",
+                arguments={"path": "dir with space/mod.py", "content": "x = 1\n"},
+            ),
+            step_index=1,
+        )
+        self.assertEqual(cmd_res.exit_code, 0)
+        self.assertIn("checked:dir with space/mod.py", cmd_res.output)
 
         # 5. Clean command (exit 0) appends nothing
-        ok_cmd_write = WriteFileTool(
-            self.env, diagnostic_command='python -c "import sys; sys.exit(0)"'
+        reg_ok_cmd = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
+        reg_ok_cmd.register(WriteFileTool(self.env))
+        reg_ok_cmd.hooks.register(
+            CommandHook(
+                name="clean_cmd",
+                event=POST_TOOL,
+                command='python -c "import sys; sys.exit(0)"',
+                matcher="write_file",
+            )
         )
-        ok_code, ok_out = ok_cmd_write.execute("clean.py", "x = 1\n")
-        self.assertEqual(ok_code, 0)
-        self.assertNotIn("[Post-edit diagnostics]", ok_out)
+        ok_res = reg_ok_cmd.dispatch(
+            ToolCall(
+                id="ho", name="write_file", arguments={"path": "clean.py", "content": "x = 1\n"}
+            ),
+            step_index=1,
+        )
+        self.assertEqual(ok_res.exit_code, 0)
+        self.assertEqual(ok_res.output, "Successfully wrote 6 bytes to 'clean.py'")
 
 
 if __name__ == "__main__":

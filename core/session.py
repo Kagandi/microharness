@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.hooks import POST_TURN, PRE_TURN, HookContext, HookRegistry
 from core.loop import (
     DEFAULT_DOOM_LOOP_MAX_NUDGES,
     DEFAULT_DOOM_LOOP_THRESHOLD,
@@ -132,9 +133,9 @@ def run_steps(
     with ``doom_loop`` if they persist.
     """
     step_idx = start_step
-    step_attempts = 0
-    consecutive_empty_nudges = 0
     is_real_agent_loop = isinstance(loop, AgentLoop)
+    hooks = getattr(loop, "hooks", None) if is_real_agent_loop else None
+    env = getattr(getattr(loop, "tools", None), "env", None) if is_real_agent_loop else None
 
     if is_real_agent_loop:
         if doom_loop_threshold is not None:
@@ -155,6 +156,58 @@ def run_steps(
                 else int(doom_loop_max_nudges)
             ),
         )
+
+    if isinstance(hooks, HookRegistry):
+        pre_turn = hooks.run(PRE_TURN, HookContext(event=PRE_TURN, env=env, step_index=step_idx))
+        if pre_turn.blocked:
+            detail = pre_turn.combined_message or "Turn blocked by pre_turn hook."
+            tracer.log(f"\n🛑 {detail}")
+            return StepOutcome(False, "hook_blocked", step_idx, detail=detail)
+
+    try:
+        return _drive_steps(
+            model=model,
+            loop=loop,
+            tracer=tracer,
+            start_step=start_step,
+            max_steps=max_steps,
+            deadline=deadline,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            on_finish=on_finish,
+            require_finish_tool=require_finish_tool,
+            max_empty_nudges=max_empty_nudges,
+            finish_nudge=finish_nudge,
+            propagate_interrupts=propagate_interrupts,
+            is_real_agent_loop=is_real_agent_loop,
+            fallback_detector=fallback_detector,
+        )
+    finally:
+        if isinstance(hooks, HookRegistry):
+            hooks.run(POST_TURN, HookContext(event=POST_TURN, env=env, step_index=step_idx))
+
+
+def _drive_steps(
+    *,
+    model: Model,
+    loop: AgentLoop,
+    tracer: Tracer,
+    start_step: int,
+    max_steps: int | None,
+    deadline: float | None,
+    max_retries: int,
+    retry_delay: float,
+    on_finish: Callable[[str], None] | None,
+    require_finish_tool: bool,
+    max_empty_nudges: int,
+    finish_nudge: str,
+    propagate_interrupts: bool,
+    is_real_agent_loop: bool,
+    fallback_detector: DoomLoopDetector | None,
+) -> StepOutcome:
+    step_idx = start_step
+    step_attempts = 0
+    consecutive_empty_nudges = 0
 
     while max_steps is None or (step_idx - start_step) < max_steps:
         effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
@@ -198,13 +251,14 @@ def run_steps(
         step_idx += 1
 
         stop_reason = getattr(step_trace, "stop_reason", None)
-        if stop_reason == DOOM_LOOP:
+        if stop_reason in (DOOM_LOOP, "hook_blocked"):
             raw_detail = getattr(step_trace, "stop_detail", None)
-            detail = (
-                raw_detail if isinstance(raw_detail, str) and raw_detail else "Doom loop detected."
+            default_detail = (
+                "Doom loop detected." if stop_reason == DOOM_LOOP else "Blocked by hook."
             )
-            tracer.log(f"\n🛑 Stopping loop ({DOOM_LOOP}): {detail}")
-            return StepOutcome(False, DOOM_LOOP, step_idx, detail=detail)
+            detail = raw_detail if isinstance(raw_detail, str) and raw_detail else default_detail
+            tracer.log(f"\n🛑 Stopping loop ({stop_reason}): {detail}")
+            return StepOutcome(False, str(stop_reason), step_idx, detail=detail)
 
         tool_calls = step_trace.model_response.get("tool_calls") or []
         if tool_calls:

@@ -4,15 +4,14 @@ import importlib.util
 import inspect
 import json
 import math
-import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from core.discovery import discover_resources
-from core.editing import check_python_syntax
 from core.environment import Environment
+from core.hooks import POST_TOOL, PRE_TOOL, HookContext, HookRegistry
 from core.protocols import ModelCancelledError
 from core.types import ToolCall, ToolResult
 
@@ -99,101 +98,6 @@ def format_tool_output(
 
 
 DEFAULT_MAX_BASH_TIMEOUT = 1800.0
-DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT = 10.0
-DEFAULT_MAX_DIAGNOSTIC_CHARS = 2000
-
-PostEditHook = Callable[..., str | None]
-
-
-def run_post_edit_command(
-    command: str,
-    path: str,
-    env: Environment,
-    *,
-    timeout: float = DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT,
-) -> str | None:
-    """Executes a configured diagnostic command and returns concise output on non-zero exit."""
-    stripped = command.strip()
-    if not stripped:
-        return None
-    rendered = stripped.replace("{path}", shlex.quote(path)) if "{path}" in stripped else stripped
-    try:
-        exit_code, output = env.execute_bash(rendered, timeout=timeout)
-    except Exception as exc:
-        return f"Diagnostic command error: {exc}"
-    if exit_code == 0:
-        return None
-    cleaned = (output or "").strip()
-    if not cleaned:
-        return f"Diagnostic command '{rendered}' exited with code {exit_code}."
-    if len(cleaned) > DEFAULT_MAX_DIAGNOSTIC_CHARS:
-        cleaned = f"{cleaned[:DEFAULT_MAX_DIAGNOSTIC_CHARS].rstrip()}\n... (diagnostics truncated)"
-    return cleaned
-
-
-def _invoke_post_edit_hook(hook: PostEditHook, path: str, env: Environment) -> str | None:
-    """Calls a custom diagnostic hook with ``(path, env)`` or ``(path)`` based on signature."""
-    try:
-        try:
-            params = list(inspect.signature(hook).parameters.values())
-        except (TypeError, ValueError):
-            params = []
-        accepts_two = len(params) >= 2 or any(
-            p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-            or p.name == "env"
-            for p in params
-        )
-        result = hook(path, env) if accepts_two else hook(path)
-    except Exception as exc:
-        return f"Diagnostic hook error: {exc}"
-    if result is None:
-        return None
-    text = str(result).strip()
-    return text or None
-
-
-def collect_post_edit_diagnostics(
-    env: Environment,
-    path: str,
-    *,
-    content: str | None = None,
-    enable_diagnostics: bool = True,
-    diagnostic_hook: PostEditHook | None = None,
-    diagnostic_command: str | None = None,
-    command_timeout: float = DEFAULT_DIAGNOSTIC_COMMAND_TIMEOUT,
-) -> str:
-    """Runs zero-dependency Python syntax checks and optional post-edit diagnostic hooks."""
-    if not enable_diagnostics:
-        return ""
-
-    notes: list[str] = []
-    if Path(path).suffix.lower() == ".py":
-        source = content
-        if source is None:
-            try:
-                resolved = env.resolve_path(path)
-                if isinstance(resolved, Path) and resolved.is_file():
-                    source = resolved.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                source = None
-        if source is not None:
-            syntax_err = check_python_syntax(source, path_label=path)
-            if syntax_err:
-                notes.append(syntax_err)
-
-    if diagnostic_hook is not None:
-        hook_note = _invoke_post_edit_hook(diagnostic_hook, path, env)
-        if hook_note and hook_note not in notes:
-            notes.append(hook_note)
-
-    if diagnostic_command:
-        cmd_note = run_post_edit_command(diagnostic_command, path, env, timeout=command_timeout)
-        if cmd_note and cmd_note not in notes:
-            notes.append(cmd_note)
-
-    if not notes:
-        return ""
-    return "[Post-edit diagnostics]\n" + "\n\n".join(notes)
 
 
 class BashTool:
@@ -300,32 +204,13 @@ class WriteFileTool:
         "required": ["path", "content"],
     }
 
-    def __init__(
-        self,
-        env: Environment,
-        *,
-        enable_diagnostics: bool = True,
-        diagnostic_hook: PostEditHook | None = None,
-        diagnostic_command: str | None = None,
-    ):
+    def __init__(self, env: Environment):
         self.env = env
-        self.enable_diagnostics = enable_diagnostics
-        self.diagnostic_hook = diagnostic_hook
-        self.diagnostic_command = diagnostic_command
 
     def execute(self, path: str, content: str) -> tuple[int, str]:
         try:
             self.env.write_file(path, content)
-            message = f"Successfully wrote {len(content.encode('utf-8'))} bytes to '{path}'"
-            diagnostics = collect_post_edit_diagnostics(
-                self.env,
-                path,
-                content=content,
-                enable_diagnostics=self.enable_diagnostics,
-                diagnostic_hook=self.diagnostic_hook,
-                diagnostic_command=self.diagnostic_command,
-            )
-            return 0, f"{message}\n\n{diagnostics}" if diagnostics else message
+            return 0, f"Successfully wrote {len(content.encode('utf-8'))} bytes to '{path}'"
         except Exception as exc:
             return 1, f"Error writing file '{path}': {exc}"
 
@@ -356,30 +241,13 @@ class EditFileTool:
         "required": ["path", "old_str", "new_str"],
     }
 
-    def __init__(
-        self,
-        env: Environment,
-        *,
-        enable_diagnostics: bool = True,
-        diagnostic_hook: PostEditHook | None = None,
-        diagnostic_command: str | None = None,
-    ):
+    def __init__(self, env: Environment):
         self.env = env
-        self.enable_diagnostics = enable_diagnostics
-        self.diagnostic_hook = diagnostic_hook
-        self.diagnostic_command = diagnostic_command
 
     def execute(self, path: str, old_str: str, new_str: str) -> tuple[int, str]:
         try:
             _, message = self.env.edit_file(path, old_str, new_str)
-            diagnostics = collect_post_edit_diagnostics(
-                self.env,
-                path,
-                enable_diagnostics=self.enable_diagnostics,
-                diagnostic_hook=self.diagnostic_hook,
-                diagnostic_command=self.diagnostic_command,
-            )
-            return 0, f"{message}\n\n{diagnostics}" if diagnostics else message
+            return 0, message
         except Exception as exc:
             return 1, f"Error editing file '{path}': {exc}"
 
@@ -409,9 +277,15 @@ class FinishTool:
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
-    def __init__(self, env: Environment, max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS):
+    def __init__(
+        self,
+        env: Environment,
+        max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS,
+        hooks: HookRegistry | None = None,
+    ):
         self.env = env
         self.max_tool_tokens = max_tool_tokens
+        self.hooks = hooks if hooks is not None else HookRegistry.with_defaults()
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -500,6 +374,30 @@ class ToolRegistry:
                 exit_code=1,
             )
 
+        raw_path = tool_call.arguments.get("path")
+        target_path = str(raw_path) if raw_path is not None else None
+        modifies = self.modifies_files(tool_call.name)
+
+        pre_outcome = self.hooks.run(
+            PRE_TOOL,
+            HookContext(
+                event=PRE_TOOL,
+                env=self.env,
+                tool_name=tool_call.name,
+                tool_call=tool_call,
+                tool_args=dict(tool_call.arguments),
+                step_index=step_index,
+                modifies_files=modifies,
+                path=target_path,
+            ),
+        )
+        if pre_outcome.blocked:
+            return ToolResult(
+                call_id=tool_call.id,
+                output=pre_outcome.combined_message or f"Tool '{tool_call.name}' blocked by hook.",
+                exit_code=1,
+            )
+
         try:
             exit_code, raw_output = tool.execute(**tool_call.arguments)
         except ModelCancelledError:
@@ -509,6 +407,25 @@ class ToolRegistry:
             raw_output = f"Error executing tool '{tool_call.name}': {exc}"
 
         raw_output_str = str(raw_output) if raw_output is not None else ""
+
+        post_outcome = self.hooks.run(
+            POST_TOOL,
+            HookContext(
+                event=POST_TOOL,
+                env=self.env,
+                tool_name=tool_call.name,
+                tool_call=tool_call,
+                tool_args=dict(tool_call.arguments),
+                exit_code=exit_code,
+                output=raw_output_str,
+                step_index=step_index,
+                modifies_files=modifies,
+                path=target_path,
+            ),
+        )
+        if post_outcome.messages:
+            hook_text = post_outcome.combined_message
+            raw_output_str = f"{raw_output_str}\n\n{hook_text}" if raw_output_str else hook_text
 
         try:
             raw_agent_logs_dir = getattr(self.env, "agent_logs_dir", None)

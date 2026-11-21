@@ -348,8 +348,11 @@ class TestDoomLoopDetection(unittest.TestCase):
         self.assertTrue(any("Loop guard:" in msg for msg in sys_entries))
         self.assertTrue(any(f"Stopped turn ({DOOM_LOOP})" in msg for msg in sys_entries))
 
-    def test_subagent_inherits_post_edit_diagnostics_and_doom_loop(self):
-        """Invariant: SubagentTool preserves parent post-edit diagnostics and doom-loop limits."""
+    def test_subagent_inherits_hooks_and_doom_loop(self):
+        """Invariant: SubagentTool shares parent HookRegistry and doom-loop limits."""
+        from core.hooks import POST_TOOL, FunctionHook, HookRegistry
+        from core.subagents import BUILTIN_SUBAGENTS, SubagentTool
+
         parent_model = MockModel(
             [
                 (
@@ -368,52 +371,37 @@ class TestDoomLoopDetection(unittest.TestCase):
             for i in range(1, 5)
         ]
 
-        # Test _bind_tool_to_env preserves post-edit diagnostics on WriteFileTool and EditFileTool
-        from core.subagents import SubagentTool
-
-        hook = lambda p: f"hook:{p}"  # noqa: E731
-        parent_reg = ToolRegistry(env=self.env)
+        hooks = HookRegistry.with_defaults()
+        hooks.register(
+            FunctionHook(name="child_note", event=POST_TOOL, fn=lambda _ctx: "from_parent_hook")
+        )
+        parent_reg = ToolRegistry(env=self.env, hooks=hooks)
         parent_reg.register(BashTool(self.env))
         parent_reg.register(ReadFileTool(self.env))
-        parent_reg.register(
-            WriteFileTool(
-                self.env,
-                enable_diagnostics=False,
-                diagnostic_hook=hook,
-                diagnostic_command="echo x",
-            )
-        )
-        parent_reg.register(
-            EditFileTool(
-                self.env,
-                enable_diagnostics=False,
-                diagnostic_hook=hook,
-                diagnostic_command="echo y",
-            )
-        )
+        parent_reg.register(WriteFileTool(self.env))
+        parent_reg.register(EditFileTool(self.env))
 
         sub_tool = SubagentTool(
             env=self.env,
             parent_registry=parent_reg,
-            subagents={},
+            subagents=BUILTIN_SUBAGENTS,
             model_getter=lambda: parent_model,
         )
         child_env = Environment(workspace_dir=self.workspace / "child", cleanup_on_teardown=True)
         try:
-            bound_write = sub_tool._bind_tool_to_env(parent_reg.get("write_file"), child_env)  # type: ignore[arg-type]
-            bound_edit = sub_tool._bind_tool_to_env(parent_reg.get("edit_file"), child_env)  # type: ignore[arg-type]
-            assert isinstance(bound_write, WriteFileTool)
-            assert isinstance(bound_edit, EditFileTool)
-            self.assertFalse(bound_write.enable_diagnostics)
-            self.assertIs(bound_write.diagnostic_hook, hook)
-            self.assertEqual(bound_write.diagnostic_command, "echo x")
-            self.assertFalse(bound_edit.enable_diagnostics)
-            self.assertIs(bound_edit.diagnostic_hook, hook)
-            self.assertEqual(bound_edit.diagnostic_command, "echo y")
+            child_reg = sub_tool._build_child_registry(BUILTIN_SUBAGENTS["worker"], child_env)
+            self.assertIs(child_reg.hooks, hooks)
+            res = child_reg.dispatch(
+                ToolCall(
+                    id="cw1", name="write_file", arguments={"path": "x.py", "content": "x = 1\n"}
+                ),
+                step_index=1,
+            )
+            self.assertIn("from_parent_hook", res.output)
         finally:
             child_env.teardown()
 
-        # Subagent loop respects doom_loop_threshold / doom_loop_max_nudges from Harness
+        # Harness propagates doom_loop_threshold / doom_loop_max_nudges
         harness = Harness(
             model=MockModel(child_script),
             workspace_dir=self.workspace,
@@ -427,13 +415,23 @@ class TestDoomLoopDetection(unittest.TestCase):
         self.assertEqual(res.finish_reason, DOOM_LOOP)
         self.assertEqual(res.total_steps, 2)
 
-    def test_harness_config_post_edit_command_end_to_end(self):
-        """Invariant: project config post_edit_command runs automatically on edits in Harness.run."""
+    def test_harness_config_hooks_end_to_end(self):
+        """Invariant: trusted project config hooks run automatically on edits in Harness.run."""
         (self.workspace / ".microharness").mkdir()
         (self.workspace / ".microharness" / "config.json").write_text(
             json.dumps(
                 {
-                    "post_edit_command": "python -c \"import sys; print('HOOK:' + sys.argv[1]); sys.exit(1)\" {path}",
+                    "hooks": {
+                        "post_tool": [
+                            {
+                                "name": "echo_hook",
+                                "matcher": "write_file|edit_file",
+                                "path_glob": "*.py",
+                                "only_on_success": True,
+                                "command": "python -c \"import sys; print('HOOK:' + sys.argv[1]); sys.exit(1)\" {path}",
+                            }
+                        ]
+                    }
                 }
             ),
             encoding="utf-8",
@@ -457,13 +455,13 @@ class TestDoomLoopDetection(unittest.TestCase):
             runs_dir=self.runs_dir,
             sandbox=False,
             verbose=False,
+            trust_project_tools=True,
         )
         result = harness.run(Task(id="hook_e2e", instruction="Write demo.py", max_steps=5))
 
         self.assertTrue(result.passed)
         trace = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
         tool_out = trace["steps"][0]["tool_results"][0]["output"]
-        self.assertIn("[Post-edit diagnostics]", tool_out)
         self.assertIn("HOOK:demo.py", tool_out)
 
 

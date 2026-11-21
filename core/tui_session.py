@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from core.hooks import POST_TURN, PRE_TURN, HookContext, HookRegistry
 from core.loop import DOOM_LOOP, AgentLoop, DoomLoopCheck
 from core.memory import Memory
 from core.protocols import CancellableModel, Model, ModelCancelledError
@@ -71,7 +72,18 @@ class TuiTurnRunner:
         turn_start = self.step_index
         self.state.turn_active = True
         self._install_cancel_probe()
+        hooks = getattr(self.loop, "hooks", None)
+        env = getattr(getattr(self.loop, "tools", None), "env", None)
         try:
+            if isinstance(hooks, HookRegistry):
+                pre_turn = hooks.run(
+                    PRE_TURN,
+                    HookContext(event=PRE_TURN, env=env, step_index=self.step_index),
+                )
+                if pre_turn.blocked:
+                    detail = pre_turn.combined_message or "Turn blocked by pre_turn hook."
+                    self.state.add_system(f"⚠️ {detail}")
+                    return
             while (self.step_index - turn_start) < max_steps:
                 if self.tui.check_cancel_requested():
                     self.abort_turn("cancelled by user (Esc)", at_step=self.step_index)
@@ -79,6 +91,10 @@ class TuiTurnRunner:
                 if not self._step_once():
                     return
         finally:
+            if isinstance(hooks, HookRegistry):
+                hooks.run(
+                    POST_TURN, HookContext(event=POST_TURN, env=env, step_index=self.step_index)
+                )
             self.state.turn_active = False
             self._remove_cancel_probe()
             self.refresh()
@@ -106,9 +122,9 @@ class TuiTurnRunner:
             self.state.add_system(f"↪️ Loop guard: {check.reason}")
 
         stop_reason = getattr(step_trace, "stop_reason", None)
-        if stop_reason == DOOM_LOOP:
-            detail = getattr(step_trace, "stop_detail", None) or "Doom loop detected."
-            self.state.add_system(f"⚠️ Stopped turn ({DOOM_LOOP}): {detail}")
+        if stop_reason in (DOOM_LOOP, "hook_blocked"):
+            detail = getattr(step_trace, "stop_detail", None) or f"Stopped ({stop_reason})."
+            self.state.add_system(f"⚠️ Stopped turn ({stop_reason}): {detail}")
             self.refresh()
             return False
 

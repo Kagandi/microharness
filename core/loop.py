@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.hooks import POST_STEP, PRE_STEP, HookContext, HookRegistry
 from core.memory import Memory
 from core.model import AssistantMetadataModel, Model, UsageReportingModel
 from core.tools import ToolRegistry
@@ -289,12 +290,17 @@ class AgentLoop:
         memory: Memory,
         tools: ToolRegistry,
         *,
+        hooks: HookRegistry | None = None,
         doom_loop_threshold: int = DEFAULT_DOOM_LOOP_THRESHOLD,
         doom_loop_max_nudges: int = DEFAULT_DOOM_LOOP_MAX_NUDGES,
     ):
         self.model = model
         self.memory = memory
         self.tools = tools
+        resolved_hooks = hooks if hooks is not None else getattr(tools, "hooks", None)
+        self.hooks: HookRegistry | None = (
+            resolved_hooks if isinstance(resolved_hooks, HookRegistry) else None
+        )
         self.doom_loop_threshold = doom_loop_threshold
         self.doom_loop_max_nudges = doom_loop_max_nudges
         self.doom_loop_detector = DoomLoopDetector(
@@ -312,6 +318,25 @@ class AgentLoop:
         """
         start_time = time.time()
         self.last_doom_loop_check = None
+        env = getattr(self.tools, "env", None)
+
+        if self.hooks is not None:
+            pre_step = self.hooks.run(
+                PRE_STEP,
+                HookContext(event=PRE_STEP, env=env, step_index=step_index),
+            )
+            if pre_step.blocked:
+                trace = StepTrace(
+                    step_index=step_index,
+                    prompt_messages=[msg.to_dict() for msg in self.memory.get_messages()],
+                    model_response={"content": pre_step.combined_message, "tool_calls": []},
+                    tool_results=[],
+                    compaction_applied=False,
+                    duration_s=time.time() - start_time,
+                    stop_reason="hook_blocked",
+                    stop_detail=pre_step.combined_message or "Step blocked by pre_step hook.",
+                )
+                return True, trace
 
         # 1. Compaction check before sending context to LLM
         compaction_applied = self.memory.compact_if_needed()
@@ -422,5 +447,16 @@ class AgentLoop:
             stop_reason=stop_reason,
             stop_detail=stop_detail,
         )
+
+        if self.hooks is not None:
+            self.hooks.run(
+                POST_STEP,
+                HookContext(
+                    event=POST_STEP,
+                    env=env,
+                    step_index=step_index,
+                    metadata={"terminated": terminated, "stop_reason": stop_reason},
+                ),
+            )
 
         return terminated, trace
