@@ -5,6 +5,7 @@ from pathlib import Path
 from core.environment import (
     DockerEnvironment,
     Environment,
+    GuardedEnvironment,
     ReadOnlyEnvironment,
     is_docker_available,
     validate_read_only_bash,
@@ -830,6 +831,106 @@ class TestReadOnlyEnvironment(unittest.TestCase):
         self.assertEqual(code_bad, 1)
         self.assertIn("Read-only environment blocked bash command", out_bad)
         self.assertFalse((self.inner.workspace_dir / "pwn.txt").exists())
+
+
+class TestDockerResourceLimitsAndGuardedEnvironment(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.inner = Environment(workspace_dir=self.temp_dir, cleanup_on_teardown=True)
+        self.inner.populate_files({"sample.txt": "alpha\nbeta\n"})
+
+    def tearDown(self):
+        self.inner.teardown()
+
+    def test_docker_resource_limits_and_dedup(self):
+        """Invariant: DockerEnvironment injects --memory/--cpus/--pids-limit unless already present in docker_args."""
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.network = "none"
+        d_env.memory_limit = "2g"
+        d_env.cpu_limit = 1.5
+        d_env.pids_limit = 128
+        d_env.docker_args = []
+        self.assertEqual(
+            d_env._effective_docker_args(),
+            ["--network", "none", "--memory", "2g", "--cpus", "1.5", "--pids-limit", "128"],
+        )
+
+        # Explicit docker_args flags take precedence without duplicating flags
+        d_env.docker_args = ["-m", "4g", "--cpus=2", "--pids-limit=64"]
+        self.assertEqual(
+            d_env._effective_docker_args(),
+            ["--network", "none", "-m", "4g", "--cpus=2", "--pids-limit=64"],
+        )
+
+    def test_guarded_environment_modes_and_ask_confirmation(self):
+        """Invariant: GuardedEnvironment enforces auto, read-only, and ask modes cleanly."""
+        prompts: list[tuple[str, str]] = []
+        allow = False
+
+        def confirm(action: str, detail: str) -> bool:
+            prompts.append((action, detail))
+            return allow
+
+        guarded = GuardedEnvironment(self.inner, mode="ask", confirm_handler=confirm)
+        # Reads are never prompted
+        self.assertEqual(guarded.read_file("sample.txt"), "   1 | alpha\n   2 | beta\n")
+        self.assertEqual(prompts, [])
+
+        # Denied write/edit/bash leave workspace untouched
+        with self.assertRaises(PermissionError):
+            guarded.write_file("new.txt", "nope")
+        with self.assertRaises(PermissionError):
+            guarded.edit_file("sample.txt", "alpha", "omega")
+        code_denied, out_denied = guarded.execute_bash("echo hi")
+        self.assertEqual(code_denied, 1)
+        self.assertIn("denied by user", out_denied)
+        self.assertEqual([p[0] for p in prompts], ["write_file", "edit_file", "bash"])
+        self.assertFalse((self.inner.workspace_dir / "new.txt").exists())
+
+        # Approved actions execute normally
+        allow = True
+        guarded.write_file("new.txt", "yes\n")
+        self.assertEqual(
+            (self.inner.workspace_dir / "new.txt").read_text(encoding="utf-8"), "yes\n"
+        )
+        code_ok, out_ok = guarded.execute_bash("echo allowed")
+        self.assertEqual(code_ok, 0)
+        self.assertEqual(out_ok.strip(), "allowed")
+
+        # Switching to read-only reuses ReadOnlyEnvironment
+        guarded.mode = "read-only"
+        self.assertEqual(guarded.mode, "read-only")
+        with self.assertRaises(PermissionError):
+            guarded.write_file("blocked.txt", "x")
+        code_ro, out_ro = guarded.execute_bash("rm new.txt")
+        self.assertEqual(code_ro, 1)
+        self.assertIn("Read-only environment blocked bash command", out_ro)
+        self.assertIsNone(guarded.get_git_patch())
+
+        # Ask mode without confirm_handler fails closed
+        no_handler = GuardedEnvironment(self.inner, mode="ask", confirm_handler=None)
+        code_no_cb, out_no_cb = no_handler.execute_bash("echo hi")
+        self.assertEqual(code_no_cb, 1)
+        self.assertIn("no interactive confirmation handler", out_no_cb)
+
+        with self.assertRaises(ValueError):
+            GuardedEnvironment(self.inner, mode="invalid")
+
+    def test_guarded_environment_preserves_container_protocol(self):
+        """Invariant: GuardedEnvironment wrapping ContainerEnvironment preserves ContainerEnvironment protocol."""
+        from core.environment import ContainerEnvironment
+
+        d_env = DockerEnvironment.__new__(DockerEnvironment)
+        d_env.container_name = "c1"
+        d_env._container_started = True
+        d_env.workspace_dir = self.inner.workspace_dir
+        d_env.logs_dir = self.inner.logs_dir
+        d_env.allowed_read_dirs = []
+
+        self.assertTrue(isinstance(GuardedEnvironment(d_env, mode="auto"), ContainerEnvironment))
+        self.assertFalse(
+            isinstance(GuardedEnvironment(self.inner, mode="auto"), ContainerEnvironment)
+        )
 
 
 if __name__ == "__main__":
