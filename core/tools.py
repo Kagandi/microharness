@@ -11,6 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.discovery import discover_resources
 from core.environment import Environment
+from core.hooks import POST_TOOL, PRE_TOOL, HookContext, HookRegistry
 from core.protocols import ModelCancelledError
 from core.types import ToolCall, ToolResult
 
@@ -276,9 +277,15 @@ class FinishTool:
 class ToolRegistry:
     """Manages available tools, formats schemas, and dispatches calls."""
 
-    def __init__(self, env: Environment, max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS):
+    def __init__(
+        self,
+        env: Environment,
+        max_tool_tokens: int = DEFAULT_MAX_TOOL_TOKENS,
+        hooks: HookRegistry | None = None,
+    ):
         self.env = env
         self.max_tool_tokens = max_tool_tokens
+        self.hooks = hooks if hooks is not None else HookRegistry.with_defaults()
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -367,9 +374,31 @@ class ToolRegistry:
                 exit_code=1,
             )
 
-        if tool_call.name not in ("write_file", "edit_file") and self.modifies_files(
-            tool_call.name
-        ):
+        raw_path = tool_call.arguments.get("path")
+        target_path = str(raw_path) if raw_path is not None else None
+        modifies = self.modifies_files(tool_call.name)
+
+        pre_outcome = self.hooks.run(
+            PRE_TOOL,
+            HookContext(
+                event=PRE_TOOL,
+                env=self.env,
+                tool_name=tool_call.name,
+                tool_call=tool_call,
+                tool_args=dict(tool_call.arguments),
+                step_index=step_index,
+                modifies_files=modifies,
+                path=target_path,
+            ),
+        )
+        if pre_outcome.blocked:
+            return ToolResult(
+                call_id=tool_call.id,
+                output=pre_outcome.combined_message or f"Tool '{tool_call.name}' blocked by hook.",
+                exit_code=1,
+            )
+
+        if tool_call.name not in ("write_file", "edit_file") and modifies:
             confirm_fn = getattr(self.env, "confirm_action", None)
             if callable(confirm_fn):
                 res = confirm_fn(tool_call.name, str(tool_call.arguments))
@@ -391,6 +420,25 @@ class ToolRegistry:
             raw_output = f"Error executing tool '{tool_call.name}': {exc}"
 
         raw_output_str = str(raw_output) if raw_output is not None else ""
+
+        post_outcome = self.hooks.run(
+            POST_TOOL,
+            HookContext(
+                event=POST_TOOL,
+                env=self.env,
+                tool_name=tool_call.name,
+                tool_call=tool_call,
+                tool_args=dict(tool_call.arguments),
+                exit_code=exit_code,
+                output=raw_output_str,
+                step_index=step_index,
+                modifies_files=modifies,
+                path=target_path,
+            ),
+        )
+        if post_outcome.messages:
+            hook_text = post_outcome.combined_message
+            raw_output_str = f"{raw_output_str}\n\n{hook_text}" if raw_output_str else hook_text
 
         try:
             raw_agent_logs_dir = getattr(self.env, "agent_logs_dir", None)

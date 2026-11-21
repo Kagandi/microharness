@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from core.model import MockModel, RateLimitError
 from core.session import (
+    DOOM_LOOP,
     ERROR,
     MAX_STEPS_EXCEEDED,
     TIMEOUT,
@@ -296,6 +297,22 @@ class TestRunSteps(unittest.TestCase):
         self.assertEqual(outcome.reason, MAX_STEPS_EXCEEDED)
         self.assertEqual(outcome.next_step, 2)
         loop.memory.add_user.assert_not_called()
+
+    def test_run_steps_surfaces_hook_stop_reason_and_detail(self):
+        """Invariant: run_steps surfaces StepTrace.stop_reason and stop_detail cleanly."""
+        tr = _Trace("blocked")
+        tr.stop_reason = DOOM_LOOP  # type: ignore[attr-defined]
+        tr.stop_detail = "Repeated identical failing bash call."  # type: ignore[attr-defined]
+        loop = _traced_loop((True, tr))
+        tracer = FakeTracer()
+
+        outcome = run_steps(MockModel([]), loop, tracer, start_step=1, max_steps=5)
+
+        self.assertFalse(outcome.finished)
+        self.assertEqual(outcome.reason, DOOM_LOOP)
+        self.assertEqual(outcome.next_step, 2)
+        self.assertEqual(outcome.detail, "Repeated identical failing bash call.")
+        self.assertEqual(len(tracer.steps), 1)
 
 
 class TestSessionResolution(unittest.TestCase):

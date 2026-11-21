@@ -847,6 +847,7 @@ class SubagentTool:
         child_registry = ToolRegistry(
             env=child_env,
             max_tool_tokens=self.parent_registry.max_tool_tokens,
+            hooks=self.parent_registry.hooks,
         )
         for name, tool in self.parent_registry.registered_tools().items():
             if name in BLOCKED_CHILD_TOOLS:

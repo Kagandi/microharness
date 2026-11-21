@@ -131,6 +131,9 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.step_retry_delay, 5.0)
         self.assertEqual(cfg.bash_timeout, 120.0)
         self.assertIsNone(cfg.subagent_max_steps)
+        self.assertEqual(cfg.hooks, ())
+        self.assertEqual(cfg.disabled_hooks, ())
+        self.assertEqual(cfg.include_default_hooks, True)
         self.assertEqual(cfg.permission_mode, "auto")
         self.assertEqual(cfg.checkpoints, True)
         self.assertIsNone(cfg.docker_memory)
@@ -346,6 +349,43 @@ class TestHarnessConfigCascade(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     self._resolve(HarnessConfig(subagent_max_steps=bad_steps))  # type: ignore[arg-type]
                 self.assertIn("subagent_max_steps", str(ctx.exception))
+
+    def test_hooks_cascade_and_validation(self):
+        """Invariant: hooks, disabled_hooks, and include_default_hooks resolve and validate cleanly."""
+        cfg_project = self._resolve(
+            HarnessConfig(),
+            global_cfg={
+                "hooks": {
+                    "post_tool": [
+                        {"name": "ruff", "matcher": "write_file", "command": "ruff check {path}"}
+                    ]
+                },
+                "disabled_hooks": ["hook_a"],
+            },
+            project_cfg={
+                "include_default_hooks": "false",
+                "hooks": [{"name": "ty", "event": "post_tool", "command": "ty check"}],
+                "disabled_hooks": ["hook_b", "hook_a"],
+            },
+        )
+        self.assertEqual(cfg_project.include_default_hooks, False)
+        self.assertEqual(cfg_project.disabled_hooks, ("hook_a", "hook_b"))
+        self.assertEqual(len(cfg_project.hooks), 2)
+        self.assertEqual(cfg_project.hooks[0]["_scope"], "global")
+        self.assertEqual(cfg_project.hooks[0]["event"], "post_tool")
+        self.assertEqual(cfg_project.hooks[1]["_scope"], "project")
+
+        cfg_explicit = self._resolve(
+            HarnessConfig(include_default_hooks=True, disabled_hooks=["hook_c"]),
+            project_cfg={"include_default_hooks": False},
+        )
+        self.assertEqual(cfg_explicit.include_default_hooks, True)
+        self.assertEqual(cfg_explicit.disabled_hooks, ("hook_c",))
+
+        with self.assertRaises(ValueError):
+            self._resolve(HarnessConfig(), project_cfg={"hooks": {"bad_event": []}})
+        with self.assertRaises(ValueError):
+            self._resolve(HarnessConfig(), project_cfg={"disabled_hooks": [123]})
 
 
 class TestProjectToolTrust(unittest.TestCase):

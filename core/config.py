@@ -13,10 +13,12 @@ from __future__ import annotations
 import json
 import math
 import sys
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.hooks import parse_hook_specs
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
 
 DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
@@ -238,6 +240,25 @@ def _coerce_bool(val: Any) -> bool:
     return bool(val)
 
 
+def _coerce_string_list(raw: Any, name: str) -> list[str]:
+    """Normalizes an optional string sequence config entry into a list of non-empty strings."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        return [cleaned] if cleaned else []
+    if not isinstance(raw, Iterable) or isinstance(raw, (bytes, Mapping)):
+        raise ValueError(f"Unsupported {name}: {raw!r}. Must be a list of hook names.")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError(f"Unsupported {name} entry: {item!r}. Must be a string.")
+        cleaned = item.strip()
+        if cleaned:
+            out.append(cleaned)
+    return out
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Settings a caller may supply explicitly. ``None`` means "not specified"."""
@@ -259,6 +280,9 @@ class HarnessConfig:
     step_retry_delay: float | None = None
     bash_timeout: float | None = None
     subagent_max_steps: int | None = None
+    hooks: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None
+    disabled_hooks: Sequence[str] | None = None
+    include_default_hooks: bool | None = None
     permission_mode: str | None = None
     checkpoints: bool | None = None
     docker_memory: str | None = None
@@ -315,6 +339,20 @@ class HarnessConfig:
                 raise ValueError(
                     f"Unsupported subagent_max_steps: {subagent_max_steps}. Must be a positive integer."
                 )
+
+        hook_specs = (
+            parse_hook_specs(layers.global_config.get("hooks"), scope="global")
+            + parse_hook_specs(layers.project_config.get("hooks"), scope="project")
+            + parse_hook_specs(self.hooks, scope="explicit")
+        )
+        disabled_seen: list[str] = []
+        for candidate in (
+            _coerce_string_list(layers.global_config.get("disabled_hooks"), "disabled_hooks")
+            + _coerce_string_list(layers.project_config.get("disabled_hooks"), "disabled_hooks")
+            + _coerce_string_list(self.disabled_hooks, "disabled_hooks")
+        ):
+            if candidate not in disabled_seen:
+                disabled_seen.append(candidate)
 
         raw_permission = c.pick(
             "permission_mode", self.permission_mode, str, "auto", require_truthy=True
@@ -392,6 +430,11 @@ class HarnessConfig:
             step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
+            hooks=tuple(hook_specs),
+            disabled_hooks=tuple(disabled_seen),
+            include_default_hooks=c.pick(
+                "include_default_hooks", self.include_default_hooks, _coerce_bool, True
+            ),
             permission_mode=permission_mode,
             checkpoints=c.pick("checkpoints", self.checkpoints, _coerce_bool, True),
             docker_memory=docker_memory,
@@ -421,6 +464,9 @@ class ResolvedConfig:
     step_retry_delay: float
     bash_timeout: float
     subagent_max_steps: int | None
+    hooks: tuple[dict[str, Any], ...] = ()
+    disabled_hooks: tuple[str, ...] = ()
+    include_default_hooks: bool = True
     permission_mode: str = "auto"
     checkpoints: bool = True
     docker_memory: str | None = None
