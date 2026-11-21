@@ -792,6 +792,142 @@ class ValidTool:
         self.assertIn("Full raw output saved to /logs/step_03_big_out_dock12.log", c_res.output)
         self.assertTrue((c_env.logs_dir / "step_03_big_out_dock12.log").is_file())
 
+    def test_read_file_tool_parallel_safe_flag(self):
+        self.assertTrue(self.registry.is_parallel_safe("read_file"))
+        self.assertFalse(self.registry.is_parallel_safe("write_file"))
+        self.assertFalse(self.registry.is_parallel_safe("edit_file"))
+        self.assertFalse(self.registry.is_parallel_safe("bash"))
+
+    def test_agent_loop_executes_read_file_calls_in_parallel(self):
+        import threading
+
+        from core.loop import AgentLoop
+        from core.memory import Memory
+        from core.model import MockModel
+
+        barrier = threading.Barrier(2, timeout=2.0)
+
+        class ConcurrentEnv(Environment):
+            def read_file(self, path_str: str, start_line: int = 1, end_line: int = -1) -> str:
+                barrier.wait()
+                return super().read_file(path_str, start_line=start_line, end_line=end_line)
+
+        c_env = ConcurrentEnv(workspace_dir=self.temp_dir, cleanup_on_teardown=False)
+        try:
+            c_env.write_file("a.txt", "alpha\n")
+            c_env.write_file("b.txt", "beta\n")
+            reg = ToolRegistry(env=c_env)
+            reg.register(ReadFileTool(c_env))
+            reg.register(EditFileTool(c_env))
+
+            model = MockModel(
+                script=[
+                    (
+                        "Reading both files.",
+                        [
+                            ToolCall(id="r1", name="read_file", arguments={"path": "a.txt"}),
+                            ToolCall(id="r2", name="read_file", arguments={"path": "b.txt"}),
+                        ],
+                    )
+                ]
+            )
+            memory = Memory(system_prompt="sys", user_prompt="read both")
+            loop = AgentLoop(model=model, memory=memory, tools=reg)
+
+            terminated, trace = loop.step(1)
+            self.assertFalse(terminated)
+            self.assertEqual(len(trace.tool_results), 2)
+            self.assertEqual(trace.tool_results[0]["call_id"], "r1")
+            self.assertEqual(trace.tool_results[0]["exit_code"], 0)
+            self.assertEqual(trace.tool_results[0]["output"], "   1 | alpha\n")
+            self.assertEqual(trace.tool_results[1]["call_id"], "r2")
+            self.assertEqual(trace.tool_results[1]["exit_code"], 0)
+            self.assertEqual(trace.tool_results[1]["output"], "   1 | beta\n")
+        finally:
+            c_env.teardown()
+
+    def test_agent_loop_runs_mixed_read_and_edit_sequentially(self):
+        from core.loop import AgentLoop
+        from core.memory import Memory
+        from core.model import MockModel
+
+        self.env.write_file("target.txt", "before\n")
+        events: list[str] = []
+
+        orig_read = self.env.read_file
+        orig_edit = self.env.edit_file
+
+        def tracked_read(*args, **kwargs):
+            events.append("read")
+            return orig_read(*args, **kwargs)
+
+        def tracked_edit(*args, **kwargs):
+            events.append("edit")
+            return orig_edit(*args, **kwargs)
+
+        with (
+            patch.object(self.env, "read_file", side_effect=tracked_read),
+            patch.object(self.env, "edit_file", side_effect=tracked_edit),
+        ):
+            model = MockModel(
+                script=[
+                    (
+                        "Read then edit.",
+                        [
+                            ToolCall(id="r1", name="read_file", arguments={"path": "target.txt"}),
+                            ToolCall(
+                                id="e1",
+                                name="edit_file",
+                                arguments={
+                                    "path": "target.txt",
+                                    "old_str": "before",
+                                    "new_str": "after",
+                                },
+                            ),
+                        ],
+                    )
+                ]
+            )
+            memory = Memory(system_prompt="sys", user_prompt="read and edit")
+            loop = AgentLoop(model=model, memory=memory, tools=self.registry)
+            _, trace = loop.step(1)
+
+        self.assertEqual(events, ["read", "edit"])
+        self.assertEqual(trace.tool_results[0]["output"], "   1 | before\n")
+        self.assertEqual(trace.tool_results[1]["exit_code"], 0)
+        self.assertEqual(self.env.read_file("target.txt"), "   1 | after\n")
+
+    def test_tool_dispatch_malformed_json_raw_arguments(self):
+        from core.model import HttpChatModel
+
+        model = HttpChatModel(base_url="http://localhost:11434/v1", model="test")
+        parsed = model._parse_tool_calls(
+            [
+                {
+                    "id": "bad_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "a.txt"'},
+                },
+                {
+                    "id": "bad_2",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": ""},
+                },
+            ]
+        )
+
+        res1 = self.registry.dispatch(parsed[0], step_index=1)
+        self.assertEqual(res1.call_id, "bad_1")
+        self.assertEqual(res1.exit_code, 1)
+        self.assertIn("Invalid JSON arguments for tool 'read_file'", res1.output)
+        self.assertNotIn("unexpected keyword argument", res1.output)
+
+        res2 = self.registry.dispatch(parsed[1], step_index=1)
+        self.assertEqual(res2.call_id, "bad_2")
+        self.assertEqual(res2.exit_code, 1)
+        self.assertIn("Invalid JSON arguments for tool 'bash'", res2.output)
+        self.assertIn("Expecting value", res2.output)
+
 
 if __name__ == "__main__":
     unittest.main()

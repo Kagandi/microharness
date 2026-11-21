@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -10,6 +11,8 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from core.editing import apply_text_edit
 
 
 @runtime_checkable
@@ -176,7 +179,7 @@ class Environment:
         path.write_text(content, encoding="utf-8")
 
     def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
-        """Replaces a unique exact occurrence of old_str with new_str in a workspace file."""
+        """Replaces a unique occurrence of old_str with new_str in a workspace file."""
         if not old_str:
             raise ValueError("old_str cannot be empty.")
         path = self.resolve_path(rel_path)
@@ -186,20 +189,9 @@ class Environment:
             raise IsADirectoryError(f"Path is a directory: {rel_path}")
 
         content = path.read_text(encoding="utf-8", errors="replace")
-        occurrences = content.count(old_str)
-        if occurrences == 0:
-            raise ValueError(
-                f"Target string not found in '{rel_path}'. Make sure old_str matches exactly, including indentation."
-            )
-        if occurrences > 1:
-            raise ValueError(
-                f"Target string found {occurrences} times in '{rel_path}'. "
-                "The target string must be unique. Provide more surrounding context lines to disambiguate."
-            )
-
-        updated_content = content.replace(old_str, new_str, 1)
+        updated_content, message = apply_text_edit(content, old_str, new_str, path_label=rel_path)
         path.write_text(updated_content, encoding="utf-8")
-        return occurrences, f"Successfully replaced 1 occurrence in '{rel_path}'."
+        return 1, message
 
     @property
     def is_running(self) -> bool:
@@ -308,6 +300,299 @@ class Environment:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.teardown()
+
+
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_SAFE_REDIRECTIONS = ("2>&1", "1>&2", "2>/dev/null", "1>/dev/null", "&>/dev/null", ">/dev/null")
+_READ_ONLY_CMDS = frozenset(
+    "ack ag basename cat cmp comm cut date diff dir dirname echo egrep false fgrep file grep "
+    "head id less ls more nl printenv printf pwd readlink realpath rg stat tail test tr tree "
+    "true type uname uniq wc which whoami [".split()
+)
+_FIND_BLOCKED = frozenset(
+    "-delete -exec -execdir -ok -okdir -fprint -fprint0 -fprintf -fls".split()
+)
+_GIT_READ_SUBS = frozenset(
+    "blame cat-file check-ignore describe diff diff-files diff-index diff-tree for-each-ref "
+    "grep help log ls-files ls-tree merge-base name-rev rev-list rev-parse shortlog show "
+    "show-ref status var version".split()
+)
+_GIT_GLOBAL_VALUE_FLAGS = frozenset(("-C", "--git-dir", "--work-tree"))
+_GIT_GLOBAL_BOOL_FLAGS = frozenset(
+    "-p --paginate --no-pager --bare --no-replace-objects --literal-pathspecs "
+    "--glob-pathspecs --noglob-pathspecs --icase-pathspecs".split()
+)
+_GIT_REF_MUTATING_FLAGS = {
+    "branch": frozenset(
+        "-d -D -m -M -c -C -u -f --delete --move --copy --edit-description "
+        "--set-upstream-to --unset-upstream --force".split()
+    ),
+    "tag": frozenset(
+        "-d -a -s -f -m -F -u --delete --annotate --sign --force --local-user".split()
+    ),
+}
+_GIT_REF_READ_FLAGS = frozenset(
+    "-l --list -v --verify --contains --no-contains --merged --no-merged".split()
+)
+
+
+def _split_shell_segments(command: str) -> tuple[bool, list[str], str]:
+    """Splits a shell command into pipeline/chain segments while rejecting unsafe syntax."""
+    segments: list[str] = []
+    cur: list[str] = []
+    in_single = in_double = False
+    i, n = 0, len(command)
+
+    def _flush() -> bool:
+        seg = "".join(cur).strip()
+        cur.clear()
+        if seg:
+            segments.append(seg)
+            return True
+        return False
+
+    while i < n:
+        ch = command[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+            cur.append(ch)
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            cur.extend((ch, command[i + 1]))
+            i += 2
+            continue
+        if ch == "`" or command.startswith("$(", i):
+            return False, [], "Command substitution is not allowed in read-only mode."
+        if in_double:
+            if ch == '"':
+                in_double = False
+            cur.append(ch)
+            i += 1
+            continue
+
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif command.startswith(("<(", ">("), i):
+            return False, [], "Process substitution is not allowed in read-only mode."
+        elif ch in ("(", ")"):
+            return False, [], "Subshells are not allowed in read-only mode."
+        elif command.startswith("<<", i):
+            return False, [], "Here-documents and here-strings are not allowed in read-only mode."
+        elif ch == "#" and (not cur or cur[-1].isspace()):
+            i = command.find("\n", i)
+            if i == -1:
+                break
+            continue
+        elif (not cur or cur[-1].isspace()) and ch in (">", "1", "2", "&"):
+            matched = next(
+                (
+                    pat
+                    for pat in _SAFE_REDIRECTIONS
+                    if command.startswith(pat, i)
+                    and (i + len(pat) == n or command[i + len(pat)] in " \t\r\n;|&")
+                ),
+                None,
+            )
+            if matched:
+                cur.append(" ")
+                i += len(matched)
+                continue
+            if ch == ">":
+                return False, [], "Output redirection is not allowed in read-only mode."
+            if ch == "&" and not command.startswith("&&", i):
+                return False, [], "Background execution `&` is not allowed in read-only mode."
+        elif ch == ">":
+            return False, [], "Output redirection is not allowed in read-only mode."
+        elif command.startswith(";;", i):
+            return False, [], "Shell `;;` operator is not allowed in read-only mode."
+        elif command.startswith(("&&", "||"), i):
+            if not _flush():
+                return False, [], "Empty command segment before operator."
+            i += 2
+            continue
+        elif ch in ("|", ";", "\n"):
+            if not _flush() and ch == "|":
+                return False, [], "Empty command segment before pipe."
+            i += 1
+            continue
+        elif ch == "&":
+            return False, [], "Background execution `&` is not allowed in read-only mode."
+
+        cur.append(ch)
+        i += 1
+
+    if in_single or in_double:
+        return False, [], "Unterminated quote in command."
+    _flush()
+    return (True, segments, "") if segments else (False, [], "Empty command.")
+
+
+def _validate_git_args(args: list[str]) -> tuple[bool, str]:
+    """Validates that a `git` invocation uses only read-only subcommands and flags."""
+    idx, n = 0, len(args)
+    while idx < n:
+        tok = args[idx]
+        if tok in _GIT_GLOBAL_VALUE_FLAGS:
+            if idx + 1 >= n:
+                return False, f"Git option '{tok}' requires an argument."
+            idx += 2
+        elif tok.startswith(("--git-dir=", "--work-tree=")) or tok in _GIT_GLOBAL_BOOL_FLAGS:
+            idx += 1
+        elif tok in ("-v", "--version", "-h", "--help"):
+            return True, ""
+        elif tok.startswith("-"):
+            return False, f"Git global option '{tok}' is not allowed in read-only mode."
+        else:
+            break
+
+    if idx >= n:
+        return False, "Bare `git` command without a read-only subcommand is not allowed."
+
+    sub, sub_args = args[idx], args[idx + 1 :]
+    if any(a == "--output" or a.startswith("--output=") or a == "--ext-diff" for a in sub_args):
+        return False, "Git output/ext-diff flags are not allowed in read-only mode."
+    if sub in _GIT_READ_SUBS:
+        return True, ""
+    if sub in _GIT_REF_MUTATING_FLAGS:
+        blocked = _GIT_REF_MUTATING_FLAGS[sub]
+        has_filter = False
+        has_pos = False
+        for arg in sub_args:
+            if arg in blocked or arg.startswith(
+                ("--set-upstream-to=", "--local-user=", "--file=", "--message=")
+            ):
+                return False, f"Git {sub} flag '{arg}' is not allowed in read-only mode."
+            if arg in _GIT_REF_READ_FLAGS or arg.startswith(
+                ("--contains=", "--no-contains=", "--merged=", "--no-merged=")
+            ):
+                has_filter = True
+            elif not arg.startswith("-"):
+                has_pos = True
+        if has_pos and not has_filter:
+            return False, f"Creating or modifying git {sub}s is not allowed in read-only mode."
+        return True, ""
+    return False, f"Git subcommand '{sub}' is not allowed in read-only mode."
+
+
+def _validate_read_only_segment(segment: str) -> tuple[bool, str]:
+    """Validates one simple command segment against the read-only command allowlist."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError as exc:
+        return False, f"Invalid shell syntax: {exc}"
+
+    while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
+        tokens.pop(0)
+    if not tokens:
+        return False, "Bare variable assignments without a read-only command are not allowed."
+
+    cmd, args = tokens[0], tokens[1:]
+    if "/" in cmd:
+        return False, f"Path-qualified executable '{cmd}' is not allowed in read-only mode."
+    if cmd in _READ_ONLY_CMDS:
+        if cmd == "rg" and any(a == "--pre" or a.startswith("--pre=") for a in args):
+            return False, "`rg --pre` is not allowed in read-only mode."
+        return True, ""
+    if cmd == "sort" and any(
+        a in ("-o", "--output") or a.startswith("--output=") or (a.startswith("-o") and len(a) > 2)
+        for a in args
+    ):
+        return False, "`sort -o/--output` is not allowed in read-only mode."
+    if cmd == "sort":
+        return True, ""
+    if cmd == "find":
+        bad = next(
+            (
+                a
+                for a in args
+                if a in _FIND_BLOCKED or a.startswith(("-exec", "-ok", "-fprint", "-fls"))
+            ),
+            None,
+        )
+        return (False, f"`find {bad}` is not allowed in read-only mode.") if bad else (True, "")
+    if cmd == "fd":
+        bad = next(
+            (
+                a
+                for a in args
+                if a in ("-x", "--exec", "-X", "--exec-batch")
+                or a.startswith(("--exec=", "--exec-batch="))
+            ),
+            None,
+        )
+        return (False, f"`fd {bad}` is not allowed in read-only mode.") if bad else (True, "")
+    if cmd == "git":
+        return _validate_git_args(args)
+    return False, f"Command '{cmd}' is not allowed in read-only mode."
+
+
+def validate_read_only_bash(command: str) -> tuple[bool, str]:
+    """Checks whether ``command`` consists exclusively of non-mutating read-only commands."""
+    if not isinstance(command, str) or not command.strip():
+        return False, "Empty command."
+    ok, segments, err = _split_shell_segments(command)
+    if not ok:
+        return False, err
+    for segment in segments:
+        seg_ok, seg_err = _validate_read_only_segment(segment)
+        if not seg_ok:
+            return False, seg_err
+    return True, ""
+
+
+class ReadOnlyEnvironment(Environment):
+    """Read-only Environment wrapper that blocks file writes and mutating shell commands."""
+
+    def __init__(self, inner: Environment):
+        self._inner = inner
+        self.workspace_dir = inner.workspace_dir
+        self.logs_dir = inner.logs_dir
+        self.allowed_read_dirs = list(inner.allowed_read_dirs)
+        self.cleanup_on_teardown = False
+        self._is_temp = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._inner.is_running
+
+    @property
+    def agent_logs_dir(self) -> str:
+        return self._inner.agent_logs_dir
+
+    def populate_files(self, files: dict[str, str]) -> None:
+        raise PermissionError("Workspace is read-only; write operations are not permitted.")
+
+    def resolve_path(self, rel_path: str) -> Path:
+        raise PermissionError("Workspace is read-only; write operations are not permitted.")
+
+    def resolve_read_path(self, path_str: str) -> Path:
+        return self._inner.resolve_read_path(path_str)
+
+    def read_file(self, path_str: str, start_line: int = 1, end_line: int = -1) -> str:
+        return self._inner.read_file(path_str, start_line=start_line, end_line=end_line)
+
+    def write_file(self, rel_path: str, content: str) -> None:
+        raise PermissionError("Workspace is read-only; write operations are not permitted.")
+
+    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
+        raise PermissionError("Workspace is read-only; write operations are not permitted.")
+
+    def get_git_patch(self) -> str | None:
+        return None
+
+    def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+        allowed, reason = validate_read_only_bash(command)
+        if not allowed:
+            return 1, f"Error: Read-only environment blocked bash command: {reason}"
+        return self._inner.execute_bash(command, timeout=timeout)
+
+    def teardown(self) -> None:
+        return None
 
 
 def is_docker_available() -> bool:

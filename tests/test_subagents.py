@@ -179,13 +179,21 @@ class TestSubagentParsingAndDiscovery(unittest.TestCase):
             self.assertEqual(agents["worker"].scope, "builtin")
             self.assertEqual(agents["deploy-checker"].scope, "global")
 
-            # Project reviewer shadows global and builtin
+            # Project reviewer shadows global and builtin and retains read_only=True by default
             rev = agents["reviewer"]
             self.assertEqual(rev.scope, "project")
             self.assertEqual(rev.description, "Project reviewer")
             self.assertEqual(rev.tools, ("read_file", "bash"))
             self.assertEqual(rev.effort, "high")
             self.assertEqual(rev.system_prompt, "Project prompt")
+            self.assertTrue(rev.read_only)
+
+            # Explicit read_only: false opts a shadowed read-only preset out
+            opted_out = parse_subagent_markdown(
+                "---\nread_only: false\n---\nWritable reviewer",
+                default_name="reviewer",
+            )
+            self.assertFalse(opted_out.read_only)
 
             # Directory-based AGENT.md works
             cdir = agents["custom-dir"]
@@ -483,7 +491,8 @@ class TestSubagentToolExecution(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("max_steps_exceeded in 1 step(s)", out)
 
-        # Omitted max_steps has no artificial cap (can run > 15 steps)
+        # Default subagent step budget remains unbounded (None) unless configured
+        self.assertIsNone(DEFAULT_SUBAGENT_MAX_STEPS)
         twenty_step_model = MockModel(
             [
                 (f"Step {i}", [ToolCall(id=f"b{i}", name="bash", arguments={"command": "echo ok"})])
@@ -500,6 +509,40 @@ class TestSubagentToolExecution(unittest.TestCase):
         code_unbounded, out_unbounded = unbounded_tool.execute(agent="worker", task="Run 19 steps")
         self.assertEqual(code_unbounded, 0)
         self.assertIn("completed in 19 step(s)", out_unbounded)
+
+        # Subagent preset max_steps overrides default_max_steps, and explicit caller max_steps overrides preset
+        custom_agents = {
+            "capped": Subagent(
+                name="capped",
+                description="Preset-capped worker",
+                system_prompt="Work",
+                scope="project",
+                max_steps=2,
+            )
+        }
+        three_step_model = MockModel(
+            [
+                ("Step 1", [ToolCall(id="b1", name="bash", arguments={"command": "echo 1"})]),
+                ("Step 2", [ToolCall(id="b2", name="bash", arguments={"command": "echo 2"})]),
+                ("Done on step 3", []),
+            ]
+        )
+        capped_tool = SubagentTool(
+            env=self.env,
+            parent_registry=self.registry,
+            subagents=custom_agents,
+            model_getter=lambda: three_step_model,
+        )
+        code_preset, out_preset = capped_tool.execute(agent="capped", task="Use preset cap")
+        self.assertEqual(code_preset, 1)
+        self.assertIn("max_steps_exceeded in 2 step(s)", out_preset)
+
+        three_step_model.reset()
+        code_override, out_override = capped_tool.execute(
+            agent="capped", task="Override preset cap", max_steps=3
+        )
+        self.assertEqual(code_override, 0)
+        self.assertIn("completed in 3 step(s)", out_override)
 
     def test_parallel_tasks_batch_and_parallel_agent_loop_calls(self):
         """Invariant: both `tasks=[...]` and multiple `subagent` tool calls in one step run concurrently."""
@@ -571,6 +614,222 @@ class TestSubagentToolExecution(unittest.TestCase):
         self.assertEqual(len(trace1.tool_results), 2)
         self.assertIn("child:branch-1", trace1.tool_results[0]["output"])
         self.assertIn("child:branch-2", trace1.tool_results[1]["output"])
+
+    def test_read_only_enforcement_blocks_shell_mutations_and_modifies_files_tools(self):
+        """Invariant: explore, reviewer, and read_only=True subagents block mutating bash commands and file-modifying tools."""
+        (self.ws / "keep.txt").write_text("original\n", encoding="utf-8")
+
+        class CustomMutatingTool:
+            name = "custom_mutator"
+            description = "Mutates workspace"
+            modifies_files = True
+            parameters = {"type": "object", "properties": {}}
+
+            def execute(self) -> tuple[int, str]:
+                (self.ws / "mutated.txt").write_text("bad", encoding="utf-8")  # pragma: no cover
+                return 0, "mutated"
+
+        self.registry.register(CustomMutatingTool())
+
+        doc = "---\ndescription: Custom RO\ntools: '*'\nread_only: true\n---\nRead only."
+        custom_ro = parse_subagent_markdown(doc, default_name="auditor", scope="project")
+        self.assertTrue(custom_ro.read_only)
+
+        subagents = discover_subagents(self.ws, None)
+        subagents["auditor"] = custom_ro
+        self.assertTrue(subagents["explore"].read_only)
+        self.assertTrue(subagents["reviewer"].read_only)
+        self.assertFalse(subagents["worker"].read_only)
+
+        seen_tools_by_agent: dict[str, list[str]] = {}
+
+        class MutatingAttemptModel:
+            def __init__(self, agent_name: str) -> None:
+                self.agent_name = agent_name
+                self.step = 0
+
+            def generate(self, messages, tools):
+                self.step += 1
+                seen_tools_by_agent[self.agent_name] = [t["function"]["name"] for t in tools]
+                if self.step == 1:
+                    return "Trying read and mutating commands", [
+                        ToolCall(
+                            id="ok1",
+                            name="bash",
+                            arguments={"command": "cat keep.txt"},
+                        ),
+                        ToolCall(
+                            id="bad1",
+                            name="bash",
+                            arguments={"command": "echo hacked > hacked.txt"},
+                        ),
+                        ToolCall(
+                            id="bad2",
+                            name="bash",
+                            arguments={"command": "rm keep.txt"},
+                        ),
+                    ]
+                return f"Done: {messages[-3].content}", []
+
+        for agent_name in ("explore", "reviewer", "auditor"):
+            model = MutatingAttemptModel(agent_name)
+            tool = SubagentTool(
+                env=self.env,
+                parent_registry=self.registry,
+                subagents=subagents,
+                model_getter=lambda m=model: m,  # type: ignore[misc]
+                run_dir_getter=lambda: self.runs / f"ro_{agent_name}",
+            )
+            code, out = tool.execute(agent=agent_name, task="Attempt mutations")
+            self.assertEqual(code, 0)
+            self.assertIn("original", out)
+            self.assertNotIn("write_file", seen_tools_by_agent[agent_name])
+            self.assertNotIn("edit_file", seen_tools_by_agent[agent_name])
+            self.assertNotIn("custom_mutator", seen_tools_by_agent[agent_name])
+            self.assertFalse((self.ws / "hacked.txt").exists())
+            self.assertEqual((self.ws / "keep.txt").read_text(encoding="utf-8"), "original\n")
+
+            traces = list((self.runs / f"ro_{agent_name}" / "subagents").glob("*/trace.json"))
+            self.assertEqual(len(traces), 1)
+            trace = json.loads(traces[0].read_text(encoding="utf-8"))
+            results = trace["steps"][0]["tool_results"]
+            self.assertEqual(results[0]["exit_code"], 0)
+            self.assertEqual(results[0]["output"].strip(), "original")
+            self.assertEqual(results[1]["exit_code"], 1)
+            self.assertIn("Read-only environment blocked bash command", results[1]["output"])
+            self.assertEqual(results[2]["exit_code"], 1)
+            self.assertIn("Read-only environment blocked bash command", results[2]["output"])
+
+    def test_parallel_worker_guard_and_agent_loop_serialization(self):
+        """Invariant: parallel `tasks` rejects write-capable batches and concurrent AgentLoop worker calls serialize safely."""
+        import time
+
+        subagents = discover_subagents(self.ws, None)
+        calls_executed: list[str] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                calls_executed.append(messages[1].content)
+                return f"done:{messages[1].content}", []
+
+        tool = SubagentTool(
+            env=self.env,
+            parent_registry=self.registry,
+            subagents=subagents,
+            model_getter=lambda: RecordingModel(),
+        )
+        self.registry.register(tool)
+
+        # 1. Parallel batch with multiple workers or mixed worker + explore is rejected before running
+        for batch in (
+            [{"agent": "worker", "task": "w1"}, {"agent": "worker", "task": "w2"}],
+            [{"agent": "worker", "task": "w1"}, {"agent": "explore", "task": "e1"}],
+        ):
+            code, err = tool.execute(tasks=batch)
+            self.assertEqual(code, 1)
+            self.assertIn("cannot run write-capable subagent(s)", err)
+            self.assertEqual(calls_executed, [])
+
+        # 2. Single-item `tasks` list with worker is allowed
+        code_one, out_one = tool.execute(tasks=[{"agent": "worker", "task": "single-write"}])
+        self.assertEqual(code_one, 0)
+        self.assertIn("done:single-write", out_one)
+
+        # 3. Multiple `subagent(agent="worker")` calls in one AgentLoop step serialize on _write_lock
+        active_workers = 0
+        max_concurrent_workers = 0
+        counter_lock = threading.Lock()
+
+        class SerializedWorkerModel:
+            def __init__(self) -> None:
+                self.parent_step = 0
+
+            def generate(self, messages, tools):
+                nonlocal active_workers, max_concurrent_workers
+                tool_names = {t["function"]["name"] for t in tools}
+                if "subagent" in tool_names:
+                    self.parent_step += 1
+                    return "Dispatching two workers", [
+                        ToolCall(
+                            id="w1",
+                            name="subagent",
+                            arguments={"agent": "worker", "task": "edit-1"},
+                        ),
+                        ToolCall(
+                            id="w2",
+                            name="subagent",
+                            arguments={"agent": "worker", "task": "edit-2"},
+                        ),
+                    ]
+                with counter_lock:
+                    active_workers += 1
+                    max_concurrent_workers = max(max_concurrent_workers, active_workers)
+                try:
+                    time.sleep(0.05)
+                    return f"finished:{messages[1].content}", []
+                finally:
+                    with counter_lock:
+                        active_workers -= 1
+
+        ser_model = SerializedWorkerModel()
+        ser_tool = SubagentTool(
+            env=self.env,
+            parent_registry=self.registry,
+            subagents=subagents,
+            model_getter=lambda: ser_model,
+        )
+        ser_registry = ToolRegistry(env=self.env)
+        ser_registry.register(ser_tool)
+        mem = Memory(system_prompt="SYS", user_prompt="Run workers")
+        loop = AgentLoop(model=ser_model, memory=mem, tools=ser_registry)
+        finished, trace = loop.step(1)
+        self.assertFalse(finished)
+        self.assertEqual(len(trace.tool_results), 2)
+        self.assertEqual(max_concurrent_workers, 1)
+        self.assertEqual([r["exit_code"] for r in trace.tool_results], [0, 0])
+
+    def test_harness_subagent_max_steps_and_negative_default_max_steps(self):
+        """Invariant: Harness.subagent_max_steps configures SubagentTool.default_max_steps and invalid defaults raise ValueError."""
+        with self.assertRaises(ValueError):
+            SubagentTool(
+                env=self.env,
+                parent_registry=self.registry,
+                subagents=discover_subagents(self.ws, None),
+                model_getter=lambda: MockModel([]),
+                default_max_steps=0,
+            )
+
+        class TwoStepLoopModel:
+            def generate(self, messages, tools):
+                tool_names = {t["function"]["name"] for t in tools}
+                if "subagent" in tool_names:
+                    if len(messages) == 2:
+                        return "Run worker", [
+                            ToolCall(
+                                id="s1",
+                                name="subagent",
+                                arguments={"agent": "worker", "task": "Loop"},
+                            )
+                        ]
+                    return f"Subagent result: {messages[-1].content}", []
+                return "Step", [ToolCall(id="b1", name="bash", arguments={"command": "echo hi"})]
+
+        harness = Harness(
+            model=TwoStepLoopModel(),
+            workspace_dir=self.ws,
+            runs_dir=self.runs,
+            sandbox=False,
+            verbose=False,
+            subagent_max_steps=2,
+        )
+        self.assertEqual(harness.subagent_max_steps, 2)
+        res = harness.run(Task(id="sub_budget", instruction="Test subagent cap", max_steps=5))
+        self.assertTrue(res.passed)
+        trace_data = json.loads(Path(res.trace_path).read_text(encoding="utf-8"))
+        self.assertIn(
+            "max_steps_exceeded in 2 step(s)",
+            trace_data["steps"][0]["tool_results"][0]["output"],
+        )
 
 
 class TestSubagentInteractiveAndTUI(unittest.TestCase):

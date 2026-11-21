@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.environment import DockerEnvironment, Environment, is_docker_available
+from core.environment import (
+    DockerEnvironment,
+    Environment,
+    ReadOnlyEnvironment,
+    is_docker_available,
+    validate_read_only_bash,
+)
 
 
 class TestEnvironment(unittest.TestCase):
@@ -159,10 +165,139 @@ class TestEnvironment(unittest.TestCase):
         self.assertIn("Target string not found", str(ctx.exception))
 
     def test_edit_file_ambiguous_multiple_matches_raises_value_error(self):
-        self.env.write_file("code.py", "line = 10\nline = 10\n")
+        self.env.write_file("code.py", "alpha\nline = 10\nbeta\nline = 10\ngamma\n")
         with self.assertRaises(ValueError) as ctx:
             self.env.edit_file("code.py", "line = 10", "line = 20")
-        self.assertIn("must be unique", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("found 2 times", msg)
+        self.assertIn("at lines: 2, 4", msg)
+        self.assertIn("must be unique", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "code.py").read_text(encoding="utf-8"),
+            "alpha\nline = 10\nbeta\nline = 10\ngamma\n",
+        )
+
+    def test_edit_file_trailing_whitespace_and_crlf_fallback(self):
+        self.env.write_file("code.py", "def greet():\n    msg = 'hi'   \n    return msg\n")
+        count, msg = self.env.edit_file(
+            "code.py",
+            "    msg = 'hi'\r\n    return msg",
+            "    msg = 'hello'\r\n    return msg",
+        )
+        self.assertEqual(count, 1)
+        self.assertIn("Successfully replaced", msg)
+        self.assertIn("whitespace normalization", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "code.py").read_text(encoding="utf-8"),
+            "def greet():\n    msg = 'hello'\n    return msg\n",
+        )
+
+    def test_edit_file_dedent_reindent_fallback(self):
+        original = (
+            "class Calc:\n    def add(self, a, b):\n        res = a + b\n        return res\n"
+        )
+        self.env.write_file("calc.py", original)
+        count, msg = self.env.edit_file(
+            "calc.py",
+            "def add(self, a, b):\n    res = a + b\n    return res",
+            "def add(self, a, b):\n    res = a + b + 1\n    return res",
+        )
+        self.assertEqual(count, 1)
+        self.assertIn("Successfully replaced", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "calc.py").read_text(encoding="utf-8"),
+            (
+                "class Calc:\n"
+                "    def add(self, a, b):\n"
+                "        res = a + b + 1\n"
+                "        return res\n"
+            ),
+        )
+
+    def test_edit_file_stripped_line_fallback_mixed_indent(self):
+        self.env.write_file("mixed.py", "def f():\n    if True:\n        return 1\n")
+        count, _ = self.env.edit_file(
+            "mixed.py",
+            "  if True:\n    return 1",
+            "  if True:\n      return 2",
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "mixed.py").read_text(encoding="utf-8"),
+            "def f():\n    if True:\n        return 2\n",
+        )
+
+    def test_edit_file_normalized_ambiguous_rejected(self):
+        original = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x   \n"
+        self.env.write_file("dup.py", original)
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file("dup.py", "x = 1\nreturn x", "x = 2\nreturn x")
+        msg = str(ctx.exception)
+        self.assertIn("matched 2 times", msg)
+        self.assertIn("at lines: 2, 6", msg)
+        self.assertIn("must be unique", msg)
+        self.assertEqual(Path(self.temp_dir, "dup.py").read_text(encoding="utf-8"), original)
+
+    def test_edit_file_zero_matches_includes_closest_block_and_lines(self):
+        self.env.write_file(
+            "orders.py",
+            (
+                "def subtotal(price, qty):\n"
+                "    if qty <= 0:\n"
+                "        return 0\n"
+                "    # compute\n"
+                "    total = price * qty\n"
+                "    return total\n"
+                "\n"
+                "def done():\n"
+                "    pass\n"
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file(
+                "orders.py",
+                "    total = price * quantity\n    return total",
+                "    total = price * quantity\n    return total + 1",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("Target string not found", msg)
+        self.assertIn("lines 5-6", msg)
+        self.assertIn("   5 |     total = price * qty", msg)
+        self.assertIn("   6 |     return total", msg)
+
+    def test_edit_file_zero_matches_negative_cases(self):
+        # Empty file
+        self.env.write_file("empty.py", "")
+        with self.assertRaises(ValueError) as ctx_empty:
+            self.env.edit_file("empty.py", "x = 1", "x = 2")
+        self.assertIn("File is empty", str(ctx_empty.exception))
+
+        # Completely unrelated target string
+        self.env.write_file("small.py", "x = 1\n")
+        with self.assertRaises(ValueError) as ctx_unrel:
+            self.env.edit_file("small.py", "zzzzzzzzzzzz", "y = 2")
+        self.assertIn("No close match found", str(ctx_unrel.exception))
+
+        # Whitespace-only target must never match blank lines via normalization
+        self.env.write_file("blanks.py", "a = 1\n\nb = 2\n")
+        with self.assertRaises(ValueError) as ctx_ws:
+            self.env.edit_file("blanks.py", "   \n", "c = 3\n")
+        self.assertIn("Target string not found", str(ctx_ws.exception))
+
+    def test_edit_file_normalized_deletion_and_no_trailing_newline(self):
+        self.env.write_file("no_eol.py", "a = 1\n    b = 2  ")
+        count, _ = self.env.edit_file("no_eol.py", "      b = 2", "      b = 3")
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "no_eol.py").read_text(encoding="utf-8"), "a = 1\n    b = 3"
+        )
+
+        self.env.write_file("del.py", "a = 1\n    b = 2\nc = 3\n")
+        count_del, _ = self.env.edit_file("del.py", "      b = 2", "")
+        self.assertEqual(count_del, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "del.py").read_text(encoding="utf-8"), "a = 1\nc = 3\n"
+        )
 
     def test_edit_file_empty_target_raises_value_error(self):
         self.env.write_file("code.py", "data = 'hello'\n")
@@ -572,6 +707,114 @@ class TestEnvironment(unittest.TestCase):
             # Mount is read-only inside container
             ro_code, _ = d_env.execute_bash("touch /logs/should_fail.log")
             self.assertNotEqual(ro_code, 0)
+
+
+class TestReadOnlyEnvironment(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.inner = Environment(workspace_dir=self.temp_dir, cleanup_on_teardown=True)
+        self.inner.populate_files({"sample.txt": "alpha\nbeta\ngamma\n"})
+        self.ro = ReadOnlyEnvironment(self.inner)
+
+    def tearDown(self):
+        self.inner.teardown()
+
+    def test_reads_succeed_and_writes_are_rejected(self):
+        """Invariant: ReadOnlyEnvironment allows reads and blocks write_file/edit_file/populate_files/teardown."""
+        self.assertEqual(self.ro.workspace_dir, self.inner.workspace_dir)
+        self.assertEqual(self.ro.logs_dir, self.inner.logs_dir)
+        self.assertTrue(self.ro.is_running)
+        self.assertEqual(
+            self.ro.read_file("sample.txt"),
+            "   1 | alpha\n   2 | beta\n   3 | gamma\n",
+        )
+
+        with self.assertRaises(PermissionError):
+            self.ro.resolve_path("new.txt")
+        with self.assertRaises(PermissionError):
+            self.ro.write_file("new.txt", "blocked")
+        with self.assertRaises(PermissionError):
+            self.ro.edit_file("sample.txt", "alpha", "omega")
+        with self.assertRaises(PermissionError):
+            self.ro.populate_files({"a.txt": "1"})
+
+        self.assertFalse((self.inner.workspace_dir / "new.txt").exists())
+        self.assertEqual(
+            (self.inner.workspace_dir / "sample.txt").read_text(encoding="utf-8"),
+            "alpha\nbeta\ngamma\n",
+        )
+        self.assertIsNone(self.ro.get_git_patch())
+
+        # teardown on wrapper must not destroy parent's workspace
+        self.ro.teardown()
+        self.assertTrue(self.inner.workspace_dir.exists())
+
+    def test_validate_read_only_bash_allows_safe_commands_and_blocks_mutations(self):
+        """Invariant: read-only bash allows inspection commands/pipelines and blocks mutating or arbitrary commands."""
+        for cmd in [
+            "ls -la",
+            "cat sample.txt | head -n 2",
+            'grep -n "alpha > beta" sample.txt',
+            "find . -name '*.txt' 2>&1",
+            "find . \\( -name '*.txt' -o -name '*.py' \\)",
+            "git status",
+            "git -C . log -n 5 --oneline",
+            "git diff HEAD",
+            "git branch -a",
+            "git branch --merged main",
+            "git tag -l",
+            "sort sample.txt >/dev/null",
+        ]:
+            ok, err = validate_read_only_bash(cmd)
+            self.assertTrue(ok, f"expected allowed for {cmd!r}, got error: {err}")
+
+        for bad_cmd in [
+            "",
+            "   ",
+            "rm sample.txt",
+            "touch new.txt",
+            "sed -i 's/alpha/omega/' sample.txt",
+            "echo hacked > hacked.txt",
+            "echo hacked >> sample.txt",
+            "cat sample.txt | tee copy.txt",
+            "ls && rm sample.txt",
+            "echo $(rm sample.txt)",
+            'echo "$(touch x)"',
+            "echo `touch x`",
+            "(rm sample.txt)",
+            "cat <<EOF\nhi\nEOF",
+            "ls &",
+            "find . -delete",
+            "find . -exec rm {} +",
+            "fd -x rm",
+            "sort -o sample.txt sample.txt",
+            "rg --pre=sh alpha",
+            "python3 -c \"open('x','w').write('y')\"",
+            "./local_script.sh",
+            "git checkout -- sample.txt",
+            "git commit -m test",
+            "git branch new-branch",
+            "git branch -D main",
+            "git tag v1.0",
+            "git diff --output=patch.diff",
+            "git -c core.fsmonitor=evil status",
+            "FOO=bar",
+            "ls 'unterminated",
+        ]:
+            ok, reason = validate_read_only_bash(bad_cmd)
+            self.assertFalse(ok, f"expected blocked for {bad_cmd!r}")
+            self.assertNotEqual(reason, "")
+
+    def test_execute_bash_in_read_only_environment(self):
+        """Invariant: ReadOnlyEnvironment executes allowed bash commands and blocks mutating ones without touching disk."""
+        code_ok, out_ok = self.ro.execute_bash("cat sample.txt | wc -l")
+        self.assertEqual(code_ok, 0)
+        self.assertEqual(out_ok.strip(), "3")
+
+        code_bad, out_bad = self.ro.execute_bash("echo pwn > pwn.txt")
+        self.assertEqual(code_bad, 1)
+        self.assertIn("Read-only environment blocked bash command", out_bad)
+        self.assertFalse((self.inner.workspace_dir / "pwn.txt").exists())
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ class TestPackageExports(unittest.TestCase):
     def test_package_metadata(self):
         import core
 
-        self.assertEqual(microharness.__version__, "0.1.4")
-        self.assertEqual(core.__version__, "0.1.4")
+        self.assertEqual(microharness.__version__, "0.1.6")
+        self.assertEqual(core.__version__, "0.1.6")
         self.assertEqual(
             microharness.__all__, ["Harness", "Task", "ToolCall", "RunResult", "__version__"]
         )
