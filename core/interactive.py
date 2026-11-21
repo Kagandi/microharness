@@ -23,6 +23,7 @@ from core.subagents import Subagent, format_subagent_desc, resolve_subagent_comm
 from core.tracer import Tracer
 
 if TYPE_CHECKING:
+    from core.checkpoints import CheckpointManager
     from core.harness import Harness
 
 # What the caller should do after dispatching one line of input.
@@ -35,6 +36,7 @@ REASONING_USAGE = (
     "/reasoning xhigh | /reasoning max | /reasoning off | /reasoning <tokens>"
 )
 CACHE_USAGE = "  • Usage: /cache 5m | /cache 1h | /cache off"
+PERMISSION_USAGE = "  • Usage: /permissions auto | /permissions ask | /permissions read-only"
 
 CACHE_TTL_DESCRIPTIONS = {"5m": "5 minutes (Standard Ephemeral)", "1h": "1 hour (Extended Beta)"}
 
@@ -105,10 +107,12 @@ class TuiUI:
         state: Any,
         redraw: Callable[[], None] | None = None,
         secret_prompter: Callable[[str], str | None] | None = None,
+        confirm_prompter: Callable[[str], bool] | None = None,
     ):
         self.state = state
         self._redraw = redraw or (lambda: None)
         self._secret_prompter = secret_prompter
+        self._confirm_prompter = confirm_prompter
 
     @property
     def supports_secret_prompt(self) -> bool:
@@ -120,6 +124,17 @@ class TuiUI:
         if self._secret_prompter is not None:
             return self._secret_prompter(prompt)
         return None
+
+    @property
+    def supports_confirm_prompt(self) -> bool:
+        """True when an interactive y/N confirmation callback is attached."""
+        return self._confirm_prompter is not None
+
+    def confirm_action(self, action: str, detail: str) -> bool:
+        """Prompts the user to approve or deny a guarded action."""
+        if self._confirm_prompter is not None:
+            return bool(self._confirm_prompter(f"Allow {action}? {detail}"))
+        return False
 
     def info(self, text: str) -> None:
         self.state.add_system(text)
@@ -166,6 +181,7 @@ class CommandContext:
     tracer: Tracer | None = None
     turns: TurnState = field(default_factory=TurnState)
     runner: Any = None
+    checkpoints: CheckpointManager | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +278,21 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         "/new",
         "Clear conversation history while keeping workspace files",
         "_cmd_new",
+    ),
+    CommandSpec(
+        "undo",
+        ("/undo",),
+        "/undo",
+        "Revert workspace changes from the last agent turn",
+        "_cmd_undo",
+    ),
+    CommandSpec(
+        "mode",
+        ("/permissions", "/permission", "/mode"),
+        "/permissions [auto|ask|ro]",
+        "View or switch host execution permission mode",
+        "_cmd_mode",
+        takes_args=True,
     ),
     CommandSpec(
         "skill",
@@ -568,6 +599,56 @@ class CommandRouter:
     def _cmd_new(self, _arg: str) -> str:
         self.ctx.memory.reset()
         self.ctx.ui.info("✨ Started a fresh conversation context (workspace files preserved).")
+        self.ctx.ui.refresh()
+        return SKIP
+
+    def _cmd_undo(self, _arg: str) -> str:
+        checkpoints = self.ctx.checkpoints
+        if checkpoints is None:
+            if getattr(self.ctx.harness, "sandbox", False) is True:
+                self.ctx.ui.info("ℹ️ Undo checkpoints are disabled in sandbox mode.")
+            else:
+                self.ctx.ui.info("ℹ️ No workspace checkpoints available.")
+            self.ctx.ui.refresh()
+            return SKIP
+
+        result = checkpoints.undo(memory=self.ctx.memory)
+        if result.ok:
+            self.ctx.ui.success(result.message)
+            runner = getattr(self.ctx, "runner", None)
+            refresh = getattr(runner, "refresh", None) if runner is not None else None
+            if callable(refresh):
+                refresh()
+            else:
+                state = getattr(self.ctx.ui, "state", None)
+                update = getattr(state, "update_status", None) if state is not None else None
+                if callable(update):
+                    update(self.ctx.memory.stats(), self.ctx.harness.get_cache_stats())
+        else:
+            self.ctx.ui.info(f"ℹ️ {result.message}")
+        self.ctx.ui.refresh()
+        return SKIP
+
+    def _cmd_mode(self, arg: str) -> str:
+        harness = self.ctx.harness
+        if not arg:
+            current = harness.get_permission_mode()
+            self.ctx.ui.info(f"🛡️ Permission Mode: {current}")
+            self.ctx.ui.status(PERMISSION_USAGE)
+            self.ctx.ui.refresh()
+            return SKIP
+
+        try:
+            mode = harness.set_permission_mode(arg)
+        except ValueError as exc:
+            self.ctx.ui.error(str(exc))
+            self.ctx.ui.refresh()
+            return SKIP
+
+        self.ctx.ui.success(f"🛡️ Permission mode switched to: {mode}")
+        state = getattr(self.ctx.ui, "state", None)
+        if state is not None:
+            state.permission_mode = mode
         self.ctx.ui.refresh()
         return SKIP
 

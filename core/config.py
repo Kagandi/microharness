@@ -11,6 +11,7 @@ Settings resolve through a single precedence chain (highest first):
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,15 @@ DISABLED_VALUES: frozenset[str] = frozenset(
 )
 
 REASONING_CHOICES: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+PERMISSION_MODES: frozenset[str] = frozenset({"auto", "ask", "read-only"})
+_PERMISSION_MODE_ALIASES: dict[str, str] = {
+    "auto": "auto",
+    "ask": "ask",
+    "read-only": "read-only",
+    "readonly": "read-only",
+    "read_only": "read-only",
+}
 
 PROJECT_TRUST_NOTICE = (
     "Project config attempted to enable 'trust_project_tools'. "
@@ -249,6 +259,11 @@ class HarnessConfig:
     step_retry_delay: float | None = None
     bash_timeout: float | None = None
     subagent_max_steps: int | None = None
+    permission_mode: str | None = None
+    checkpoints: bool | None = None
+    docker_memory: str | None = None
+    docker_cpus: float | None = None
+    docker_pids_limit: int | None = None
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
@@ -301,6 +316,56 @@ class HarnessConfig:
                     f"Unsupported subagent_max_steps: {subagent_max_steps}. Must be a positive integer."
                 )
 
+        raw_permission = c.pick(
+            "permission_mode", self.permission_mode, str, "auto", require_truthy=True
+        )
+        permission_mode = normalize_permission_mode(raw_permission)
+
+        raw_memory = c.pick("docker_memory", self.docker_memory, str, None, require_truthy=True)
+        docker_memory = raw_memory.strip() if isinstance(raw_memory, str) else None
+        if docker_memory == "":
+            docker_memory = None
+
+        raw_cpus = (
+            self.docker_cpus if self.docker_cpus is not None else layers.merged.get("docker_cpus")
+        )
+        if raw_cpus is None or raw_cpus == "":
+            docker_cpus: float | None = None
+        elif isinstance(raw_cpus, bool):
+            raise ValueError(f"Unsupported docker_cpus: {raw_cpus!r}. Must be greater than 0.")
+        else:
+            try:
+                docker_cpus = float(raw_cpus)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Unsupported docker_cpus: {raw_cpus!r}. Must be greater than 0."
+                ) from exc
+            if not math.isfinite(docker_cpus) or docker_cpus <= 0:
+                raise ValueError(f"Unsupported docker_cpus: {docker_cpus}. Must be greater than 0.")
+
+        raw_pids = (
+            self.docker_pids_limit
+            if self.docker_pids_limit is not None
+            else layers.merged.get("docker_pids_limit")
+        )
+        if raw_pids is None or raw_pids == "":
+            docker_pids_limit: int | None = None
+        elif isinstance(raw_pids, (bool, float)):
+            raise ValueError(
+                f"Unsupported docker_pids_limit: {raw_pids!r}. Must be a positive integer."
+            )
+        else:
+            try:
+                docker_pids_limit = int(raw_pids)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Unsupported docker_pids_limit: {raw_pids!r}. Must be a positive integer."
+                ) from exc
+            if docker_pids_limit <= 0:
+                raise ValueError(
+                    f"Unsupported docker_pids_limit: {docker_pids_limit}. Must be a positive integer."
+                )
+
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
             docker=c.pick("docker", self.docker, _coerce_bool, False),
@@ -327,6 +392,11 @@ class HarnessConfig:
             step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
             bash_timeout=bash_timeout,
             subagent_max_steps=subagent_max_steps,
+            permission_mode=permission_mode,
+            checkpoints=c.pick("checkpoints", self.checkpoints, _coerce_bool, True),
+            docker_memory=docker_memory,
+            docker_cpus=docker_cpus,
+            docker_pids_limit=docker_pids_limit,
         )
 
 
@@ -351,6 +421,11 @@ class ResolvedConfig:
     step_retry_delay: float
     bash_timeout: float
     subagent_max_steps: int | None
+    permission_mode: str = "auto"
+    checkpoints: bool = True
+    docker_memory: str | None = None
+    docker_cpus: float | None = None
+    docker_pids_limit: int | None = None
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:
@@ -384,4 +459,19 @@ def normalize_reasoning_effort(effort: str | None) -> str | None:
         return val
     raise ValueError(
         f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', 'xhigh', 'max', numeric token budget, or 'off'."
+    )
+
+
+def normalize_permission_mode(mode: str | None) -> str:
+    """Normalizes a permission mode to ``'auto'``, ``'ask'``, or ``'read-only'``."""
+    if mode is None:
+        return "auto"
+    val = str(mode).strip().lower()
+    if not val:
+        return "auto"
+    canonical = _PERMISSION_MODE_ALIASES.get(val)
+    if canonical is not None:
+        return canonical
+    raise ValueError(
+        f"Unsupported permission_mode: '{mode}'. Valid options: 'auto', 'ask', 'read-only'."
     )

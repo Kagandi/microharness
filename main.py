@@ -318,6 +318,29 @@ def _add_sandbox_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Allow executing custom tool plugins defined in the project workspace (default: false)",
     )
+    parser.add_argument(
+        "--permission-mode",
+        choices=["auto", "ask", "read-only"],
+        default=None,
+        help="Host execution permission mode: 'auto' (default), 'ask', or 'read-only'",
+    )
+    parser.add_argument(
+        "--docker-memory",
+        default=None,
+        help="Optional Docker container memory limit (e.g. '2g', '512m')",
+    )
+    parser.add_argument(
+        "--docker-cpus",
+        type=float,
+        default=None,
+        help="Optional Docker container CPU limit (e.g. 2.0)",
+    )
+    parser.add_argument(
+        "--docker-pids-limit",
+        type=int,
+        default=None,
+        help="Optional Docker container PIDs limit (e.g. 256)",
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -491,6 +514,10 @@ class CliContext:
     args: argparse.Namespace | None = None
     config: dict[str, Any] = field(default_factory=dict)
     model_spec: dict[str, Any] | None = None
+    permission_mode: str | None = None
+    docker_memory: str | None = None
+    docker_cpus: float | None = None
+    docker_pids_limit: int | None = None
 
     def harness(self, evaluator: Evaluator | None = None, sandbox: bool = True) -> Harness:
         """Builds a harness for this context, resetting a reusable model between tasks."""
@@ -512,6 +539,10 @@ class CliContext:
             reasoning_effort=self.reasoning_effort,
             trust_project_tools=self.trust_project_tools,
             verbose=self.verbose,
+            permission_mode=self.permission_mode,
+            docker_memory=self.docker_memory,
+            docker_cpus=self.docker_cpus,
+            docker_pids_limit=self.docker_pids_limit,
         )
         if self.model_spec is not None:
             harness.apply_model_context_tokens(self.model_spec)
@@ -762,6 +793,16 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         if raw_bash_timeout is not None
         else (float(config["bash_timeout"]) if config.get("bash_timeout") is not None else None)
     )
+    permission_mode = _normalize_optional_str(
+        getattr(args, "permission_mode", None)
+    ) or _normalize_optional_str(config.get("permission_mode"))
+    docker_memory = _normalize_optional_str(
+        getattr(args, "docker_memory", None)
+    ) or _normalize_optional_str(config.get("docker_memory"))
+    raw_cpus = getattr(args, "docker_cpus", None)
+    docker_cpus = float(raw_cpus) if raw_cpus is not None else None
+    raw_pids = getattr(args, "docker_pids_limit", None)
+    docker_pids_limit = int(raw_pids) if raw_pids is not None else None
 
     return CliContext(
         args=args,
@@ -787,6 +828,10 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         bash_timeout=bash_timeout,
         trust_project_tools=trust_project_tools,
         model_spec=_startup_model_spec(args, config, registry),
+        permission_mode=permission_mode,
+        docker_memory=docker_memory,
+        docker_cpus=docker_cpus,
+        docker_pids_limit=docker_pids_limit,
     )
 
 
@@ -1061,6 +1106,10 @@ def main(argv: list[str] | None = None) -> None:
         cache_ttl=context.cache_ttl,
         reasoning_effort=context.reasoning_effort,
         trust_project_tools=context.trust_project_tools,
+        permission_mode=context.permission_mode,
+        docker_memory=context.docker_memory,
+        docker_cpus=context.docker_cpus,
+        docker_pids_limit=context.docker_pids_limit,
         verbose=True,
     )
     if context.model_spec is not None:

@@ -119,9 +119,12 @@ class RouterTestCase(unittest.TestCase):
             True,
             "Removed stored credentials for 'openrouter' from auth.json.",
         )
+        self.harness.get_permission_mode.return_value = "auto"
+        self.harness.set_permission_mode.return_value = "ask"
+        self.harness.sandbox = False
         self.router = self._router()
 
-    def _router(self, commands=None, skills=None, allow_bare_words=True):
+    def _router(self, commands=None, skills=None, allow_bare_words=True, checkpoints=None):
         ctx = CommandContext(
             harness=self.harness,
             memory=self.memory,
@@ -131,6 +134,7 @@ class RouterTestCase(unittest.TestCase):
             skills=skills if skills is not None else {},
             tracer=None,
             turns=self.turns,
+            checkpoints=checkpoints,
         )
         return CommandRouter(ctx, allow_bare_words=allow_bare_words)
 
@@ -636,6 +640,55 @@ class TestHarnessAuthIntegration(unittest.TestCase):
                 self.assertNotIn("api_key", harness.model.auth_secrets)
                 removed_again, _ = harness.logout_provider("vercel")
                 self.assertFalse(removed_again)
+
+
+class TestUndoAndModeCommands(RouterTestCase):
+    def test_mode_command_inspects_and_switches_mode(self):
+        """Invariant: /mode shows current permission mode or delegates switching and updates TUIState."""
+        self.assertEqual(self.router.dispatch("/mode"), SKIP)
+        self.assertIn("Permission Mode: auto", self.ui.all_text)
+
+        mock_state = MagicMock()
+        self.ui.state = mock_state
+        self.harness.set_permission_mode.return_value = "read-only"
+        self.assertEqual(self.router.dispatch("/mode read-only"), SKIP)
+        self.harness.set_permission_mode.assert_called_once_with("read-only")
+        self.assertEqual(mock_state.permission_mode, "read-only")
+        self.assertIn("Permission mode switched to: read-only", self.ui.successes[0])
+
+        self.harness.set_permission_mode.side_effect = ValueError("Unsupported permission_mode")
+        self.assertEqual(self.router.dispatch("/mode bogus"), SKIP)
+        self.assertIn("Unsupported permission_mode", self.ui.errors[0])
+
+    def test_undo_command_reverts_checkpoint_and_handles_missing_states(self):
+        """Invariant: /undo reverts real workspace checkpoints and handles empty/sandbox states safely."""
+        from core.checkpoints import CheckpointManager
+
+        # No checkpoints attached
+        self.assertEqual(self.router.dispatch("/undo"), SKIP)
+        self.assertIn("No workspace checkpoints available", self.ui.infos[0])
+
+        # Sandbox mode notice
+        self.harness.sandbox = True
+        self.assertEqual(self.router.dispatch("/undo"), SKIP)
+        self.assertIn("disabled in sandbox mode", self.ui.infos[-1])
+
+        # Real checkpoint manager
+        self.harness.sandbox = False
+        mgr = CheckpointManager(self.tmp)
+        router = self._router(checkpoints=mgr)
+        self.assertEqual(router.dispatch("/undo"), SKIP)
+        self.assertIn("Nothing to undo", self.ui.infos[-1])
+
+        pre_len = len(self.memory.messages)
+        mgr.create(label="edit sample", memory_len=pre_len)
+        self.memory.add_user("change sample.py")
+        (self.tmp / "sample.py").write_text("print('mutated')", encoding="utf-8")
+
+        self.assertEqual(router.dispatch("/undo"), SKIP)
+        self.assertEqual((self.tmp / "sample.py").read_text(encoding="utf-8"), "print('hi')")
+        self.assertEqual(len(self.memory.messages), pre_len)
+        self.assertIn("1 file(s) restored", self.ui.successes[-1])
 
 
 if __name__ == "__main__":
