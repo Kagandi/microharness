@@ -626,6 +626,8 @@ class GuardedEnvironment(Environment):
         self._is_temp = False
         self.confirm_handler = confirm_handler
         self._mode = self._normalize_mode(mode)
+        if isinstance(inner, ContainerEnvironment):
+            self.container_name = inner.container_name
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:
