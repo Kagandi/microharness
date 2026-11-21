@@ -18,6 +18,8 @@ from typing import Any, Callable, Mapping
 
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
 
+DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
+
 GLOBAL_CONFIG_FILENAME = "config.json"
 PROJECT_CONFIG_RELPATH = ".microharness/config.json"
 
@@ -246,6 +248,7 @@ class HarnessConfig:
     max_step_retries: int | None = None
     step_retry_delay: float | None = None
     bash_timeout: float | None = None
+    subagent_max_steps: int | None = None
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
@@ -275,6 +278,29 @@ class HarnessConfig:
         if bash_timeout <= 0:
             raise ValueError(f"Unsupported bash_timeout: {bash_timeout}. Must be greater than 0.")
 
+        raw_subagent_steps = (
+            self.subagent_max_steps
+            if self.subagent_max_steps is not None
+            else layers.merged.get("subagent_max_steps")
+        )
+        if raw_subagent_steps is None:
+            subagent_max_steps = DEFAULT_SUBAGENT_MAX_STEPS
+        elif isinstance(raw_subagent_steps, (bool, float)):
+            raise ValueError(
+                f"Unsupported subagent_max_steps: {raw_subagent_steps!r}. Must be a positive integer."
+            )
+        else:
+            try:
+                subagent_max_steps = int(raw_subagent_steps)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Unsupported subagent_max_steps: {raw_subagent_steps!r}. Must be a positive integer."
+                ) from exc
+            if subagent_max_steps <= 0:
+                raise ValueError(
+                    f"Unsupported subagent_max_steps: {subagent_max_steps}. Must be a positive integer."
+                )
+
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
             docker=c.pick("docker", self.docker, _coerce_bool, False),
@@ -300,6 +326,7 @@ class HarnessConfig:
             max_step_retries=c.pick("max_step_retries", self.max_step_retries, int, 3),
             step_retry_delay=c.pick("step_retry_delay", self.step_retry_delay, float, 5.0),
             bash_timeout=bash_timeout,
+            subagent_max_steps=subagent_max_steps,
         )
 
 
@@ -323,6 +350,7 @@ class ResolvedConfig:
     max_step_retries: int
     step_retry_delay: float
     bash_timeout: float
+    subagent_max_steps: int | None
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:

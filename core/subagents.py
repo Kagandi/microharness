@@ -9,6 +9,7 @@ and scoped :class:`~core.tools.ToolRegistry` sharing the workspace environment.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import re
 import sys
@@ -19,9 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from core.config import DISABLED_VALUES, normalize_reasoning_effort
+from core.config import (
+    DEFAULT_SUBAGENT_MAX_STEPS as DEFAULT_SUBAGENT_MAX_STEPS,
+)
+from core.config import (
+    DISABLED_VALUES,
+    normalize_reasoning_effort,
+)
 from core.discovery import discover_resources
-from core.environment import Environment
+from core.environment import Environment, ReadOnlyEnvironment
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
@@ -36,12 +43,17 @@ from core.protocols import (
 )
 from core.session import INTERRUPTED, _final_response_text, run_steps
 from core.skills import _description_from_frontmatter, _first_heading, _split_frontmatter
-from core.tools import ToolRegistry
+from core.tools import (
+    BashTool,
+    EditFileTool,
+    ReadFileTool,
+    Tool,
+    ToolRegistry,
+    WriteFileTool,
+)
 from core.tracer import Tracer
 from core.types import StepTrace, Task
 from core.usage import TokenUsage, summarize_run_usage
-
-DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
 
 TOOL_NAME_ALIASES: dict[str, str] = {
     "read": "read_file",
@@ -69,6 +81,7 @@ class Subagent:
     effort: str | None = None
     max_steps: int | None = None
     path: str = ""
+    read_only: bool = False
 
     @property
     def badge(self) -> str:
@@ -99,6 +112,7 @@ BUILTIN_SUBAGENTS: dict[str, Subagent] = {
         scope="builtin",
         tools=("read_file", "bash"),
         path="builtin:explore",
+        read_only=True,
     ),
     "reviewer": Subagent(
         name="reviewer",
@@ -107,6 +121,7 @@ BUILTIN_SUBAGENTS: dict[str, Subagent] = {
         scope="builtin",
         tools=("read_file", "bash"),
         path="builtin:reviewer",
+        read_only=True,
     ),
     "worker": Subagent(
         name="worker",
@@ -115,6 +130,7 @@ BUILTIN_SUBAGENTS: dict[str, Subagent] = {
         scope="builtin",
         tools=None,
         path="builtin:worker",
+        read_only=False,
     ),
 }
 
@@ -309,6 +325,28 @@ def _parse_model(fields: dict[str, Any]) -> str | None:
     return clean
 
 
+def _parse_read_only(fields: dict[str, Any], source: str, *, default: bool = False) -> bool:
+    """Resolves optional ``read_only`` / ``readonly`` boolean from frontmatter fields."""
+    raw: str | None = None
+    for key in ("read_only", "readonly"):
+        candidate = fields.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            raw = candidate.strip()
+            break
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered in {"true", "yes", "1", "on", "enable", "enabled"}:
+        return True
+    if lowered in {"false", "no", "0", "off", "disable", "disabled"}:
+        return False
+    print(
+        f"⚠️ Warning: Ignoring invalid read_only '{raw}' in subagent '{source}'.",
+        file=sys.stderr,
+    )
+    return default
+
+
 def parse_subagent_markdown(
     content: str,
     default_name: str,
@@ -333,6 +371,12 @@ def parse_subagent_markdown(
     model = _parse_model(fields)
     effort = _parse_effort(fields, source=path or name)
     max_steps = _parse_max_steps(fields, source=path or name)
+    builtin_default = BUILTIN_SUBAGENTS.get(name)
+    read_only = _parse_read_only(
+        fields,
+        source=path or name,
+        default=bool(builtin_default and builtin_default.read_only),
+    )
 
     body_text = "\n".join(body).strip()
     system_prompt = body_text or DEFAULT_SYSTEM_PROMPT
@@ -347,6 +391,7 @@ def parse_subagent_markdown(
         effort=effort,
         max_steps=max_steps,
         path=path,
+        read_only=read_only,
     )
 
 
@@ -438,7 +483,7 @@ def render_subagents_index(subagents: dict[str, Subagent]) -> str:
         lines.append(f"- {agent.badge}{name} ({', '.join(extras)}): {agent.description}")
     lines.append(
         "Tip: Use the `subagent` tool to delegate isolated tasks with a clean context "
-        "(pass `agent` or `tasks` for parallel execution)."
+        "(pass `agent` or `tasks` for parallel read-only execution)."
     )
     lines.append("---------------------------")
     return "\n".join(lines)
@@ -574,7 +619,7 @@ class SubagentTool:
             },
             "tasks": {
                 "type": "array",
-                "description": "Optional batch of subagent tasks to run concurrently in parallel.",
+                "description": "Optional batch of read-only subagent tasks to run concurrently in parallel.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -625,9 +670,16 @@ class SubagentTool:
         self.sandboxed = sandboxed
         self.agents_instructions = agents_instructions
         self.skills_index = skills_index
+        if default_max_steps is not None and (
+            isinstance(default_max_steps, bool)
+            or not isinstance(default_max_steps, int)
+            or default_max_steps <= 0
+        ):
+            raise ValueError("default_max_steps must be a positive integer or None.")
         self.default_max_steps = default_max_steps
         self.on_file_modified = on_file_modified
         self.on_step = on_step
+        self._write_lock = threading.Lock()
         self._model_lock = threading.RLock()
         self._usage_lock = threading.Lock()
         self.total_usage = TokenUsage()
@@ -683,6 +735,28 @@ class SubagentTool:
         if len(normalized_items) == 1:
             return self._run_single(**normalized_items[0])
 
+        resolved_specs: list[Subagent] = []
+        for item in normalized_items:
+            raw_agent = item["agent"]
+            if not isinstance(raw_agent, str):
+                return 1, "Error: `agent` must be a string."
+            spec, agent_err = self._resolve_agent(raw_agent)
+            if spec is None:
+                return 1, agent_err
+            resolved_specs.append(spec)
+
+        write_capable = sorted(
+            {spec.name for spec in resolved_specs if self._is_write_capable(spec)}
+        )
+        if write_capable:
+            names = ", ".join(f"'{name}'" for name in write_capable)
+            return (
+                1,
+                f"Error: Parallel `tasks` batch cannot run write-capable subagent(s) ({names}) "
+                "concurrently on the shared workspace. Run write-capable subagents sequentially, "
+                "or use read-only presets (e.g. 'explore', 'reviewer') for parallel `tasks`.",
+            )
+
         with ThreadPoolExecutor(max_workers=min(len(normalized_items), 4)) as pool:
             results = list(pool.map(lambda kw: self._run_single(**kw), normalized_items))
 
@@ -734,17 +808,54 @@ class SubagentTool:
             return True, spec.model, ""
         return True, None, ""
 
-    def _build_child_registry(self, spec: Subagent) -> ToolRegistry:
+    def _is_write_capable(self, spec: Subagent) -> bool:
+        """Returns True if the subagent may mutate workspace files."""
+        if spec.read_only:
+            return False
+        if spec.tools is None:
+            return True
+        registered = self.parent_registry.registered_tools()
+        for tool_name in spec.tools:
+            if tool_name in BLOCKED_CHILD_TOOLS:
+                continue
+            if tool_name == "bash":
+                return True
+            tool = registered.get(tool_name)
+            if tool is not None and getattr(tool, "modifies_files", False):
+                return True
+        return False
+
+    def _bind_tool_to_env(self, tool: Tool, child_env: Environment) -> Tool:
+        """Returns a tool bound to ``child_env`` without mutating ``parent_registry`` tools."""
+        if child_env is self.env:
+            return tool
+        if isinstance(tool, BashTool):
+            return BashTool(child_env, timeout=tool.timeout, max_timeout=tool.max_timeout)
+        if isinstance(tool, ReadFileTool):
+            return ReadFileTool(child_env)
+        if isinstance(tool, WriteFileTool):
+            return WriteFileTool(child_env)
+        if isinstance(tool, EditFileTool):
+            return EditFileTool(child_env)
+        if getattr(tool, "env", None) is self.env:
+            cloned = copy.copy(tool)
+            setattr(cloned, "env", child_env)
+            return cloned
+        return tool
+
+    def _build_child_registry(self, spec: Subagent, child_env: Environment) -> ToolRegistry:
         child_registry = ToolRegistry(
-            env=self.env,
+            env=child_env,
             max_tool_tokens=self.parent_registry.max_tool_tokens,
         )
         for name, tool in self.parent_registry.registered_tools().items():
             if name in BLOCKED_CHILD_TOOLS:
                 continue
+            if spec.read_only and getattr(tool, "modifies_files", False):
+                continue
             if spec.tools is not None and name not in spec.tools:
                 continue
-            child_registry.register(tool)
+            child_registry.register(self._bind_tool_to_env(tool, child_env))
         return child_registry
 
     def _record_usage(
@@ -829,11 +940,13 @@ class SubagentTool:
         else:
             child_model = parent_model
 
-        child_registry = self._build_child_registry(spec)
+        is_write_capable = self._is_write_capable(spec)
+        child_env: Environment = ReadOnlyEnvironment(self.env) if spec.read_only else self.env
+        child_registry = self._build_child_registry(spec, child_env)
         child_system_prompt = build_system_prompt(
             spec.system_prompt,
             tool_docs=child_registry.to_system_prompt_snippet(),
-            workspace=self.env.workspace_dir,
+            workspace=child_env.workspace_dir,
             sandboxed=self.sandboxed,
             agents_instructions=self.agents_instructions,
             skills_index=self.skills_index,
@@ -884,46 +997,42 @@ class SubagentTool:
 
         child_loop = AgentLoop(model=child_model, memory=child_memory, tools=child_registry)
 
-        prev_effort: str | None = None
-        restoring_parent_effort = False
-        if (
-            child_model is parent_model
-            and has_explicit_effort
-            and isinstance(parent_model, ReasoningAwareModel)
-        ):
-            self._model_lock.acquire()
-            prev_effort = parent_model.get_reasoning_effort()
-            parent_model.set_reasoning_effort(resolved_effort)
-            restoring_parent_effort = True
+        with contextlib.ExitStack() as stack:
+            if is_write_capable:
+                stack.enter_context(self._write_lock)
+            if (
+                child_model is parent_model
+                and has_explicit_effort
+                and isinstance(parent_model, ReasoningAwareModel)
+            ):
+                stack.enter_context(self._model_lock)
+                prev_effort = parent_model.get_reasoning_effort()
+                parent_model.set_reasoning_effort(resolved_effort)
+                stack.callback(parent_model.set_reasoning_effort, prev_effort)
 
-        try:
-            outcome = run_steps(
-                child_model,
-                child_loop,
-                child_tracer,
-                start_step=1,
-                max_steps=effective_max_steps,
-                deadline=parent_deadline,
-                max_retries=self.max_retries,
-                retry_delay=self.retry_delay,
-                require_finish_tool=False,
-                propagate_interrupts=True,
-            )
-        finally:
-            if restoring_parent_effort and isinstance(parent_model, ReasoningAwareModel):
-                try:
-                    parent_model.set_reasoning_effort(prev_effort)
-                finally:
-                    self._model_lock.release()
-            if child_model is not parent_model:
-                if isinstance(child_model, DeadlineAwareModel):
-                    child_model.set_deadline(None)
-                if isinstance(child_model, CancellableModel):
-                    child_model.set_cancel_probe(None)
+            try:
+                outcome = run_steps(
+                    child_model,
+                    child_loop,
+                    child_tracer,
+                    start_step=1,
+                    max_steps=effective_max_steps,
+                    deadline=parent_deadline,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
+                    require_finish_tool=False,
+                    propagate_interrupts=True,
+                )
+            finally:
+                if child_model is not parent_model:
+                    if isinstance(child_model, DeadlineAwareModel):
+                        child_model.set_deadline(None)
+                    if isinstance(child_model, CancellableModel):
+                        child_model.set_cancel_probe(None)
 
-        if self.on_file_modified is not None:
-            for path in sorted(child_memory.modified_files):
-                self.on_file_modified(path)
+            if self.on_file_modified is not None:
+                for path in sorted(child_memory.modified_files):
+                    self.on_file_modified(path)
 
         child_c_stats = (
             child_model.get_cache_stats() if isinstance(child_model, CacheAwareModel) else None

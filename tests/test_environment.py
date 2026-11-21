@@ -2,7 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.environment import DockerEnvironment, Environment, is_docker_available
+from core.environment import (
+    DockerEnvironment,
+    Environment,
+    ReadOnlyEnvironment,
+    is_docker_available,
+    validate_read_only_bash,
+)
 
 
 class TestEnvironment(unittest.TestCase):
@@ -613,6 +619,114 @@ class TestEnvironment(unittest.TestCase):
             )
             self.assertEqual(code_ps_sh, 0)
             self.assertEqual(out_ps_sh.strip(), "NO_SHELL_ORPHAN")
+
+
+class TestReadOnlyEnvironment(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.inner = Environment(workspace_dir=self.temp_dir, cleanup_on_teardown=True)
+        self.inner.populate_files({"sample.txt": "alpha\nbeta\ngamma\n"})
+        self.ro = ReadOnlyEnvironment(self.inner)
+
+    def tearDown(self):
+        self.inner.teardown()
+
+    def test_reads_succeed_and_writes_are_rejected(self):
+        """Invariant: ReadOnlyEnvironment allows reads and blocks write_file/edit_file/populate_files/teardown."""
+        self.assertEqual(self.ro.workspace_dir, self.inner.workspace_dir)
+        self.assertEqual(self.ro.logs_dir, self.inner.logs_dir)
+        self.assertTrue(self.ro.is_running)
+        self.assertEqual(
+            self.ro.read_file("sample.txt"),
+            "   1 | alpha\n   2 | beta\n   3 | gamma\n",
+        )
+
+        with self.assertRaises(PermissionError):
+            self.ro.resolve_path("new.txt")
+        with self.assertRaises(PermissionError):
+            self.ro.write_file("new.txt", "blocked")
+        with self.assertRaises(PermissionError):
+            self.ro.edit_file("sample.txt", "alpha", "omega")
+        with self.assertRaises(PermissionError):
+            self.ro.populate_files({"a.txt": "1"})
+
+        self.assertFalse((self.inner.workspace_dir / "new.txt").exists())
+        self.assertEqual(
+            (self.inner.workspace_dir / "sample.txt").read_text(encoding="utf-8"),
+            "alpha\nbeta\ngamma\n",
+        )
+        self.assertIsNone(self.ro.get_git_patch())
+
+        # teardown on wrapper must not destroy parent's workspace
+        self.ro.teardown()
+        self.assertTrue(self.inner.workspace_dir.exists())
+
+    def test_validate_read_only_bash_allows_safe_commands_and_blocks_mutations(self):
+        """Invariant: read-only bash allows inspection commands/pipelines and blocks mutating or arbitrary commands."""
+        for cmd in [
+            "ls -la",
+            "cat sample.txt | head -n 2",
+            'grep -n "alpha > beta" sample.txt',
+            "find . -name '*.txt' 2>&1",
+            "find . \\( -name '*.txt' -o -name '*.py' \\)",
+            "git status",
+            "git -C . log -n 5 --oneline",
+            "git diff HEAD",
+            "git branch -a",
+            "git branch --merged main",
+            "git tag -l",
+            "sort sample.txt >/dev/null",
+        ]:
+            ok, err = validate_read_only_bash(cmd)
+            self.assertTrue(ok, f"expected allowed for {cmd!r}, got error: {err}")
+
+        for bad_cmd in [
+            "",
+            "   ",
+            "rm sample.txt",
+            "touch new.txt",
+            "sed -i 's/alpha/omega/' sample.txt",
+            "echo hacked > hacked.txt",
+            "echo hacked >> sample.txt",
+            "cat sample.txt | tee copy.txt",
+            "ls && rm sample.txt",
+            "echo $(rm sample.txt)",
+            'echo "$(touch x)"',
+            "echo `touch x`",
+            "(rm sample.txt)",
+            "cat <<EOF\nhi\nEOF",
+            "ls &",
+            "find . -delete",
+            "find . -exec rm {} +",
+            "fd -x rm",
+            "sort -o sample.txt sample.txt",
+            "rg --pre=sh alpha",
+            "python3 -c \"open('x','w').write('y')\"",
+            "./local_script.sh",
+            "git checkout -- sample.txt",
+            "git commit -m test",
+            "git branch new-branch",
+            "git branch -D main",
+            "git tag v1.0",
+            "git diff --output=patch.diff",
+            "git -c core.fsmonitor=evil status",
+            "FOO=bar",
+            "ls 'unterminated",
+        ]:
+            ok, reason = validate_read_only_bash(bad_cmd)
+            self.assertFalse(ok, f"expected blocked for {bad_cmd!r}")
+            self.assertNotEqual(reason, "")
+
+    def test_execute_bash_in_read_only_environment(self):
+        """Invariant: ReadOnlyEnvironment executes allowed bash commands and blocks mutating ones without touching disk."""
+        code_ok, out_ok = self.ro.execute_bash("cat sample.txt | wc -l")
+        self.assertEqual(code_ok, 0)
+        self.assertEqual(out_ok.strip(), "3")
+
+        code_bad, out_bad = self.ro.execute_bash("echo pwn > pwn.txt")
+        self.assertEqual(code_bad, 1)
+        self.assertIn("Read-only environment blocked bash command", out_bad)
+        self.assertFalse((self.inner.workspace_dir / "pwn.txt").exists())
 
 
 if __name__ == "__main__":
