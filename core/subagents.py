@@ -325,7 +325,7 @@ def _parse_model(fields: dict[str, Any]) -> str | None:
     return clean
 
 
-def _parse_read_only(fields: dict[str, Any], source: str) -> bool:
+def _parse_read_only(fields: dict[str, Any], source: str, *, default: bool = False) -> bool:
     """Resolves optional ``read_only`` / ``readonly`` boolean from frontmatter fields."""
     raw: str | None = None
     for key in ("read_only", "readonly"):
@@ -334,7 +334,7 @@ def _parse_read_only(fields: dict[str, Any], source: str) -> bool:
             raw = candidate.strip()
             break
     if raw is None:
-        return False
+        return default
     lowered = raw.lower()
     if lowered in {"true", "yes", "1", "on", "enable", "enabled"}:
         return True
@@ -344,7 +344,7 @@ def _parse_read_only(fields: dict[str, Any], source: str) -> bool:
         f"⚠️ Warning: Ignoring invalid read_only '{raw}' in subagent '{source}'.",
         file=sys.stderr,
     )
-    return False
+    return default
 
 
 def parse_subagent_markdown(
@@ -371,7 +371,12 @@ def parse_subagent_markdown(
     model = _parse_model(fields)
     effort = _parse_effort(fields, source=path or name)
     max_steps = _parse_max_steps(fields, source=path or name)
-    read_only = _parse_read_only(fields, source=path or name)
+    builtin_default = BUILTIN_SUBAGENTS.get(name)
+    read_only = _parse_read_only(
+        fields,
+        source=path or name,
+        default=bool(builtin_default and builtin_default.read_only),
+    )
 
     body_text = "\n".join(body).strip()
     system_prompt = body_text or DEFAULT_SYSTEM_PROMPT

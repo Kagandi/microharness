@@ -555,7 +555,7 @@ class ReadOnlyEnvironment(Environment):
         raise PermissionError("Workspace is read-only; write operations are not permitted.")
 
     def resolve_path(self, rel_path: str) -> Path:
-        return self._inner.resolve_path(rel_path)
+        raise PermissionError("Workspace is read-only; write operations are not permitted.")
 
     def resolve_read_path(self, path_str: str) -> Path:
         return self._inner.resolve_read_path(path_str)

@@ -179,13 +179,21 @@ class TestSubagentParsingAndDiscovery(unittest.TestCase):
             self.assertEqual(agents["worker"].scope, "builtin")
             self.assertEqual(agents["deploy-checker"].scope, "global")
 
-            # Project reviewer shadows global and builtin
+            # Project reviewer shadows global and builtin and retains read_only=True by default
             rev = agents["reviewer"]
             self.assertEqual(rev.scope, "project")
             self.assertEqual(rev.description, "Project reviewer")
             self.assertEqual(rev.tools, ("read_file", "bash"))
             self.assertEqual(rev.effort, "high")
             self.assertEqual(rev.system_prompt, "Project prompt")
+            self.assertTrue(rev.read_only)
+
+            # Explicit read_only: false opts a shadowed read-only preset out
+            opted_out = parse_subagent_markdown(
+                "---\nread_only: false\n---\nWritable reviewer",
+                default_name="reviewer",
+            )
+            self.assertFalse(opted_out.read_only)
 
             # Directory-based AGENT.md works
             cdir = agents["custom-dir"]

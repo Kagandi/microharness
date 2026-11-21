@@ -642,6 +642,8 @@ class TestReadOnlyEnvironment(unittest.TestCase):
         )
 
         with self.assertRaises(PermissionError):
+            self.ro.resolve_path("new.txt")
+        with self.assertRaises(PermissionError):
             self.ro.write_file("new.txt", "blocked")
         with self.assertRaises(PermissionError):
             self.ro.edit_file("sample.txt", "alpha", "omega")
