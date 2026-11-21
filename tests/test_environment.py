@@ -622,8 +622,11 @@ class TestEnvironment(unittest.TestCase):
             self.assertEqual(out_ps_sh.strip(), "NO_SHELL_ORPHAN")
 
     def test_docker_mounts_logs_dir_read_only_and_resolves_container_log_paths(self):
-        """Invariant: DockerEnvironment mounts logs_dir at /logs:ro and resolves /logs/... reads safely."""
+        """Invariant: DockerEnvironment mounts logs_dir at CONTAINER_LOGS_DIR:ro and resolves log reads safely."""
         from unittest.mock import MagicMock, patch
+
+        logs_mount = DockerEnvironment.CONTAINER_LOGS_DIR
+        self.assertEqual(logs_mount, "/var/log/microharness")
 
         temp_ws = tempfile.mkdtemp(prefix="docker_logs_ws_")
         temp_logs = tempfile.mkdtemp(prefix="docker_logs_dir_")
@@ -641,40 +644,131 @@ class TestEnvironment(unittest.TestCase):
             )
             try:
                 docker_run_cmd = mock_run.call_args_list[0][0][0]
-                self.assertIn(f"{Path(temp_logs).resolve()}:/logs:ro", docker_run_cmd)
-                self.assertEqual(d_env.agent_logs_dir, "/logs")
+                self.assertIn(f"{Path(temp_logs).resolve()}:{logs_mount}:ro", docker_run_cmd)
+                self.assertEqual(d_env.agent_logs_dir, logs_mount)
 
-                # read_file works on /logs/<file>
-                content = d_env.read_file("/logs/step_01_bash_abc123.log")
+                # read_file works on CONTAINER_LOGS_DIR/<file>
+                content = d_env.read_file(f"{logs_mount}/step_01_bash_abc123.log")
                 self.assertEqual(content, "   1 | line1\n   2 | MATCH_TOKEN\n   3 | line3\n")
 
-                # Negative cases: traversal and writes into /logs are denied
+                # Negative cases: traversal and writes into CONTAINER_LOGS_DIR are denied
                 with self.assertRaises(PermissionError):
-                    d_env.read_file("/logs/../../etc/passwd")
+                    d_env.read_file(f"{logs_mount}/../../etc/passwd")
                 with self.assertRaises(PermissionError):
-                    d_env.read_file("/logs_evil/secret.txt")
+                    d_env.read_file(f"{logs_mount}_evil/secret.txt")
                 with self.assertRaises(PermissionError):
-                    d_env.write_file("/logs/evil.log", "nope")
+                    d_env.write_file(f"{logs_mount}/evil.log", "nope")
 
-                # ReadOnlyEnvironment wrapping DockerEnvironment delegates /logs access & grep
+                # ReadOnlyEnvironment wrapping DockerEnvironment delegates log access & grep
                 from core.environment import ReadOnlyEnvironment
 
                 ro_env = ReadOnlyEnvironment(d_env)
-                self.assertEqual(ro_env.agent_logs_dir, "/logs")
+                self.assertEqual(ro_env.agent_logs_dir, logs_mount)
                 self.assertEqual(
-                    ro_env.read_file("/logs/step_01_bash_abc123.log"),
+                    ro_env.read_file(f"{logs_mount}/step_01_bash_abc123.log"),
                     "   1 | line1\n   2 | MATCH_TOKEN\n   3 | line3\n",
                 )
                 with self.assertRaises(PermissionError):
-                    ro_env.write_file("/logs/evil.log", "nope")
-                code_rm, out_rm = ro_env.execute_bash("rm /logs/step_01_bash_abc123.log")
+                    ro_env.write_file(f"{logs_mount}/evil.log", "nope")
+                code_rm, out_rm = ro_env.execute_bash(f"rm {logs_mount}/step_01_bash_abc123.log")
                 self.assertEqual(code_rm, 1)
                 self.assertIn("blocked bash command", out_rm)
             finally:
                 d_env.teardown()
 
+    def test_docker_resolves_container_workspace_and_init_workdir_paths(self):
+        """Invariant: /workspace and init_workdir paths resolve to host workspace_dir while blocking traversal."""
+        from unittest.mock import MagicMock, patch
+
+        from core.environment import ReadOnlyEnvironment
+
+        temp_ws = tempfile.mkdtemp(prefix="docker_cpath_ws_")
+        target_dir = Path(temp_ws) / "aiomonitor"
+        target_dir.mkdir(parents=True)
+        monitor_file = target_dir / "monitor.py"
+        monitor_file.write_text("line_one = 1\n", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="cid", stderr="")):
+            d_env = DockerEnvironment(
+                image="python:3.11",
+                workspace_dir=temp_ws,
+                init_workdir="/app/",
+                cleanup_on_teardown=True,
+            )
+            try:
+                expected_resolved = monitor_file.resolve()
+                self.assertEqual(
+                    d_env.resolve_path("/workspace/aiomonitor/monitor.py"), expected_resolved
+                )
+                self.assertEqual(
+                    d_env.resolve_path("/app/aiomonitor/monitor.py"), expected_resolved
+                )
+                self.assertEqual(
+                    d_env.resolve_read_path("/workspace/aiomonitor/monitor.py"), expected_resolved
+                )
+                self.assertEqual(
+                    d_env.resolve_read_path("/app/aiomonitor/monitor.py"), expected_resolved
+                )
+                self.assertEqual(d_env.resolve_path("/workspace"), Path(temp_ws).resolve())
+                self.assertEqual(d_env.resolve_path("/app"), Path(temp_ws).resolve())
+
+                # read_file, edit_file, write_file, and ReadOnlyEnvironment work with container paths
+                self.assertEqual(
+                    d_env.read_file("/workspace/aiomonitor/monitor.py"),
+                    "   1 | line_one = 1\n",
+                )
+                d_env.edit_file("/workspace/aiomonitor/monitor.py", "line_one = 1", "line_one = 2")
+                self.assertEqual(
+                    d_env.read_file("/app/aiomonitor/monitor.py"),
+                    "   1 | line_one = 2\n",
+                )
+                d_env.write_file("/app/aiomonitor/new_file.py", "created = True\n")
+                self.assertEqual(
+                    (target_dir / "new_file.py").read_text(encoding="utf-8"), "created = True\n"
+                )
+
+                ro_env = ReadOnlyEnvironment(d_env)
+                self.assertEqual(
+                    ro_env.read_file("/workspace/aiomonitor/new_file.py"),
+                    "   1 | created = True\n",
+                )
+                with self.assertRaises(PermissionError):
+                    ro_env.write_file("/workspace/aiomonitor/new_file.py", "blocked")
+
+                # Negative cases: traversal and prefix-spoofed paths are denied
+                for bad_path in (
+                    "/workspace/../../etc/passwd",
+                    "/workspace_evil/secret.txt",
+                    "/app/../../etc/passwd",
+                    "/app_evil/secret.txt",
+                ):
+                    with self.assertRaises(PermissionError):
+                        d_env.resolve_path(bad_path)
+                    with self.assertRaises(PermissionError):
+                        d_env.read_file(bad_path)
+                    with self.assertRaises(PermissionError):
+                        d_env.write_file(bad_path, "nope")
+            finally:
+                d_env.teardown()
+
+        # Edge case: init_workdir="/" must never turn arbitrary host paths into workspace paths
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="cid", stderr="")):
+            root_wd_env = DockerEnvironment(
+                image="python:3.11",
+                workspace_dir=temp_ws,
+                init_workdir="/",
+                cleanup_on_teardown=True,
+            )
+            try:
+                with self.assertRaises(PermissionError):
+                    root_wd_env.resolve_path("/etc/passwd")
+                with self.assertRaises(PermissionError):
+                    root_wd_env.read_file("/etc/passwd")
+            finally:
+                root_wd_env.teardown()
+
     def test_docker_spilled_logs_accessible_via_grep_and_read_file(self):
-        """Integration invariant: in-container grep and host read_file both access spilled logs at /logs."""
+        """Integration invariant: in-container grep and host read_file both access spilled logs at CONTAINER_LOGS_DIR."""
         if not is_docker_available():
             self.skipTest("Docker is not available on this host.")
 
@@ -707,9 +801,10 @@ class TestEnvironment(unittest.TestCase):
                 type("TC", (), {"id": "call123456", "name": "big_tool", "arguments": {}})(),
                 step_index=1,
             )
+            expected_path = f"{DockerEnvironment.CONTAINER_LOGS_DIR}/step_01_big_tool_call12.log"
             self.assertTrue(res.was_truncated)
-            self.assertEqual(res.raw_log_path, "/logs/step_01_big_tool_call12.log")
-            self.assertIn("/logs/step_01_big_tool_call12.log", res.output)
+            self.assertEqual(res.raw_log_path, expected_path)
+            self.assertIn(expected_path, res.output)
 
             # In-container grep works on res.raw_log_path
             code, grep_out = d_env.execute_bash(f"grep NEEDLE_LINE {res.raw_log_path}")
@@ -721,7 +816,9 @@ class TestEnvironment(unittest.TestCase):
             self.assertIn("NEEDLE_LINE", read_out)
 
             # Mount is read-only inside container
-            ro_code, _ = d_env.execute_bash("touch /logs/should_fail.log")
+            ro_code, _ = d_env.execute_bash(
+                f"touch {DockerEnvironment.CONTAINER_LOGS_DIR}/should_fail.log"
+            )
             self.assertNotEqual(ro_code, 0)
 
 
