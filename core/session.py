@@ -15,18 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from core.hooks import POST_TURN, PRE_TURN, HookContext, HookRegistry
-from core.loop import (
-    DEFAULT_DOOM_LOOP_MAX_NUDGES,
-    DEFAULT_DOOM_LOOP_THRESHOLD,
-    DOOM_LOOP,
-    AgentLoop,
-    DoomLoopCheck,
-    DoomLoopDetector,
-)
+from core.hooks import POST_TURN, PRE_TURN, HookContext, HookOutcome, HookRegistry
+from core.loop import AgentLoop
 from core.model import RateLimitError
 from core.protocols import DeadlineAwareModel, Model, ModelCancelledError, RateLimitAwareModel
-from core.types import ASSISTANT_EXTRA_KEYS, Message
+from core.types import ASSISTANT_EXTRA_KEYS, HOOK_BLOCKED, Message
+from core.types import DOOM_LOOP as DOOM_LOOP
 
 if TYPE_CHECKING:
     from core.tracer import Tracer
@@ -38,7 +32,6 @@ TIMEOUT = "timeout"
 INTERRUPTED = "interrupted"
 RATE_LIMITED = "rate_limited"
 ERROR = "error"
-HOOK_BLOCKED = "hook_blocked"
 
 NOT_FOUND = "Session not found: no resumable session available"
 
@@ -120,8 +113,6 @@ def run_steps(
     max_empty_nudges: int = DEFAULT_MAX_EMPTY_NUDGES,
     finish_nudge: str = DEFAULT_FINISH_NUDGE,
     propagate_interrupts: bool = False,
-    doom_loop_threshold: int | None = None,
-    doom_loop_max_nudges: int | None = None,
 ) -> StepOutcome:
     """Drives the agent loop for up to ``max_steps`` steps, retrying transient errors.
 
@@ -129,61 +120,117 @@ def run_steps(
     a throttled run is not charged for the provider's own backoff. When
     ``require_finish_tool`` is enabled, a plain-text turn with no tool calls is
     treated as a pause rather than completion and nudged to continue or call
-    ``finish`` (up to ``max_empty_nudges`` consecutive times). Repeated identical
-    failing tool calls or edit oscillations trigger a step-back nudge and halt
-    with ``doom_loop`` if they persist.
+    ``finish`` (up to ``max_empty_nudges`` consecutive times).
     """
     step_idx = start_step
-    is_real_agent_loop = isinstance(loop, AgentLoop)
-    hooks = getattr(loop, "hooks", None) if is_real_agent_loop else None
-    env = getattr(getattr(loop, "tools", None), "env", None) if is_real_agent_loop else None
-
-    if is_real_agent_loop:
-        if doom_loop_threshold is not None:
-            loop.doom_loop_detector.threshold = int(doom_loop_threshold)
-        if doom_loop_max_nudges is not None:
-            loop.doom_loop_detector.max_nudges = max(0, int(doom_loop_max_nudges))
-        fallback_detector: DoomLoopDetector | None = None
-    else:
-        fallback_detector = DoomLoopDetector(
-            threshold=(
-                DEFAULT_DOOM_LOOP_THRESHOLD
-                if doom_loop_threshold is None
-                else int(doom_loop_threshold)
-            ),
-            max_nudges=(
-                DEFAULT_DOOM_LOOP_MAX_NUDGES
-                if doom_loop_max_nudges is None
-                else int(doom_loop_max_nudges)
-            ),
-        )
+    step_attempts = 0
+    consecutive_empty_nudges = 0
+    hooks = getattr(loop, "hooks", None) if isinstance(loop, AgentLoop) else None
+    env = (
+        getattr(getattr(loop, "tools", None), "env", None) if isinstance(loop, AgentLoop) else None
+    )
 
     if isinstance(hooks, HookRegistry):
         pre_turn = hooks.run(PRE_TURN, HookContext(event=PRE_TURN, env=env, step_index=step_idx))
         if pre_turn.blocked:
             detail = pre_turn.combined_message or "Turn blocked by pre_turn hook."
             tracer.log(f"\n🛑 {detail}")
-            return StepOutcome(False, HOOK_BLOCKED, step_idx, detail=detail)
+            return StepOutcome(False, pre_turn.stop_reason or HOOK_BLOCKED, step_idx, detail=detail)
 
     turn_outcome: StepOutcome | None = None
     try:
-        turn_outcome = _drive_steps(
-            model=model,
-            loop=loop,
-            tracer=tracer,
-            start_step=start_step,
-            max_steps=max_steps,
-            deadline=deadline,
-            max_retries=max_retries,
-            retry_delay=retry_delay,
-            on_finish=on_finish,
-            require_finish_tool=require_finish_tool,
-            max_empty_nudges=max_empty_nudges,
-            finish_nudge=finish_nudge,
-            propagate_interrupts=propagate_interrupts,
-            is_real_agent_loop=is_real_agent_loop,
-            fallback_detector=fallback_detector,
-        )
+        while max_steps is None or (step_idx - start_step) < max_steps:
+            effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
+            if effective_deadline and time.time() > effective_deadline:
+                tracer.log("\n⚠️ Task reached maximum allowed timeout.")
+                turn_outcome = StepOutcome(False, TIMEOUT, step_idx)
+                return turn_outcome
+
+            if effective_deadline and isinstance(model, DeadlineAwareModel):
+                model.set_deadline(effective_deadline)
+
+            try:
+                is_finished, step_trace = loop.step(step_index=step_idx)
+            except KeyboardInterrupt:
+                if propagate_interrupts:
+                    raise
+                tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
+                turn_outcome = StepOutcome(False, INTERRUPTED, step_idx)
+                return turn_outcome
+            except ModelCancelledError:
+                if propagate_interrupts:
+                    raise
+                tracer.log("\n⚠️ Cancelled by user (Esc).")
+                turn_outcome = StepOutcome(False, INTERRUPTED, step_idx)
+                return turn_outcome
+            except TimeoutError as exc:
+                tracer.log(f"\n⚠️ Task reached maximum allowed timeout: {exc}")
+                turn_outcome = StepOutcome(False, TIMEOUT, step_idx)
+                return turn_outcome
+            except RateLimitError as exc:
+                tracer.log(
+                    f"\n🛑 Step {step_idx} rate limited (HTTP 429): {exc}\n"
+                    "Progress has been saved. You can resume this benchmark with --resume once rate limits reset."
+                )
+                turn_outcome = StepOutcome(False, RATE_LIMITED, step_idx)
+                return turn_outcome
+            except Exception as exc:
+                if _retry_step(exc, step_idx, step_attempts + 1, max_retries, retry_delay, tracer):
+                    step_attempts += 1
+                    continue
+                turn_outcome = StepOutcome(False, ERROR, step_idx)
+                return turn_outcome
+
+            tracer.record_step(step_trace)
+            step_attempts = 0
+            completed_step = step_idx
+            step_idx += 1
+
+            stop_reason = getattr(step_trace, "stop_reason", None)
+            if isinstance(stop_reason, str) and stop_reason:
+                raw_detail = getattr(step_trace, "stop_detail", None)
+                detail = raw_detail if isinstance(raw_detail, str) and raw_detail else stop_reason
+                tracer.log(f"\n🛑 Stopping loop ({stop_reason}): {detail}")
+                turn_outcome = StepOutcome(False, stop_reason, step_idx, detail=detail)
+                return turn_outcome
+
+            post_outcome = getattr(loop, "last_post_step_outcome", None)
+            if isinstance(post_outcome, HookOutcome) and post_outcome.messages:
+                tracer.log(f"\n↪️ {post_outcome.combined_message}")
+
+            tool_calls = step_trace.model_response.get("tool_calls") or []
+            if tool_calls:
+                consecutive_empty_nudges = 0
+
+            if is_finished:
+                if not require_finish_tool or tool_calls:
+                    if on_finish:
+                        on_finish(_final_response_text(step_trace))
+                    turn_outcome = StepOutcome(True, COMPLETED, step_idx)
+                    return turn_outcome
+
+                consecutive_empty_nudges += 1
+                if consecutive_empty_nudges > max_empty_nudges:
+                    tracer.log(
+                        f"\n⚠️ Model stopped without calling finish after {max_empty_nudges} "
+                        "continuation prompts; ending run."
+                    )
+                    if on_finish:
+                        on_finish(_final_response_text(step_trace))
+                    turn_outcome = StepOutcome(True, COMPLETED, step_idx)
+                    return turn_outcome
+
+                if max_steps is not None and (step_idx - start_step) >= max_steps:
+                    turn_outcome = StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
+                    return turn_outcome
+
+                tracer.log(
+                    f"\n↪️ No tool call at step {completed_step}; prompting model to continue or call "
+                    f"finish ({consecutive_empty_nudges}/{max_empty_nudges})..."
+                )
+                loop.memory.add_user(finish_nudge)
+
+        turn_outcome = StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
         return turn_outcome
     finally:
         if isinstance(hooks, HookRegistry):
@@ -197,133 +244,6 @@ def run_steps(
                 POST_TURN,
                 HookContext(event=POST_TURN, env=env, step_index=post_step_idx, metadata=post_meta),
             )
-
-
-def _drive_steps(
-    *,
-    model: Model,
-    loop: AgentLoop,
-    tracer: Tracer,
-    start_step: int,
-    max_steps: int | None,
-    deadline: float | None,
-    max_retries: int,
-    retry_delay: float,
-    on_finish: Callable[[str], None] | None,
-    require_finish_tool: bool,
-    max_empty_nudges: int,
-    finish_nudge: str,
-    propagate_interrupts: bool,
-    is_real_agent_loop: bool,
-    fallback_detector: DoomLoopDetector | None,
-) -> StepOutcome:
-    step_idx = start_step
-    step_attempts = 0
-    consecutive_empty_nudges = 0
-
-    while max_steps is None or (step_idx - start_step) < max_steps:
-        effective_deadline = (deadline + rate_limit_wait(model)) if deadline else None
-        if effective_deadline and time.time() > effective_deadline:
-            tracer.log("\n⚠️ Task reached maximum allowed timeout.")
-            return StepOutcome(False, TIMEOUT, step_idx)
-
-        if effective_deadline and isinstance(model, DeadlineAwareModel):
-            model.set_deadline(effective_deadline)
-
-        try:
-            is_finished, step_trace = loop.step(step_index=step_idx)
-        except KeyboardInterrupt:
-            if propagate_interrupts:
-                raise
-            tracer.log("\n⚠️ Interrupted by user (Ctrl+C).")
-            return StepOutcome(False, INTERRUPTED, step_idx)
-        except ModelCancelledError:
-            if propagate_interrupts:
-                raise
-            tracer.log("\n⚠️ Cancelled by user (Esc).")
-            return StepOutcome(False, INTERRUPTED, step_idx)
-        except TimeoutError as exc:
-            tracer.log(f"\n⚠️ Task reached maximum allowed timeout: {exc}")
-            return StepOutcome(False, TIMEOUT, step_idx)
-        except RateLimitError as exc:
-            tracer.log(
-                f"\n🛑 Step {step_idx} rate limited (HTTP 429): {exc}\n"
-                "Progress has been saved. You can resume this benchmark with --resume once rate limits reset."
-            )
-            return StepOutcome(False, RATE_LIMITED, step_idx)
-        except Exception as exc:
-            if _retry_step(exc, step_idx, step_attempts + 1, max_retries, retry_delay, tracer):
-                step_attempts += 1
-                continue
-            return StepOutcome(False, ERROR, step_idx)
-
-        tracer.record_step(step_trace)
-        step_attempts = 0
-        completed_step = step_idx
-        step_idx += 1
-
-        stop_reason = getattr(step_trace, "stop_reason", None)
-        if stop_reason in (DOOM_LOOP, "hook_blocked"):
-            raw_detail = getattr(step_trace, "stop_detail", None)
-            default_detail = (
-                "Doom loop detected." if stop_reason == DOOM_LOOP else "Blocked by hook."
-            )
-            detail = raw_detail if isinstance(raw_detail, str) and raw_detail else default_detail
-            tracer.log(f"\n🛑 Stopping loop ({stop_reason}): {detail}")
-            return StepOutcome(False, str(stop_reason), step_idx, detail=detail)
-
-        tool_calls = step_trace.model_response.get("tool_calls") or []
-        if tool_calls:
-            consecutive_empty_nudges = 0
-
-        if is_real_agent_loop:
-            check = getattr(loop, "last_doom_loop_check", None)
-            if isinstance(check, DoomLoopCheck) and check.action == "nudge":
-                tracer.log(
-                    f"\n↪️ Doom-loop warning at step {completed_step}: {check.reason} "
-                    "Nudging model to change approach..."
-                )
-        elif fallback_detector is not None and not is_finished and tool_calls:
-            check = fallback_detector.observe_step(
-                tool_calls,
-                getattr(step_trace, "tool_results", None) or [],
-            )
-            if check.action == "nudge":
-                tracer.log(
-                    f"\n↪️ Doom-loop warning at step {completed_step}: {check.reason} "
-                    "Nudging model to change approach..."
-                )
-                loop.memory.add_user(check.nudge_message)
-            elif check.action == "stop":
-                tracer.log(f"\n🛑 Stopping loop ({DOOM_LOOP}): {check.reason}")
-                return StepOutcome(False, DOOM_LOOP, step_idx, detail=check.reason)
-
-        if is_finished:
-            if not require_finish_tool or tool_calls:
-                if on_finish:
-                    on_finish(_final_response_text(step_trace))
-                return StepOutcome(True, COMPLETED, step_idx)
-
-            consecutive_empty_nudges += 1
-            if consecutive_empty_nudges > max_empty_nudges:
-                tracer.log(
-                    f"\n⚠️ Model stopped without calling finish after {max_empty_nudges} "
-                    "continuation prompts; ending run."
-                )
-                if on_finish:
-                    on_finish(_final_response_text(step_trace))
-                return StepOutcome(True, COMPLETED, step_idx)
-
-            if max_steps is not None and (step_idx - start_step) >= max_steps:
-                return StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
-
-            tracer.log(
-                f"\n↪️ No tool call at step {completed_step}; prompting model to continue or call "
-                f"finish ({consecutive_empty_nudges}/{max_empty_nudges})..."
-            )
-            loop.memory.add_user(finish_nudge)
-
-    return StepOutcome(False, MAX_STEPS_EXCEEDED, step_idx)
 
 
 def _retry_step(

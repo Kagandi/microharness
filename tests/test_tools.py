@@ -1024,12 +1024,11 @@ class ValidTool:
         self.assertNotIn("[Post-edit diagnostics]", res.output)
 
     def test_post_edit_diagnostics_can_be_disabled_and_supports_hooks_and_commands(self):
-        """Invariant: default syntax hook can be removed and custom post_tool FunctionHook/CommandHook attach via ToolRegistry."""
+        """Invariant: default syntax hook can be removed and custom post_tool callable/command Hook attach via ToolRegistry."""
         from core.hooks import (
             POST_TOOL,
             PYTHON_SYNTAX_HOOK_NAME,
-            CommandHook,
-            FunctionHook,
+            Hook,
             HookContext,
             HookRegistry,
         )
@@ -1051,7 +1050,7 @@ class ValidTool:
         self.assertEqual(res_disabled.exit_code, 0)
         self.assertNotIn("[Post-edit diagnostics]", res_disabled.output)
 
-        # 2. Custom FunctionHook on POST_TOOL receives HookContext(path, env, ...)
+        # 2. Custom callable Hook on POST_TOOL receives HookContext(path, env, ...)
         seen_calls: list[tuple[str | None, object]] = []
 
         def custom_fn(ctx: HookContext) -> str | None:
@@ -1064,7 +1063,7 @@ class ValidTool:
         reg.register(WriteFileTool(self.env))
         reg.register(EditFileTool(self.env))
         reg.hooks.register(
-            FunctionHook(
+            Hook(
                 name="custom_txt_lint",
                 event=POST_TOOL,
                 fn=custom_fn,
@@ -1095,7 +1094,7 @@ class ValidTool:
         reg_crash = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
         reg_crash.register(WriteFileTool(self.env))
         reg_crash.hooks.register(
-            FunctionHook(
+            Hook(
                 name="boom_hook",
                 event=POST_TOOL,
                 fn=lambda _ctx: (_ for _ in ()).throw(RuntimeError("hook boom")),
@@ -1109,12 +1108,12 @@ class ValidTool:
         self.assertIn("Successfully wrote", c_res.output)
         self.assertIn("Hook 'boom_hook' error: hook boom", c_res.output)
 
-        # 4. CommandHook with {path} quoting for filenames with spaces
+        # 4. Command hook with {path} quoting for filenames with spaces
         cmd = "python -c \"import sys; print('checked:' + sys.argv[1]); sys.exit(1)\" {path}"
         reg_cmd = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
         reg_cmd.register(WriteFileTool(self.env))
         reg_cmd.hooks.register(
-            CommandHook(
+            Hook(
                 name="cmd_lint",
                 event=POST_TOOL,
                 command=cmd,
@@ -1137,7 +1136,7 @@ class ValidTool:
         reg_ok_cmd = ToolRegistry(env=self.env, max_tool_tokens=2000, hooks=HookRegistry.empty())
         reg_ok_cmd.register(WriteFileTool(self.env))
         reg_ok_cmd.hooks.register(
-            CommandHook(
+            Hook(
                 name="clean_cmd",
                 event=POST_TOOL,
                 command='python -c "import sys; sys.exit(0)"',

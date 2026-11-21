@@ -7,8 +7,7 @@ from typing import Any
 ASSISTANT_EXTRA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning", "reasoning_details")
 
 DOOM_LOOP = "doom_loop"
-DEFAULT_DOOM_LOOP_THRESHOLD = 3
-DEFAULT_DOOM_LOOP_MAX_NUDGES = 1
+HOOK_BLOCKED = "hook_blocked"
 
 
 @dataclass

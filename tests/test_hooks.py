@@ -8,21 +8,21 @@ from pathlib import Path
 from core.environment import Environment
 from core.harness import Harness
 from core.hooks import (
+    DOOM_LOOP_HOOK_NAME,
     POST_STEP,
     POST_TURN,
     PRE_STEP,
     PRE_TOOL,
     PRE_TURN,
     PYTHON_SYNTAX_HOOK_NAME,
-    CommandHook,
-    FunctionHook,
+    Hook,
     HookDecision,
     HookRegistry,
 )
 from core.loop import AgentLoop
 from core.memory import Memory
 from core.model import MockModel
-from core.session import run_steps
+from core.session import HOOK_BLOCKED, run_steps
 from core.tools import BashTool, ReadFileTool, ToolRegistry, WriteFileTool
 from core.tracer import Tracer
 from core.tui import TUIState
@@ -54,11 +54,11 @@ class TestGenericHooks(unittest.TestCase):
         """Invariant: default hooks register automatically and can be removed by name."""
         reg = HookRegistry.with_defaults()
         self.assertIn(PYTHON_SYNTAX_HOOK_NAME, reg)
+        self.assertIn(DOOM_LOOP_HOOK_NAME, reg)
         self.assertTrue(reg.unregister(PYTHON_SYNTAX_HOOK_NAME))
         self.assertNotIn(PYTHON_SYNTAX_HOOK_NAME, reg)
         self.assertFalse(reg.unregister(PYTHON_SYNTAX_HOOK_NAME))
 
-        # Disable via project config disabled_hooks (even without trust_project_tools)
         (self.workspace / ".microharness").mkdir()
         (self.workspace / ".microharness" / "config.json").write_text(
             json.dumps({"disabled_hooks": [PYTHON_SYNTAX_HOOK_NAME]}),
@@ -107,7 +107,6 @@ class TestGenericHooks(unittest.TestCase):
         )
         self.assertNotIn(PYTHON_SYNTAX_HOOK_NAME, harness2.hooks)
 
-        # Harness(..., include_default_hooks=False) starts without default hooks
         harness3 = Harness(
             model=MockModel([]),
             workspace_dir=self.workspace,
@@ -119,11 +118,11 @@ class TestGenericHooks(unittest.TestCase):
         )
         self.assertEqual(harness3.hooks.list_hooks(), [])
 
-    def test_pre_tool_hook_blocks_execution_via_function_or_command(self):
-        """Invariant: pre_tool hooks returning block=True or non-zero CommandHook prevent tool execution."""
+    def test_pre_tool_hook_blocks_execution_via_callable_or_command(self):
+        """Invariant: pre_tool hooks returning block=True or non-zero command exit prevent tool execution."""
         hooks = HookRegistry.empty()
         hooks.register(
-            FunctionHook(
+            Hook(
                 name="block_rm",
                 event=PRE_TOOL,
                 matcher="bash",
@@ -151,10 +150,9 @@ class TestGenericHooks(unittest.TestCase):
         self.assertEqual(allowed.exit_code, 0)
         self.assertEqual(allowed.output.strip(), "safe")
 
-        # CommandHook on pre_tool blocks on non-zero exit
         cmd_hooks = HookRegistry.empty()
         cmd_hooks.register(
-            CommandHook(
+            Hook(
                 name="guard_cmd",
                 event=PRE_TOOL,
                 matcher="write_file",
@@ -178,20 +176,14 @@ class TestGenericHooks(unittest.TestCase):
         """Invariant: pre_turn, pre_step, post_step, and post_turn fire in order and support blocking."""
         events: list[str] = []
         hooks = HookRegistry.empty()
-        hooks.register(FunctionHook("h1", PRE_TURN, lambda _c: events.append("pre_turn") and None))
+        hooks.register(Hook("h1", PRE_TURN, fn=lambda _c: events.append("pre_turn") and None))
         hooks.register(
-            FunctionHook(
-                "h2", PRE_STEP, lambda c: events.append(f"pre_step:{c.step_index}") and None
-            )
+            Hook("h2", PRE_STEP, fn=lambda c: events.append(f"pre_step:{c.step_index}") and None)
         )
         hooks.register(
-            FunctionHook(
-                "h3", POST_STEP, lambda c: events.append(f"post_step:{c.step_index}") and None
-            )
+            Hook("h3", POST_STEP, fn=lambda c: events.append(f"post_step:{c.step_index}") and None)
         )
-        hooks.register(
-            FunctionHook("h4", POST_TURN, lambda _c: events.append("post_turn") and None)
-        )
+        hooks.register(Hook("h4", POST_TURN, fn=lambda _c: events.append("post_turn") and None))
 
         reg = ToolRegistry(env=self.env, hooks=hooks)
         reg.register(ReadFileTool(self.env))
@@ -215,23 +207,21 @@ class TestGenericHooks(unittest.TestCase):
             ["pre_turn", "pre_step:1", "post_step:1", "pre_step:2", "post_step:2", "post_turn"],
         )
 
-        # pre_turn block halts run_steps immediately before any model call
         block_hooks = HookRegistry.empty()
         block_hooks.register(
-            FunctionHook(
+            Hook(
                 "stop_turn",
                 PRE_TURN,
-                lambda _c: HookDecision(message="Workspace dirty; commit first", block=True),
+                fn=lambda _c: HookDecision(message="Workspace dirty; commit first", block=True),
             )
         )
         reg_b = ToolRegistry(env=self.env, hooks=block_hooks)
         loop_b = AgentLoop(model=MockModel([("Unreachable", [])]), memory=mem, tools=reg_b)
         out_b = run_steps(loop_b.model, loop_b, tracer, start_step=1, max_steps=5)
         self.assertFalse(out_b.finished)
-        self.assertEqual(out_b.reason, "hook_blocked")
+        self.assertEqual(out_b.reason, HOOK_BLOCKED)
         self.assertEqual(out_b.detail, "Workspace dirty; commit first")
 
-        # TuiTurnRunner also enforces pre_turn block
         state = TUIState(title="test")
         runner = TuiTurnRunner(
             model=loop_b.model,
@@ -292,7 +282,6 @@ class TestGenericHooks(unittest.TestCase):
             ("Done", []),
         ]
 
-        # Untrusted: global runs, project skipped with warning
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             untrusted = Harness(
@@ -313,7 +302,6 @@ class TestGenericHooks(unittest.TestCase):
         self.assertIn("GLOBAL_HOOK", out_u)
         self.assertNotIn("PROJECT_HOOK", out_u)
 
-        # Trusted: both global and project run
         trusted = Harness(
             model=MockModel(script),
             workspace_dir=self.workspace,

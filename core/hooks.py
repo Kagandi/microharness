@@ -1,18 +1,20 @@
-"""Generic lifecycle hook registry, built-in default hooks, and config loader.
+"""Generic lifecycle hook registry and built-in default hooks.
 
-Hooks run at well-defined lifecycle events (``pre_turn``, ``post_turn``,
-``pre_step``, ``post_step``, ``pre_tool``, ``post_tool``) without adding
-feature-specific wiring to individual tools or loops.
+Lifecycle events: ``pre_turn``, ``post_turn``, ``pre_step``, ``post_step``,
+``pre_tool``, ``post_tool``.
 
-Built-in default hooks (such as Python syntax diagnostics on ``write_file`` /
-``edit_file``) are registered automatically and can be removed programmatically
-via :meth:`HookRegistry.unregister` / :meth:`HookRegistry.disable` or via
-``disabled_hooks`` / ``{"enabled": false}`` in configuration files.
+Built-in default hooks (``python_syntax_diagnostics`` and
+``doom_loop_detection``) are registered automatically and can be removed or
+overridden by name via :meth:`HookRegistry.unregister` /
+:meth:`HookRegistry.disable`, ``disabled_hooks``, or ``hooks`` configuration.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
+import os
 import re
 import shlex
 import subprocess
@@ -23,10 +25,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from core.editing import check_python_syntax
-from core.types import ToolCall
+from core.types import DOOM_LOOP, ToolCall, ToolResult
 
 if TYPE_CHECKING:
     from core.environment import Environment
+    from core.memory import Memory
 
 PRE_TURN = "pre_turn"
 POST_TURN = "post_turn"
@@ -40,6 +43,9 @@ HOOK_EVENTS: frozenset[str] = frozenset(
 )
 
 PYTHON_SYNTAX_HOOK_NAME = "python_syntax_diagnostics"
+DOOM_LOOP_HOOK_NAME = "doom_loop_detection"
+DEFAULT_DOOM_LOOP_THRESHOLD = 3
+DEFAULT_DOOM_LOOP_MAX_NUDGES = 1
 DEFAULT_HOOK_COMMAND_TIMEOUT = 10.0
 DEFAULT_MAX_HOOK_OUTPUT_CHARS = 2000
 
@@ -50,6 +56,7 @@ class HookContext:
 
     event: str
     env: Environment | None = None
+    memory: Memory | None = None
     tool_name: str = ""
     tool_call: ToolCall | None = None
     tool_args: dict[str, Any] | None = None
@@ -58,15 +65,20 @@ class HookContext:
     step_index: int | None = None
     modifies_files: bool = False
     path: str | None = None
+    tool_calls: Sequence[ToolCall] = ()
+    tool_results: Sequence[ToolResult] = ()
+    modifies_files_fn: Callable[[str], bool] | None = None
+    state: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class HookDecision:
-    """Structured result returned by a hook when it needs to block or message."""
+    """Structured result returned by a hook to surface feedback or stop execution."""
 
     message: str = ""
     block: bool = False
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,7 @@ class HookOutcome:
     """Aggregated outcome across all hooks that ran for one event."""
 
     blocked: bool = False
+    stop_reason: str | None = None
     messages: tuple[str, ...] = ()
 
     @property
@@ -82,19 +95,15 @@ class HookOutcome:
 
 
 @runtime_checkable
-class Hook(Protocol):
+class HookProtocol(Protocol):
     """Protocol for pluggable lifecycle hooks."""
 
     name: str
     event: str
 
-    def matches(self, ctx: HookContext) -> bool:
-        """Returns True if this hook should run for ``ctx``."""
-        ...
+    def matches(self, ctx: HookContext) -> bool: ...
 
-    def run(self, ctx: HookContext) -> HookDecision | str | None:
-        """Executes the hook for ``ctx`` and optionally returns a message or block decision."""
-        ...
+    def run(self, ctx: HookContext) -> HookDecision | str | None: ...
 
 
 def _matches_tool_pattern(matcher: str | None, tool_name: str) -> bool:
@@ -116,86 +125,60 @@ def _matches_path_glob(path_glob: str | None, path: str | None) -> bool:
     return fnmatch.fnmatch(path, path_glob) or fnmatch.fnmatch(Path(path).name, path_glob)
 
 
-def _hook_matches(
-    ctx: HookContext,
-    *,
-    event: str,
-    matcher: str | None,
-    path_glob: str | None,
-    only_on_success: bool,
-) -> bool:
-    if ctx.event != event:
-        return False
-    if only_on_success and ctx.exit_code is not None and ctx.exit_code != 0:
-        return False
-    if not _matches_tool_pattern(matcher, ctx.tool_name):
-        return False
-    if not _matches_path_glob(path_glob, ctx.path):
-        return False
-    return True
-
-
-def _render_command_template(command: str, ctx: HookContext) -> str:
-    rendered = command.strip()
+def _run_command_hook(
+    command: str, name: str, timeout: float, ctx: HookContext
+) -> HookDecision | str | None:
+    stripped = command.strip()
+    if not stripped:
+        return None
     replacements = {
         "{path}": shlex.quote(ctx.path or ""),
         "{tool}": shlex.quote(ctx.tool_name),
         "{event}": shlex.quote(ctx.event),
     }
+    rendered = stripped
     for token, value in replacements.items():
         if token in rendered:
             rendered = rendered.replace(token, value)
-    return rendered
+
+    if ctx.env is not None:
+        exit_code, output = ctx.env.execute_bash(rendered, timeout=timeout)
+    else:
+        try:
+            proc = subprocess.run(
+                rendered,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            exit_code, output = proc.returncode, proc.stdout
+        except subprocess.TimeoutExpired:
+            exit_code, output = 124, f"[Hook '{name}' timed out after {timeout}s]"
+
+    if exit_code == 0:
+        return None
+    cleaned = (output or "").strip()
+    if not cleaned:
+        cleaned = f"Hook '{name}' command exited with code {exit_code}."
+    elif len(cleaned) > DEFAULT_MAX_HOOK_OUTPUT_CHARS:
+        cleaned = f"{cleaned[:DEFAULT_MAX_HOOK_OUTPUT_CHARS].rstrip()}\n... (hook output truncated)"
+    return HookDecision(message=cleaned, block=True) if ctx.event.startswith("pre_") else cleaned
 
 
-class FunctionHook:
-    """Callable-backed lifecycle hook with optional tool/path filtering."""
-
-    def __init__(
-        self,
-        name: str,
-        event: str,
-        fn: Callable[[HookContext], HookDecision | str | None],
-        *,
-        matcher: str | None = None,
-        path_glob: str | None = None,
-        only_on_success: bool = False,
-    ):
-        if event not in HOOK_EVENTS:
-            raise ValueError(f"Unsupported hook event: '{event}'.")
-        self.name = name
-        self.event = event
-        self.fn = fn
-        self.matcher = matcher
-        self.path_glob = path_glob
-        self.only_on_success = only_on_success
-
-    def matches(self, ctx: HookContext) -> bool:
-        return _hook_matches(
-            ctx,
-            event=self.event,
-            matcher=self.matcher,
-            path_glob=self.path_glob,
-            only_on_success=self.only_on_success,
-        )
-
-    def run(self, ctx: HookContext) -> HookDecision | str | None:
-        return self.fn(ctx)
-
-
-class CommandHook:
-    """Shell-command lifecycle hook configured in config or Python.
-
-    On ``pre_*`` events, a non-zero exit code blocks the action.
-    On ``post_*`` events, non-zero exit output is surfaced concisely as feedback.
-    """
+class Hook:
+    """Lifecycle hook backed by a Python callable or shell command."""
 
     def __init__(
         self,
         name: str,
         event: str,
-        command: str,
         *,
+        fn: Callable[[HookContext], HookDecision | str | None] | None = None,
+        command: str | None = None,
         matcher: str | None = None,
         path_glob: str | None = None,
         only_on_success: bool = False,
@@ -203,8 +186,11 @@ class CommandHook:
     ):
         if event not in HOOK_EVENTS:
             raise ValueError(f"Unsupported hook event: '{event}'.")
+        if fn is None and (not isinstance(command, str) or not command.strip()):
+            raise ValueError(f"Hook '{name}' must define either 'fn' or a non-empty 'command'.")
         self.name = name
         self.event = event
+        self.fn = fn
         self.command = command
         self.matcher = matcher
         self.path_glob = path_glob
@@ -212,52 +198,19 @@ class CommandHook:
         self.timeout = float(timeout)
 
     def matches(self, ctx: HookContext) -> bool:
-        return _hook_matches(
-            ctx,
-            event=self.event,
-            matcher=self.matcher,
-            path_glob=self.path_glob,
-            only_on_success=self.only_on_success,
-        )
+        if ctx.event != self.event:
+            return False
+        if self.only_on_success and ctx.exit_code is not None and ctx.exit_code != 0:
+            return False
+        if not _matches_tool_pattern(self.matcher, ctx.tool_name):
+            return False
+        return _matches_path_glob(self.path_glob, ctx.path)
 
     def run(self, ctx: HookContext) -> HookDecision | str | None:
-        stripped = self.command.strip()
-        if not stripped:
-            return None
-        rendered = _render_command_template(stripped, ctx)
-
-        if ctx.env is not None:
-            exit_code, output = ctx.env.execute_bash(rendered, timeout=self.timeout)
-        else:
-            try:
-                proc = subprocess.run(
-                    rendered,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=self.timeout,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                exit_code, output = proc.returncode, proc.stdout
-            except subprocess.TimeoutExpired:
-                exit_code, output = 124, f"[Hook '{self.name}' timed out after {self.timeout}s]"
-
-        if exit_code == 0:
-            return None
-
-        cleaned = (output or "").strip()
-        if not cleaned:
-            cleaned = f"Hook '{self.name}' command exited with code {exit_code}."
-        elif len(cleaned) > DEFAULT_MAX_HOOK_OUTPUT_CHARS:
-            cleaned = (
-                f"{cleaned[:DEFAULT_MAX_HOOK_OUTPUT_CHARS].rstrip()}\n... (hook output truncated)"
-            )
-
-        if self.event.startswith("pre_"):
-            return HookDecision(message=cleaned, block=True)
-        return cleaned
+        if self.fn is not None:
+            return self.fn(ctx)
+        assert self.command is not None
+        return _run_command_hook(self.command, self.name, self.timeout, ctx)
 
 
 def _python_syntax_hook(ctx: HookContext) -> str | None:
@@ -284,25 +237,160 @@ def _python_syntax_hook(ctx: HookContext) -> str | None:
     return f"[Post-edit diagnostics]\n{err}" if err else None
 
 
+def _is_oscillating(history: Sequence[str], threshold: int) -> bool:
+    window = max(3, threshold)
+    if len(history) < window:
+        return False
+    tail = history[-window:]
+    return tail[0] != tail[1] and all(tail[i] == tail[i % 2] for i in range(window))
+
+
+def make_doom_loop_hook(
+    threshold: int = DEFAULT_DOOM_LOOP_THRESHOLD,
+    max_nudges: int = DEFAULT_DOOM_LOOP_MAX_NUDGES,
+    *,
+    name: str = DOOM_LOOP_HOOK_NAME,
+) -> Hook:
+    """Creates a stateful-per-loop ``post_step`` hook that detects repeated failures and edit oscillation."""
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 0:
+        raise ValueError(f"Unsupported doom-loop threshold: {threshold!r}. Must be >= 0.")
+    if isinstance(max_nudges, bool) or not isinstance(max_nudges, int) or max_nudges < 0:
+        raise ValueError(f"Unsupported doom-loop max_nudges: {max_nudges!r}. Must be >= 0.")
+
+    def _run(ctx: HookContext) -> HookDecision | None:
+        if threshold <= 0 or not ctx.tool_calls:
+            return None
+
+        state = ctx.state.setdefault(
+            name,
+            {
+                "last_failure_sig": None,
+                "failure_streak": 0,
+                "edit_history": {},
+                "nudges_sent": 0,
+            },
+        )
+        results_by_id = {r.call_id: r for r in ctx.tool_results if r.call_id}
+        failing_sigs: list[tuple[str, str, int]] = []
+        any_file_modified = False
+        edit_reason = ""
+
+        for idx, call in enumerate(ctx.tool_calls):
+            result = results_by_id.get(call.id) or (
+                ctx.tool_results[idx] if idx < len(ctx.tool_results) else None
+            )
+            exit_code = result.exit_code if result is not None else 0
+            is_modifier = (
+                ctx.modifies_files_fn(call.name)
+                if ctx.modifies_files_fn is not None
+                else call.name in {"write_file", "edit_file"}
+            )
+            if (
+                exit_code == 0
+                and is_modifier
+                and isinstance(call.arguments, dict)
+                and call.arguments.get("path")
+            ):
+                any_file_modified = True
+                raw_path = str(call.arguments["path"])
+                norm_path = os.path.normpath(raw_path)
+                digest: str | None = None
+                if ctx.env is not None:
+                    try:
+                        resolved = ctx.env.resolve_path(raw_path)
+                        norm_path = str(resolved)
+                        if isinstance(resolved, Path) and resolved.is_file():
+                            digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                    except Exception:
+                        digest = None
+                if digest is None and call.name == "write_file" and "content" in call.arguments:
+                    digest = hashlib.sha256(
+                        str(call.arguments["content"]).encode("utf-8", errors="replace")
+                    ).hexdigest()
+                if digest is not None:
+                    hist: list[str] = state["edit_history"].setdefault(norm_path, [])
+                    hist.append(digest)
+                    if _is_oscillating(hist, threshold):
+                        edit_reason = (
+                            f"Edit oscillation detected on '{raw_path}' "
+                            "(repeatedly reverting between prior file states)."
+                        )
+                    elif (
+                        threshold >= 2
+                        and len(hist) >= threshold
+                        and len(set(hist[-threshold:])) == 1
+                    ):
+                        edit_reason = (
+                            f"Repeated identical edit state on '{raw_path}' ({threshold} times)."
+                        )
+            elif exit_code != 0:
+                canon_args = (
+                    json.dumps(call.arguments, sort_keys=True, default=str)
+                    if isinstance(call.arguments, dict)
+                    else str(call.arguments)
+                )
+                failing_sigs.append((call.name, canon_args, exit_code))
+
+        if any_file_modified or not failing_sigs:
+            state["last_failure_sig"] = None
+            state["failure_streak"] = 0
+        else:
+            sig = tuple(failing_sigs)
+            if sig == state["last_failure_sig"]:
+                state["failure_streak"] += 1
+            else:
+                state["last_failure_sig"] = sig
+                state["failure_streak"] = 1
+
+        reason = ""
+        if state["failure_streak"] >= threshold:
+            names = ", ".join(sorted({s[0] for s in state["last_failure_sig"] or ()}))
+            reason = (
+                f"Repeated identical failing tool call ({names}) "
+                f"{state['failure_streak']} consecutive times."
+            )
+        elif edit_reason:
+            reason = edit_reason
+
+        if not reason:
+            return None
+
+        if state["nudges_sent"] < max_nudges:
+            state["nudges_sent"] += 1
+            if ctx.memory is not None:
+                ctx.memory.add_user(
+                    f"[Loop guard] {reason} Step back and reconsider your approach: "
+                    "re-read the relevant file(s) or error output carefully, verify your "
+                    "assumptions, and try a different fix instead of repeating the same "
+                    "edits or failing calls."
+                )
+            return HookDecision(message=f"Loop guard: {reason}", block=False)
+
+        return HookDecision(message=reason, block=True, stop_reason=DOOM_LOOP)
+
+    return Hook(name=name, event=POST_STEP, fn=_run)
+
+
 def build_default_hooks() -> list[Hook]:
-    """Returns the built-in default hooks registered on new harnesses/registries."""
+    """Returns built-in default hooks registered on new harnesses and registries."""
     return [
-        FunctionHook(
+        Hook(
             name=PYTHON_SYNTAX_HOOK_NAME,
             event=POST_TOOL,
             fn=_python_syntax_hook,
             matcher="write_file|edit_file",
             path_glob="*.py",
             only_on_success=True,
-        )
+        ),
+        make_doom_loop_hook(),
     ]
 
 
 class HookRegistry:
     """Ordered registry of lifecycle hooks with name-based removal and disabling."""
 
-    def __init__(self, hooks: Iterable[Hook] = ()):
-        self._hooks: list[Hook] = []
+    def __init__(self, hooks: Iterable[HookProtocol] = ()):
+        self._hooks: list[HookProtocol] = []
         self._disabled: set[str] = set()
         for hook in hooks:
             self.register(hook)
@@ -315,8 +403,7 @@ class HookRegistry:
     def with_defaults(cls) -> HookRegistry:
         return cls(build_default_hooks())
 
-    def register(self, hook: Hook) -> None:
-        """Registers (or replaces by name) a hook."""
+    def register(self, hook: HookProtocol) -> None:
         if hook.event not in HOOK_EVENTS:
             raise ValueError(f"Unsupported hook event: '{hook.event}'.")
         if not hook.name:
@@ -326,39 +413,24 @@ class HookRegistry:
         self._hooks.append(hook)
 
     def unregister(self, name: str) -> bool:
-        """Removes a registered hook by name. Returns True if one was removed."""
         before = len(self._hooks)
         self._hooks = [h for h in self._hooks if h.name != name]
         return len(self._hooks) < before
 
-    def remove(self, name: str) -> bool:
-        """Alias for :meth:`unregister`."""
-        return self.unregister(name)
-
     def disable(self, name: str) -> bool:
-        """Removes ``name`` and remembers it as disabled."""
         self._disabled.add(name)
         return self.unregister(name)
 
-    def is_disabled(self, name: str) -> bool:
-        return name in self._disabled
-
-    def get(self, name: str) -> Hook | None:
-        for hook in self._hooks:
-            if hook.name == name:
-                return hook
-        return None
+    def get(self, name: str) -> HookProtocol | None:
+        return next((h for h in self._hooks if h.name == name), None)
 
     def __contains__(self, name: str) -> bool:
         return self.get(name) is not None
 
-    def list_hooks(self, event: str | None = None) -> list[Hook]:
-        if event is None:
-            return list(self._hooks)
-        return [h for h in self._hooks if h.event == event]
+    def list_hooks(self, event: str | None = None) -> list[HookProtocol]:
+        return [h for h in self._hooks if event is None or h.event == event]
 
     def run(self, event: str, ctx: HookContext) -> HookOutcome:
-        """Executes all matching hooks for ``event`` and returns their aggregated outcome."""
         if not self._hooks:
             return HookOutcome()
 
@@ -383,7 +455,11 @@ class HookRegistry:
                 if cleaned and cleaned not in messages:
                     messages.append(cleaned)
                 if result.block:
-                    return HookOutcome(blocked=True, messages=tuple(messages))
+                    return HookOutcome(
+                        blocked=True,
+                        stop_reason=result.stop_reason,
+                        messages=tuple(messages),
+                    )
             else:
                 cleaned = str(result).strip()
                 if cleaned and cleaned not in messages:
@@ -393,10 +469,9 @@ class HookRegistry:
 
 
 def parse_hook_specs(raw: Any, *, scope: str = "explicit") -> list[dict[str, Any]]:
-    """Normalizes ``hooks`` config structures (event-mapped dict or list of specs) into flat dicts."""
+    """Normalizes ``hooks`` config structures (event-mapped dict or list) into flat dicts."""
     if not raw:
         return []
-
     specs: list[dict[str, Any]] = []
     if isinstance(raw, Mapping):
         for event, entries in raw.items():
@@ -405,107 +480,43 @@ def parse_hook_specs(raw: Any, *, scope: str = "explicit") -> list[dict[str, Any
                     f"Unsupported hook event '{event}' in {scope} hooks config. "
                     f"Valid events: {', '.join(sorted(HOOK_EVENTS))}"
                 )
-            items = entries if isinstance(entries, list) else [entries]
-            for item in items:
-                if isinstance(item, Mapping):
-                    spec = dict(item)
-                    spec.setdefault("event", event)
-                    spec["_scope"] = scope
-                    specs.append(spec)
-                else:
+            for item in entries if isinstance(entries, list) else [entries]:
+                if not isinstance(item, Mapping):
                     raise ValueError(f"Invalid hook entry under '{event}': expected object.")
+                specs.append({"event": event, **item, "_scope": scope})
         return specs
 
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         for item in raw:
-            if not isinstance(item, Mapping):
-                raise ValueError("Invalid hook entry in hooks list: expected object.")
-            spec = dict(item)
-            event = spec.get("event")
-            if event not in HOOK_EVENTS:
-                raise ValueError(
-                    f"Unsupported or missing hook event {event!r} in {scope} hooks config."
-                )
-            spec["_scope"] = scope
-            specs.append(spec)
+            if not isinstance(item, Mapping) or item.get("event") not in HOOK_EVENTS:
+                raise ValueError(f"Invalid or missing hook event in {scope} hooks list.")
+            specs.append({**item, "_scope": scope})
         return specs
 
-    raise ValueError(
-        "Invalid hooks config: expected a mapping of event -> list or a list of hooks."
-    )
-
-
-def build_hook_from_spec(spec: Mapping[str, Any], index: int = 0) -> Hook:
-    """Constructs a :class:`CommandHook` (or callable :class:`FunctionHook`) from a normalized dict."""
-    event = str(spec.get("event") or "")
-    if event not in HOOK_EVENTS:
-        raise ValueError(f"Unsupported hook event: {event!r}.")
-
-    name = str(spec.get("name") or "").strip() or f"{event}_hook_{index}"
-    matcher = str(spec["matcher"]).strip() if spec.get("matcher") else None
-    path_glob = str(spec["path_glob"]).strip() if spec.get("path_glob") else None
-    only_on_success = bool(spec.get("only_on_success", False))
-
-    fn = spec.get("fn")
-    if callable(fn):
-        return FunctionHook(
-            name=name,
-            event=event,
-            fn=fn,
-            matcher=matcher,
-            path_glob=path_glob,
-            only_on_success=only_on_success,
-        )
-
-    command = spec.get("command")
-    if not isinstance(command, str) or not command.strip():
-        raise ValueError(f"Hook '{name}' must specify a non-empty 'command' or callable 'fn'.")
-
-    raw_timeout = spec.get("timeout", DEFAULT_HOOK_COMMAND_TIMEOUT)
-    if (
-        isinstance(raw_timeout, bool)
-        or not isinstance(raw_timeout, (int, float))
-        or raw_timeout <= 0
-    ):
-        raise ValueError(f"Hook '{name}' timeout must be a positive number, got {raw_timeout!r}.")
-
-    return CommandHook(
-        name=name,
-        event=event,
-        command=command.strip(),
-        matcher=matcher,
-        path_glob=path_glob,
-        only_on_success=only_on_success,
-        timeout=float(raw_timeout),
-    )
+    raise ValueError("Invalid hooks config: expected an event mapping or list of hooks.")
 
 
 def build_hook_registry(
     *,
     include_defaults: bool = True,
     hook_specs: Sequence[Mapping[str, Any]] = (),
-    extra_hooks: Iterable[Hook | Mapping[str, Any]] = (),
+    extra_hooks: Iterable[HookProtocol | Mapping[str, Any]] = (),
     disabled_hooks: Iterable[str] = (),
     trust_project_hooks: bool = False,
 ) -> HookRegistry:
-    """Assembles a :class:`HookRegistry` from defaults, config specs, and explicit hooks.
-
-    Project-scoped command hooks are skipped unless ``trust_project_hooks=True``
-    to preserve the workspace execution trust boundary.
-    """
+    """Builds a :class:`HookRegistry` from defaults, config specs, and explicit hooks."""
     registry = HookRegistry.with_defaults() if include_defaults else HookRegistry.empty()
-    disabled: set[str] = {str(name).strip() for name in disabled_hooks if str(name).strip()}
+    disabled: set[str] = {str(n).strip() for n in disabled_hooks if str(n).strip()}
     warned_untrusted = False
 
     def _apply_spec(spec: Mapping[str, Any], idx: int) -> None:
         nonlocal warned_untrusted
-        name = str(spec.get("name") or "").strip()
+        event = str(spec.get("event") or "")
+        name = str(spec.get("name") or "").strip() or f"{event}_hook_{idx}"
         if spec.get("enabled") is False:
-            if name:
-                disabled.add(name)
+            disabled.add(name)
             return
-        scope = str(spec.get("_scope") or "explicit")
-        if scope == "project" and not trust_project_hooks and "command" in spec:
+        if spec.get("_scope") == "project" and not trust_project_hooks and "command" in spec:
             if not warned_untrusted:
                 print(
                     "⚠️ Warning: Skipping untrusted project hook(s) in .microharness/config.json. "
@@ -514,8 +525,35 @@ def build_hook_registry(
                 )
                 warned_untrusted = True
             return
-        hook = build_hook_from_spec(spec, index=idx)
-        registry.register(hook)
+
+        if name == DOOM_LOOP_HOOK_NAME and "command" not in spec and "fn" not in spec:
+            threshold = spec.get("threshold", DEFAULT_DOOM_LOOP_THRESHOLD)
+            max_nudges = spec.get("max_nudges", DEFAULT_DOOM_LOOP_MAX_NUDGES)
+            registry.register(make_doom_loop_hook(threshold=threshold, max_nudges=max_nudges))
+            return
+
+        raw_timeout = spec.get("timeout", DEFAULT_HOOK_COMMAND_TIMEOUT)
+        if (
+            isinstance(raw_timeout, bool)
+            or not isinstance(raw_timeout, (int, float))
+            or raw_timeout <= 0
+        ):
+            raise ValueError(
+                f"Hook '{name}' timeout must be a positive number, got {raw_timeout!r}."
+            )
+
+        registry.register(
+            Hook(
+                name=name,
+                event=event,
+                fn=spec.get("fn"),
+                command=spec.get("command"),
+                matcher=str(spec["matcher"]).strip() if spec.get("matcher") else None,
+                path_glob=str(spec["path_glob"]).strip() if spec.get("path_glob") else None,
+                only_on_success=bool(spec.get("only_on_success", False)),
+                timeout=float(raw_timeout),
+            )
+        )
 
     for idx, spec in enumerate(hook_specs, start=1):
         _apply_spec(spec, idx)

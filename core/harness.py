@@ -27,7 +27,7 @@ from core.config import (
 from core.discovery import discover_workspace_files
 from core.environment import DockerEnvironment, Environment
 from core.evaluator import Evaluator
-from core.hooks import Hook, HookRegistry, build_hook_registry, parse_hook_specs
+from core.hooks import HookProtocol, HookRegistry, build_hook_registry, parse_hook_specs
 from core.interactive import (
     TURN,
     CommandContext,
@@ -147,11 +147,12 @@ class Harness:
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
         subagent_max_steps: int | None = None,
-        hooks: HookRegistry | Mapping[str, Any] | Iterable[Hook | Mapping[str, Any]] | None = None,
+        hooks: HookRegistry
+        | Mapping[str, Any]
+        | Iterable[HookProtocol | Mapping[str, Any]]
+        | None = None,
         disabled_hooks: Sequence[str] | None = None,
         include_default_hooks: bool | None = None,
-        doom_loop_threshold: int | None = None,
-        doom_loop_max_nudges: int | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
@@ -164,7 +165,7 @@ class Harness:
         self.merged_config = self.layers.merged
 
         config_hook_arg: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None
-        extra_hook_items: list[Hook | Mapping[str, Any]] = []
+        extra_hook_items: list[HookProtocol | Mapping[str, Any]] = []
         if isinstance(hooks, Mapping):
             config_hook_arg = {str(k): v for k, v in hooks.items()}
         elif isinstance(hooks, Iterable) and not isinstance(hooks, (str, bytes, HookRegistry)):
@@ -195,8 +196,6 @@ class Harness:
             hooks=config_hook_arg,
             disabled_hooks=disabled_hooks,
             include_default_hooks=include_default_hooks,
-            doom_loop_threshold=doom_loop_threshold,
-            doom_loop_max_nudges=doom_loop_max_nudges,
         ).resolve(self.layers)
 
         self.sandbox = cfg.sandbox
@@ -218,8 +217,6 @@ class Harness:
         self.step_retry_delay = cfg.step_retry_delay
         self.bash_timeout = cfg.bash_timeout
         self.subagent_max_steps = cfg.subagent_max_steps
-        self.doom_loop_threshold = cfg.doom_loop_threshold
-        self.doom_loop_max_nudges = cfg.doom_loop_max_nudges
 
         self.trust_project_tools, project_claim_ignored = resolve_project_tool_trust(
             trust_project_tools, self.layers
@@ -623,8 +620,6 @@ class Harness:
                     agents_instructions=load_agents_instructions(ws_dir, self.global_dir),
                     skills_index=render_skills_index(discover_skills(ws_dir, self.global_dir)),
                     default_max_steps=self.subagent_max_steps,
-                    doom_loop_threshold=self.doom_loop_threshold,
-                    doom_loop_max_nudges=self.doom_loop_max_nudges,
                 )
             )
         elif self.custom_tools:
@@ -781,13 +776,7 @@ class Harness:
             verbose=self.verbose,
             formatters=self.action_formatters,
         )
-        loop = AgentLoop(
-            model=self.model,
-            memory=memory,
-            tools=tool_registry,
-            doom_loop_threshold=self.doom_loop_threshold,
-            doom_loop_max_nudges=self.doom_loop_max_nudges,
-        )
+        loop = AgentLoop(model=self.model, memory=memory, tools=tool_registry)
         self.active_loop = loop
 
         subagent_tool = tool_registry.get("subagent")

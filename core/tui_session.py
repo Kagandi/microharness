@@ -11,8 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from core.hooks import POST_TURN, PRE_TURN, HookContext, HookRegistry
-from core.loop import DOOM_LOOP, AgentLoop, DoomLoopCheck
+from core.hooks import POST_TURN, PRE_TURN, HookContext, HookOutcome, HookRegistry
+from core.loop import AgentLoop
 from core.memory import Memory
 from core.protocols import CancellableModel, Model, ModelCancelledError
 from core.tracer import Tracer, _format_action_summary, _pair_calls_with_results, _preview
@@ -117,12 +117,12 @@ class TuiTurnRunner:
         self.step_index += 1
         self.render_step(step_trace)
 
-        check = getattr(self.loop, "last_doom_loop_check", None)
-        if isinstance(check, DoomLoopCheck) and check.action == "nudge":
-            self.state.add_system(f"↪️ Loop guard: {check.reason}")
+        post_outcome = getattr(self.loop, "last_post_step_outcome", None)
+        if isinstance(post_outcome, HookOutcome) and post_outcome.messages:
+            self.state.add_system(f"↪️ {post_outcome.combined_message}")
 
         stop_reason = getattr(step_trace, "stop_reason", None)
-        if stop_reason in (DOOM_LOOP, "hook_blocked"):
+        if isinstance(stop_reason, str) and stop_reason:
             detail = getattr(step_trace, "stop_detail", None) or f"Stopped ({stop_reason})."
             self.state.add_system(f"⚠️ Stopped turn ({stop_reason}): {detail}")
             self.refresh()

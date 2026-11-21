@@ -298,38 +298,21 @@ class TestRunSteps(unittest.TestCase):
         self.assertEqual(outcome.next_step, 2)
         loop.memory.add_user.assert_not_called()
 
-    def test_doom_loop_nudges_once_then_halts_for_mock_loop(self):
-        """Invariant: run_steps detects repeated failing tool calls even on non-AgentLoop doubles."""
-
-        def _failing_step():
-            tr = _Trace("trying again")
-            tr.model_response["tool_calls"] = [
-                {"id": "b1", "name": "bash", "arguments": {"command": "pytest"}}
-            ]
-            tr.tool_results = [{"call_id": "b1", "output": "failed", "exit_code": 1}]
-            return (False, tr)
-
-        loop = _traced_loop(*[_failing_step() for _ in range(6)])
-        loop.memory = MagicMock()
+    def test_run_steps_surfaces_hook_stop_reason_and_detail(self):
+        """Invariant: run_steps surfaces StepTrace.stop_reason and stop_detail cleanly."""
+        tr = _Trace("blocked")
+        tr.stop_reason = DOOM_LOOP  # type: ignore[attr-defined]
+        tr.stop_detail = "Repeated identical failing bash call."  # type: ignore[attr-defined]
+        loop = _traced_loop((True, tr))
         tracer = FakeTracer()
 
-        outcome = run_steps(
-            MockModel([]),
-            loop,
-            tracer,
-            start_step=1,
-            max_steps=6,
-            doom_loop_threshold=3,
-            doom_loop_max_nudges=1,
-        )
+        outcome = run_steps(MockModel([]), loop, tracer, start_step=1, max_steps=5)
 
         self.assertFalse(outcome.finished)
         self.assertEqual(outcome.reason, DOOM_LOOP)
-        self.assertEqual(outcome.next_step, 5)
-        self.assertIsNotNone(outcome.detail)
-        self.assertIn("bash", outcome.detail or "")
-        self.assertEqual(loop.memory.add_user.call_count, 1)
-        self.assertEqual(len(tracer.steps), 4)
+        self.assertEqual(outcome.next_step, 2)
+        self.assertEqual(outcome.detail, "Repeated identical failing bash call.")
+        self.assertEqual(len(tracer.steps), 1)
 
 
 class TestSessionResolution(unittest.TestCase):

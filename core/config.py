@@ -19,7 +19,6 @@ from typing import Any, Callable, Mapping
 
 from core.hooks import parse_hook_specs
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
-from core.types import DEFAULT_DOOM_LOOP_MAX_NUDGES, DEFAULT_DOOM_LOOP_THRESHOLD
 
 DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
 
@@ -231,19 +230,6 @@ def _coerce_bool(val: Any) -> bool:
     return bool(val)
 
 
-def _coerce_non_negative_int(raw: Any, name: str) -> int:
-    """Validates and converts a non-negative integer setting, rejecting booleans and floats."""
-    if isinstance(raw, (bool, float)):
-        raise ValueError(f"Unsupported {name}: {raw!r}. Must be a non-negative integer.")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Unsupported {name}: {raw!r}. Must be a non-negative integer.") from exc
-    if value < 0:
-        raise ValueError(f"Unsupported {name}: {value}. Must be a non-negative integer.")
-    return value
-
-
 def _coerce_string_list(raw: Any, name: str) -> list[str]:
     """Normalizes an optional string sequence config entry into a list of non-empty strings."""
     if raw is None:
@@ -287,8 +273,6 @@ class HarnessConfig:
     hooks: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None
     disabled_hooks: Sequence[str] | None = None
     include_default_hooks: bool | None = None
-    doom_loop_threshold: int | None = None
-    doom_loop_max_nudges: int | None = None
 
     def resolve(self, layers: ConfigLayers) -> "ResolvedConfig":
         """Applies the precedence cascade and normalizes validated settings."""
@@ -355,28 +339,6 @@ class HarnessConfig:
             if candidate not in disabled_seen:
                 disabled_seen.append(candidate)
 
-        raw_doom_threshold = (
-            self.doom_loop_threshold
-            if self.doom_loop_threshold is not None
-            else layers.merged.get("doom_loop_threshold")
-        )
-        doom_loop_threshold = (
-            DEFAULT_DOOM_LOOP_THRESHOLD
-            if raw_doom_threshold is None
-            else _coerce_non_negative_int(raw_doom_threshold, "doom_loop_threshold")
-        )
-
-        raw_doom_nudges = (
-            self.doom_loop_max_nudges
-            if self.doom_loop_max_nudges is not None
-            else layers.merged.get("doom_loop_max_nudges")
-        )
-        doom_loop_max_nudges = (
-            DEFAULT_DOOM_LOOP_MAX_NUDGES
-            if raw_doom_nudges is None
-            else _coerce_non_negative_int(raw_doom_nudges, "doom_loop_max_nudges")
-        )
-
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
             docker=c.pick("docker", self.docker, _coerce_bool, False),
@@ -408,8 +370,6 @@ class HarnessConfig:
             include_default_hooks=c.pick(
                 "include_default_hooks", self.include_default_hooks, _coerce_bool, True
             ),
-            doom_loop_threshold=doom_loop_threshold,
-            doom_loop_max_nudges=doom_loop_max_nudges,
         )
 
 
@@ -437,8 +397,6 @@ class ResolvedConfig:
     hooks: tuple[dict[str, Any], ...]
     disabled_hooks: tuple[str, ...]
     include_default_hooks: bool
-    doom_loop_threshold: int
-    doom_loop_max_nudges: int
 
 
 def normalize_cache_ttl(ttl: str | None) -> str | None:

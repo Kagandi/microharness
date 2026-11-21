@@ -133,8 +133,6 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.hooks, ())
         self.assertEqual(cfg.disabled_hooks, ())
         self.assertEqual(cfg.include_default_hooks, True)
-        self.assertEqual(cfg.doom_loop_threshold, 3)
-        self.assertEqual(cfg.doom_loop_max_nudges, 1)
 
     def test_explicit_beats_config_file(self):
         """Invariant: explicit arguments win over both config layers."""
@@ -346,8 +344,8 @@ class TestHarnessConfigCascade(unittest.TestCase):
                     self._resolve(HarnessConfig(subagent_max_steps=bad_steps))  # type: ignore[arg-type]
                 self.assertIn("subagent_max_steps", str(ctx.exception))
 
-    def test_hooks_and_doom_loop_cascade_and_validation(self):
-        """Invariant: hooks, disabled_hooks, include_default_hooks, and doom-loop settings resolve and validate cleanly."""
+    def test_hooks_cascade_and_validation(self):
+        """Invariant: hooks, disabled_hooks, and include_default_hooks resolve and validate cleanly."""
         cfg_project = self._resolve(
             HarnessConfig(),
             global_cfg={
@@ -357,15 +355,11 @@ class TestHarnessConfigCascade(unittest.TestCase):
                     ]
                 },
                 "disabled_hooks": ["hook_a"],
-                "doom_loop_threshold": 5,
-                "doom_loop_max_nudges": 2,
             },
             project_cfg={
                 "include_default_hooks": "false",
                 "hooks": [{"name": "ty", "event": "post_tool", "command": "ty check"}],
                 "disabled_hooks": ["hook_b", "hook_a"],
-                "doom_loop_threshold": 0,
-                "doom_loop_max_nudges": 0,
             },
         )
         self.assertEqual(cfg_project.include_default_hooks, False)
@@ -374,33 +368,13 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg_project.hooks[0]["_scope"], "global")
         self.assertEqual(cfg_project.hooks[0]["event"], "post_tool")
         self.assertEqual(cfg_project.hooks[1]["_scope"], "project")
-        self.assertEqual(cfg_project.doom_loop_threshold, 0)
-        self.assertEqual(cfg_project.doom_loop_max_nudges, 0)
 
         cfg_explicit = self._resolve(
-            HarnessConfig(
-                include_default_hooks=True,
-                disabled_hooks=["hook_c"],
-                doom_loop_threshold=4,
-                doom_loop_max_nudges=2,
-            ),
-            project_cfg={
-                "include_default_hooks": False,
-                "doom_loop_threshold": 0,
-                "doom_loop_max_nudges": 0,
-            },
+            HarnessConfig(include_default_hooks=True, disabled_hooks=["hook_c"]),
+            project_cfg={"include_default_hooks": False},
         )
         self.assertEqual(cfg_explicit.include_default_hooks, True)
         self.assertEqual(cfg_explicit.disabled_hooks, ("hook_c",))
-        self.assertEqual(cfg_explicit.doom_loop_threshold, 4)
-        self.assertEqual(cfg_explicit.doom_loop_max_nudges, 2)
-
-        for key in ("doom_loop_threshold", "doom_loop_max_nudges"):
-            for bad_val in (-1, True, False, 1.5, "abc"):
-                with self.subTest(key=key, bad_val=bad_val):
-                    with self.assertRaises(ValueError) as ctx:
-                        self._resolve(HarnessConfig(**{key: bad_val}))  # type: ignore[arg-type]
-                    self.assertIn(key, str(ctx.exception))
 
         with self.assertRaises(ValueError):
             self._resolve(HarnessConfig(), project_cfg={"hooks": {"bad_event": []}})
