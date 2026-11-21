@@ -50,6 +50,7 @@ def format_tool_output(
     step_index: int,
     logs_dir: Path,
     max_tokens: int = DEFAULT_MAX_TOOL_TOKENS,
+    display_logs_dir: Path | str | None = None,
 ) -> tuple[str, bool, str | None]:
     """Applies head + tail truncation and spills full raw output to disk if too long.
 
@@ -67,7 +68,11 @@ def format_tool_output(
     try:
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_path.write_text(output, encoding="utf-8")
-        raw_log_path = str(log_path)
+        raw_log_path = (
+            f"{str(display_logs_dir).rstrip('/')}/{log_filename}"
+            if display_logs_dir is not None
+            else str(log_path)
+        )
     except OSError:
         raw_log_path = None
 
@@ -81,7 +86,7 @@ def format_tool_output(
     if raw_log_path:
         marker = (
             f"\n\n[... Truncated {truncated_count} characters ({output.count(chr(10))} total lines). "
-            f"Full raw output saved to {log_filename} ...]\n"
+            f"Full raw output saved to {raw_log_path} ...]\n"
             f"[Tip: You can use `grep` or `read_file` to inspect the full log file if needed]\n\n"
         )
     else:
@@ -373,6 +378,10 @@ class ToolRegistry:
         raw_output_str = str(raw_output) if raw_output is not None else ""
 
         try:
+            raw_agent_logs_dir = getattr(self.env, "agent_logs_dir", None)
+            display_logs_dir = (
+                raw_agent_logs_dir if isinstance(raw_agent_logs_dir, (str, Path)) else None
+            )
             formatted_output, was_truncated, raw_log_path = format_tool_output(
                 output=raw_output_str,
                 call_id=tool_call.id,
@@ -380,6 +389,7 @@ class ToolRegistry:
                 step_index=step_index,
                 logs_dir=self.env.logs_dir,
                 max_tokens=self.max_tool_tokens,
+                display_logs_dir=display_logs_dir,
             )
         except Exception:
             max_chars = self.max_tool_tokens * 4
