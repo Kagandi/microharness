@@ -4,7 +4,13 @@ import json
 import re
 from typing import Any
 
+from core.defaults import load_defaults
 from core.types import ASSISTANT_EXTRA_KEYS, Message, ToolCall, ToolResult
+
+_DEFAULTS = load_defaults()
+DEFAULT_MAX_CONTEXT_TOKENS: int = int(_DEFAULTS["max_context_tokens"])
+DEFAULT_TRIGGER_RATIO: float = float(_DEFAULTS["trigger_ratio"])
+DEFAULT_KEEP_RECENT_TURNS: int = int(_DEFAULTS["keep_recent_turns"])
 
 COMPACTION_SUMMARY_HEADER = "[Context Compaction Summary]"
 _REASONING_TAG_RE = re.compile(r"<(think|thinking)>.*?</\1>\s*", flags=re.DOTALL)
@@ -132,9 +138,9 @@ class Memory:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_context_tokens: int = 64000,
-        trigger_ratio: float = 0.80,
-        keep_recent_turns: int = 4,
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
+        trigger_ratio: float = DEFAULT_TRIGGER_RATIO,
+        keep_recent_turns: int = DEFAULT_KEEP_RECENT_TURNS,
     ):
         self.system_prompt = system_prompt
         self.max_context_tokens = max_context_tokens

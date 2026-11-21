@@ -24,8 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from core.defaults import load_defaults
 from core.editing import check_python_syntax
 from core.types import DOOM_LOOP, ToolCall, ToolResult
+
+_DEFAULTS = load_defaults()
 
 if TYPE_CHECKING:
     from core.environment import Environment
@@ -44,10 +47,10 @@ HOOK_EVENTS: frozenset[str] = frozenset(
 
 PYTHON_SYNTAX_HOOK_NAME = "python_syntax_diagnostics"
 DOOM_LOOP_HOOK_NAME = "doom_loop_detection"
-DEFAULT_DOOM_LOOP_THRESHOLD = 3
-DEFAULT_DOOM_LOOP_MAX_NUDGES = 1
-DEFAULT_HOOK_COMMAND_TIMEOUT = 10.0
-DEFAULT_MAX_HOOK_OUTPUT_CHARS = 2000
+DEFAULT_DOOM_LOOP_THRESHOLD: int = int(_DEFAULTS["doom_loop_threshold"])
+DEFAULT_DOOM_LOOP_MAX_NUDGES: int = int(_DEFAULTS["doom_loop_max_nudges"])
+DEFAULT_HOOK_COMMAND_TIMEOUT: float = float(_DEFAULTS["hook_command_timeout"])
+DEFAULT_MAX_HOOK_OUTPUT_CHARS: int = int(_DEFAULTS["max_hook_output_chars"])
 
 
 @dataclass

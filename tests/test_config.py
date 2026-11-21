@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 
 from core.config import (
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    DEFAULT_TRIGGER_RATIO,
     PROJECT_TRUST_NOTICE,
     ConfigLayers,
     HarnessConfig,
@@ -123,7 +125,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.disable_default_tools, False)
         self.assertEqual(cfg.runs_dir, None)
         self.assertEqual(cfg.max_tool_tokens, 8000)
-        self.assertEqual(cfg.max_context_tokens, 64000)
+        self.assertEqual(cfg.max_context_tokens, 262144)
         self.assertEqual(cfg.trigger_ratio, 0.80)
         self.assertEqual(cfg.cache_ttl, "5m")
         self.assertEqual(cfg.reasoning_effort, None)
@@ -205,7 +207,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         with contextlib.redirect_stderr(buf):
             cfg = self._resolve(HarnessConfig(), global_cfg={"max_tool_chars": 4000})
         self.assertEqual(cfg.max_tool_tokens, 8000)
-        self.assertEqual(cfg.max_context_tokens, 64000)
+        self.assertEqual(cfg.max_context_tokens, 262144)
         self.assertNotEqual(cfg.max_tool_tokens, 1000)
         warning = buf.getvalue()
         self.assertIn("max_tool_chars", warning)
@@ -220,7 +222,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         with contextlib.redirect_stderr(buf):
             cfg = self._resolve(HarnessConfig(), global_cfg={"max_context_chars": 40000})
         self.assertEqual(cfg.max_tool_tokens, 8000)
-        self.assertEqual(cfg.max_context_tokens, 64000)
+        self.assertEqual(cfg.max_context_tokens, 262144)
         self.assertNotEqual(cfg.max_context_tokens, 10000)
         warning = buf.getvalue()
         self.assertIn("max_context_chars", warning)
@@ -537,6 +539,50 @@ class TestGlobalDir(unittest.TestCase):
         self.assertIsInstance(resolved, Path)
         self.assertEqual(resolved.parent, Path.home())
         self.assertEqual(resolved.name, ".microharness")
+
+
+class TestDeclarativeDefaults(unittest.TestCase):
+    def test_defaults_json_syncs_across_core_modules(self):
+        """Invariant: core modules read their built-in defaults from core/defaults.json."""
+        from core.checkpoints import DEFAULT_MAX_SNAPSHOT_BYTES, DEFAULT_MAX_SNAPSHOT_FILES
+        from core.defaults import DEFAULTS_PATH, get_default, load_defaults
+        from core.discovery import DEFAULT_MAX_DISCOVERY_FILES
+        from core.hooks import (
+            DEFAULT_DOOM_LOOP_MAX_NUDGES,
+            DEFAULT_DOOM_LOOP_THRESHOLD,
+            DEFAULT_HOOK_COMMAND_TIMEOUT,
+            DEFAULT_MAX_HOOK_OUTPUT_CHARS,
+        )
+        from core.memory import Memory
+        from core.session import DEFAULT_MAX_EMPTY_NUDGES, SEARCH_LIMIT
+        from core.tools import DEFAULT_MAX_TOOL_TOKENS
+
+        raw = json.loads(DEFAULTS_PATH.read_text(encoding="utf-8"))
+        loaded = load_defaults()
+        self.assertEqual(loaded, raw)
+        self.assertEqual(DEFAULT_MAX_CONTEXT_TOKENS, 262144)
+        self.assertEqual(get_default("max_context_tokens"), 262144)
+        self.assertEqual(DEFAULT_TRIGGER_RATIO, raw["trigger_ratio"])
+        self.assertEqual(DEFAULT_MAX_TOOL_TOKENS, raw["max_tool_tokens"])
+        self.assertEqual(DEFAULT_MAX_SNAPSHOT_FILES, raw["max_snapshot_files"])
+        self.assertEqual(DEFAULT_MAX_SNAPSHOT_BYTES, raw["max_snapshot_bytes"])
+        self.assertEqual(DEFAULT_MAX_DISCOVERY_FILES, raw["max_discovery_files"])
+        self.assertEqual(DEFAULT_DOOM_LOOP_THRESHOLD, raw["doom_loop_threshold"])
+        self.assertEqual(DEFAULT_DOOM_LOOP_MAX_NUDGES, raw["doom_loop_max_nudges"])
+        self.assertEqual(DEFAULT_HOOK_COMMAND_TIMEOUT, raw["hook_command_timeout"])
+        self.assertEqual(DEFAULT_MAX_HOOK_OUTPUT_CHARS, raw["max_hook_output_chars"])
+        self.assertEqual(DEFAULT_MAX_EMPTY_NUDGES, raw["max_empty_nudges"])
+        self.assertEqual(SEARCH_LIMIT, raw["session_search_limit"])
+        mem = Memory(system_prompt="s", user_prompt="u")
+        self.assertEqual(mem.max_context_tokens, 262144)
+        self.assertEqual(mem.trigger_ratio, 0.80)
+
+    def test_get_default_unknown_key_raises_key_error(self):
+        """Negative case: unknown default keys fail loudly instead of returning None."""
+        from core.defaults import get_default
+
+        with self.assertRaises(KeyError):
+            get_default("nonexistent_setting_key")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from typing import Any
 
 from core import config
 from core.auth import get_signer
+from core.defaults import load_defaults
 from core.protocols import (
     AssistantMetadataModel,
     CacheAwareModel,
@@ -62,13 +63,16 @@ PAYMENT_REQUIRED_STATUS = 402
 TRANSIENT_STATUS: frozenset[int] = frozenset({500, 502, 503, 504})
 
 
+_DEFAULTS = load_defaults()
+
+
 @dataclass(frozen=True)
 class RetryPolicy:
     """How many attempts to make and how long to wait between them."""
 
-    max_attempts: int = 6
-    base_delay: float = 2.0
-    max_delay: float = 60.0
+    max_attempts: int = int(_DEFAULTS["http_retry_max_attempts"])
+    base_delay: float = float(_DEFAULTS["http_retry_base_delay"])
+    max_delay: float = float(_DEFAULTS["http_retry_max_delay"])
 
     def backoff(self, attempt: int) -> float:
         """Exponential backoff for ``attempt`` (0-based), capped at ``max_delay``."""
@@ -148,7 +152,8 @@ normalize_reasoning_effort = config.normalize_reasoning_effort
 strip_json_comments = config.strip_json_comments
 
 
-_MODEL_METADATA_TIMEOUT_S = 1.5
+_MODEL_METADATA_TIMEOUT_S: float = float(_DEFAULTS["model_metadata_timeout"])
+DEFAULT_MODEL_TIMEOUT_S: float = float(_DEFAULTS["model_timeout"])
 _CONTEXT_WINDOW_KEYS: tuple[str, ...] = (
     "max_model_len",
     "context_length",
@@ -198,7 +203,7 @@ class HttpChatModel(UsageTelemetry):
         model: str,
         api_key: str | None = None,
         headers: dict[str, str] | None = None,
-        timeout: float = 90.0,
+        timeout: float = DEFAULT_MODEL_TIMEOUT_S,
         cache_ttl: str | None = None,
         reasoning_effort: str | None = None,
         reasoning_format: str | None = None,

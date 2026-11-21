@@ -282,8 +282,8 @@ class TestApplyModelContextTokens(unittest.TestCase):
 
         ok, _, _ = harness.switch_model("small")
         self.assertEqual(ok, True)
-        self.assertEqual(harness.max_context_tokens, 64000)
-        self.assertEqual(memory.max_context_tokens, 64000)
+        self.assertEqual(harness.max_context_tokens, 262144)
+        self.assertEqual(memory.max_context_tokens, 262144)
 
     def test_switch_big_to_small_reverts_to_global_triple(self):
         """Invariant: a cap-less switch falls back to the global triple, first hit wins."""
@@ -435,7 +435,7 @@ class TestContextWindowAutoDetection(unittest.TestCase):
         mock_urlopen.assert_not_called()
 
     def test_apply_model_context_tokens_uses_live_probe_and_falls_back_cleanly(self):
-        """Invariant: switch_model applies /models cap when static config has none, else 64000."""
+        """Invariant: switch_model applies /models cap when static config has none, else 262144."""
         tmp = tempfile.mkdtemp()
         ws = Path(tmp)
         cfg_dir = ws / ".microharness"
@@ -444,7 +444,7 @@ class TestContextWindowAutoDetection(unittest.TestCase):
             json.dumps(
                 {
                     "models": {
-                        "local-lfm": {"model": "LFM3-1.7B-MLX-8bit", "provider": "vllm"},
+                        "vercel-hy4": {"model": "tencent/hy4-flash", "provider": "vercel"},
                         "local-gemma": {"model": "gemma-4-E4B", "provider": "vllm"},
                     }
                 }
@@ -463,24 +463,24 @@ class TestContextWindowAutoDetection(unittest.TestCase):
         loop.memory = memory
         harness.active_loop = loop
 
-        resp_lfm = MagicMock()
-        resp_lfm.read.return_value = json.dumps(
-            {"data": [{"id": "LFM3-1.7B-MLX-8bit", "max_model_len": 262144}]}
+        resp_hy4 = MagicMock()
+        resp_hy4.read.return_value = json.dumps(
+            {"data": [{"id": "tencent/hy4-flash", "context_window": 1024000}]}
         ).encode("utf-8")
-        resp_lfm.__enter__.return_value = resp_lfm
+        resp_hy4.__enter__.return_value = resp_hy4
 
-        with patch("urllib.request.urlopen", return_value=resp_lfm):
-            ok, _, _ = harness.switch_model("local-lfm")
+        with patch("urllib.request.urlopen", return_value=resp_hy4):
+            ok, _, _ = harness.switch_model("vercel-hy4")
         self.assertEqual(ok, True)
-        self.assertEqual(harness.max_context_tokens, 262144)
-        self.assertEqual(memory.max_context_tokens, 262144)
+        self.assertEqual(harness.max_context_tokens, 1024000)
+        self.assertEqual(memory.max_context_tokens, 1024000)
 
-        # Negative case: probe failure reverts to 64000 instead of keeping previous 262144
+        # Negative case: probe failure reverts to 262144 default instead of keeping previous 1024000
         with patch("urllib.request.urlopen", side_effect=OSError("down")):
             ok2, _, _ = harness.switch_model("local-gemma")
         self.assertEqual(ok2, True)
-        self.assertEqual(harness.max_context_tokens, 64000)
-        self.assertEqual(memory.max_context_tokens, 64000)
+        self.assertEqual(harness.max_context_tokens, 262144)
+        self.assertEqual(memory.max_context_tokens, 262144)
 
 
 if __name__ == "__main__":

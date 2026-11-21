@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from core.defaults import get_default
 from core.discovery import discover_resources
 from core.environment import Environment
 from core.hooks import POST_TOOL, PRE_TOOL, HookContext, HookRegistry
@@ -30,7 +31,7 @@ class Tool(Protocol):
         ...
 
 
-DEFAULT_MAX_TOOL_TOKENS = 8000
+DEFAULT_MAX_TOOL_TOKENS: int = int(get_default("max_tool_tokens"))
 
 NETWORK_TOOL_NAMES: frozenset[str] = frozenset(
     {"web_fetch", "web_search", "fetch_url", "http_request"}
