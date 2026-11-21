@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import math
 import sys
 from collections.abc import Callable
@@ -142,6 +143,7 @@ class BashTool:
 
 class ReadFileTool:
     name = "read_file"
+    parallel_safe = True
     description = (
         "Read file content from the workspace with line numbers and optional line slicing."
     )
@@ -351,6 +353,15 @@ class ToolRegistry:
                 exit_code=1,
             )
 
+        if "_raw_arguments" in tool_call.arguments:
+            return ToolResult(
+                call_id=tool_call.id,
+                output=_format_malformed_json_error(
+                    tool_call.name, tool_call.arguments["_raw_arguments"]
+                ),
+                exit_code=1,
+            )
+
         try:
             exit_code, raw_output = tool.execute(**tool_call.arguments)
         except ModelCancelledError:
@@ -383,6 +394,24 @@ class ToolRegistry:
             was_truncated=was_truncated,
             raw_log_path=raw_log_path,
         )
+
+
+def _format_malformed_json_error(tool_name: str, raw_args: Any) -> str:
+    """Formats an actionable JSON parse error when model tool-call arguments failed to decode."""
+    parse_detail = ""
+    if isinstance(raw_args, str):
+        try:
+            json.loads(raw_args)
+        except json.JSONDecodeError as exc:
+            parse_detail = f" ({exc})"
+    preview = repr(raw_args)
+    if len(preview) > 200:
+        preview = f"{preview[:197]}..."
+    return (
+        f"Error: Invalid JSON arguments for tool '{tool_name}'{parse_detail}. "
+        "Arguments must be a valid JSON object matching the tool schema; "
+        f"received: {preview}"
+    )
 
 
 def _is_tool_like(obj: Any) -> bool:

@@ -165,10 +165,139 @@ class TestEnvironment(unittest.TestCase):
         self.assertIn("Target string not found", str(ctx.exception))
 
     def test_edit_file_ambiguous_multiple_matches_raises_value_error(self):
-        self.env.write_file("code.py", "line = 10\nline = 10\n")
+        self.env.write_file("code.py", "alpha\nline = 10\nbeta\nline = 10\ngamma\n")
         with self.assertRaises(ValueError) as ctx:
             self.env.edit_file("code.py", "line = 10", "line = 20")
-        self.assertIn("must be unique", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("found 2 times", msg)
+        self.assertIn("at lines: 2, 4", msg)
+        self.assertIn("must be unique", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "code.py").read_text(encoding="utf-8"),
+            "alpha\nline = 10\nbeta\nline = 10\ngamma\n",
+        )
+
+    def test_edit_file_trailing_whitespace_and_crlf_fallback(self):
+        self.env.write_file("code.py", "def greet():\n    msg = 'hi'   \n    return msg\n")
+        count, msg = self.env.edit_file(
+            "code.py",
+            "    msg = 'hi'\r\n    return msg",
+            "    msg = 'hello'\r\n    return msg",
+        )
+        self.assertEqual(count, 1)
+        self.assertIn("Successfully replaced", msg)
+        self.assertIn("whitespace normalization", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "code.py").read_text(encoding="utf-8"),
+            "def greet():\n    msg = 'hello'\n    return msg\n",
+        )
+
+    def test_edit_file_dedent_reindent_fallback(self):
+        original = (
+            "class Calc:\n    def add(self, a, b):\n        res = a + b\n        return res\n"
+        )
+        self.env.write_file("calc.py", original)
+        count, msg = self.env.edit_file(
+            "calc.py",
+            "def add(self, a, b):\n    res = a + b\n    return res",
+            "def add(self, a, b):\n    res = a + b + 1\n    return res",
+        )
+        self.assertEqual(count, 1)
+        self.assertIn("Successfully replaced", msg)
+        self.assertEqual(
+            Path(self.temp_dir, "calc.py").read_text(encoding="utf-8"),
+            (
+                "class Calc:\n"
+                "    def add(self, a, b):\n"
+                "        res = a + b + 1\n"
+                "        return res\n"
+            ),
+        )
+
+    def test_edit_file_stripped_line_fallback_mixed_indent(self):
+        self.env.write_file("mixed.py", "def f():\n    if True:\n        return 1\n")
+        count, _ = self.env.edit_file(
+            "mixed.py",
+            "  if True:\n    return 1",
+            "  if True:\n      return 2",
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "mixed.py").read_text(encoding="utf-8"),
+            "def f():\n    if True:\n        return 2\n",
+        )
+
+    def test_edit_file_normalized_ambiguous_rejected(self):
+        original = "def a():\n    x = 1\n    return x\n\ndef b():\n    x = 1\n    return x   \n"
+        self.env.write_file("dup.py", original)
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file("dup.py", "x = 1\nreturn x", "x = 2\nreturn x")
+        msg = str(ctx.exception)
+        self.assertIn("matched 2 times", msg)
+        self.assertIn("at lines: 2, 6", msg)
+        self.assertIn("must be unique", msg)
+        self.assertEqual(Path(self.temp_dir, "dup.py").read_text(encoding="utf-8"), original)
+
+    def test_edit_file_zero_matches_includes_closest_block_and_lines(self):
+        self.env.write_file(
+            "orders.py",
+            (
+                "def subtotal(price, qty):\n"
+                "    if qty <= 0:\n"
+                "        return 0\n"
+                "    # compute\n"
+                "    total = price * qty\n"
+                "    return total\n"
+                "\n"
+                "def done():\n"
+                "    pass\n"
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.env.edit_file(
+                "orders.py",
+                "    total = price * quantity\n    return total",
+                "    total = price * quantity\n    return total + 1",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("Target string not found", msg)
+        self.assertIn("lines 5-6", msg)
+        self.assertIn("   5 |     total = price * qty", msg)
+        self.assertIn("   6 |     return total", msg)
+
+    def test_edit_file_zero_matches_negative_cases(self):
+        # Empty file
+        self.env.write_file("empty.py", "")
+        with self.assertRaises(ValueError) as ctx_empty:
+            self.env.edit_file("empty.py", "x = 1", "x = 2")
+        self.assertIn("File is empty", str(ctx_empty.exception))
+
+        # Completely unrelated target string
+        self.env.write_file("small.py", "x = 1\n")
+        with self.assertRaises(ValueError) as ctx_unrel:
+            self.env.edit_file("small.py", "zzzzzzzzzzzz", "y = 2")
+        self.assertIn("No close match found", str(ctx_unrel.exception))
+
+        # Whitespace-only target must never match blank lines via normalization
+        self.env.write_file("blanks.py", "a = 1\n\nb = 2\n")
+        with self.assertRaises(ValueError) as ctx_ws:
+            self.env.edit_file("blanks.py", "   \n", "c = 3\n")
+        self.assertIn("Target string not found", str(ctx_ws.exception))
+
+    def test_edit_file_normalized_deletion_and_no_trailing_newline(self):
+        self.env.write_file("no_eol.py", "a = 1\n    b = 2  ")
+        count, _ = self.env.edit_file("no_eol.py", "      b = 2", "      b = 3")
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "no_eol.py").read_text(encoding="utf-8"), "a = 1\n    b = 3"
+        )
+
+        self.env.write_file("del.py", "a = 1\n    b = 2\nc = 3\n")
+        count_del, _ = self.env.edit_file("del.py", "      b = 2", "")
+        self.assertEqual(count_del, 1)
+        self.assertEqual(
+            Path(self.temp_dir, "del.py").read_text(encoding="utf-8"), "a = 1\nc = 3\n"
+        )
 
     def test_edit_file_empty_target_raises_value_error(self):
         self.env.write_file("code.py", "data = 'hello'\n")
