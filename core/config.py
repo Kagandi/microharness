@@ -20,6 +20,8 @@ from typing import Any, Callable, Mapping
 
 from core.hooks import parse_hook_specs
 from core.tools import DEFAULT_MAX_TOOL_TOKENS
+from core.types import PERMISSION_MODES as PERMISSION_MODES
+from core.types import normalize_permission_mode as normalize_permission_mode
 
 DEFAULT_SUBAGENT_MAX_STEPS: int | None = None
 
@@ -45,15 +47,6 @@ DISABLED_VALUES: frozenset[str] = frozenset(
 )
 
 REASONING_CHOICES: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
-
-PERMISSION_MODES: frozenset[str] = frozenset({"auto", "ask", "read-only"})
-_PERMISSION_MODE_ALIASES: dict[str, str] = {
-    "auto": "auto",
-    "ask": "ask",
-    "read-only": "read-only",
-    "readonly": "read-only",
-    "read_only": "read-only",
-}
 
 PROJECT_TRUST_NOTICE = (
     "Project config attempted to enable 'trust_project_tools'. "
@@ -240,6 +233,30 @@ def _coerce_bool(val: Any) -> bool:
     return bool(val)
 
 
+def _parse_optional_positive_number(
+    raw: Any,
+    name: str,
+    *,
+    as_float: bool = False,
+    default: Any = None,
+    treat_empty_as_default: bool = False,
+) -> Any:
+    """Validates an optional positive int or finite float config value."""
+    if raw is None or (treat_empty_as_default and raw == ""):
+        return default
+    kind_desc = "greater than 0" if as_float else "a positive integer"
+    bad_type = isinstance(raw, bool) or (not as_float and isinstance(raw, float))
+    if bad_type:
+        raise ValueError(f"Unsupported {name}: {raw!r}. Must be {kind_desc}.")
+    try:
+        value = float(raw) if as_float else int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported {name}: {raw!r}. Must be {kind_desc}.") from exc
+    if (as_float and not math.isfinite(value)) or value <= 0:
+        raise ValueError(f"Unsupported {name}: {value}. Must be {kind_desc}.")
+    return value
+
+
 def _coerce_string_list(raw: Any, name: str) -> list[str]:
     """Normalizes an optional string sequence config entry into a list of non-empty strings."""
     if raw is None:
@@ -317,28 +334,13 @@ class HarnessConfig:
         if bash_timeout <= 0:
             raise ValueError(f"Unsupported bash_timeout: {bash_timeout}. Must be greater than 0.")
 
-        raw_subagent_steps = (
+        subagent_max_steps = _parse_optional_positive_number(
             self.subagent_max_steps
             if self.subagent_max_steps is not None
-            else layers.merged.get("subagent_max_steps")
+            else layers.merged.get("subagent_max_steps"),
+            "subagent_max_steps",
+            default=DEFAULT_SUBAGENT_MAX_STEPS,
         )
-        if raw_subagent_steps is None:
-            subagent_max_steps = DEFAULT_SUBAGENT_MAX_STEPS
-        elif isinstance(raw_subagent_steps, (bool, float)):
-            raise ValueError(
-                f"Unsupported subagent_max_steps: {raw_subagent_steps!r}. Must be a positive integer."
-            )
-        else:
-            try:
-                subagent_max_steps = int(raw_subagent_steps)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Unsupported subagent_max_steps: {raw_subagent_steps!r}. Must be a positive integer."
-                ) from exc
-            if subagent_max_steps <= 0:
-                raise ValueError(
-                    f"Unsupported subagent_max_steps: {subagent_max_steps}. Must be a positive integer."
-                )
 
         hook_specs = (
             parse_hook_specs(layers.global_config.get("hooks"), scope="global")
@@ -364,45 +366,19 @@ class HarnessConfig:
         if docker_memory == "":
             docker_memory = None
 
-        raw_cpus = (
-            self.docker_cpus if self.docker_cpus is not None else layers.merged.get("docker_cpus")
+        docker_cpus: float | None = _parse_optional_positive_number(
+            self.docker_cpus if self.docker_cpus is not None else layers.merged.get("docker_cpus"),
+            "docker_cpus",
+            as_float=True,
+            treat_empty_as_default=True,
         )
-        if raw_cpus is None or raw_cpus == "":
-            docker_cpus: float | None = None
-        elif isinstance(raw_cpus, bool):
-            raise ValueError(f"Unsupported docker_cpus: {raw_cpus!r}. Must be greater than 0.")
-        else:
-            try:
-                docker_cpus = float(raw_cpus)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Unsupported docker_cpus: {raw_cpus!r}. Must be greater than 0."
-                ) from exc
-            if not math.isfinite(docker_cpus) or docker_cpus <= 0:
-                raise ValueError(f"Unsupported docker_cpus: {docker_cpus}. Must be greater than 0.")
-
-        raw_pids = (
+        docker_pids_limit: int | None = _parse_optional_positive_number(
             self.docker_pids_limit
             if self.docker_pids_limit is not None
-            else layers.merged.get("docker_pids_limit")
+            else layers.merged.get("docker_pids_limit"),
+            "docker_pids_limit",
+            treat_empty_as_default=True,
         )
-        if raw_pids is None or raw_pids == "":
-            docker_pids_limit: int | None = None
-        elif isinstance(raw_pids, (bool, float)):
-            raise ValueError(
-                f"Unsupported docker_pids_limit: {raw_pids!r}. Must be a positive integer."
-            )
-        else:
-            try:
-                docker_pids_limit = int(raw_pids)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Unsupported docker_pids_limit: {raw_pids!r}. Must be a positive integer."
-                ) from exc
-            if docker_pids_limit <= 0:
-                raise ValueError(
-                    f"Unsupported docker_pids_limit: {docker_pids_limit}. Must be a positive integer."
-                )
 
         return ResolvedConfig(
             sandbox=c.pick("sandbox", self.sandbox, _coerce_bool, False),
@@ -505,19 +481,4 @@ def normalize_reasoning_effort(effort: str | None) -> str | None:
         return val
     raise ValueError(
         f"Unsupported reasoning effort: '{effort}'. Valid options: 'low', 'medium', 'high', 'xhigh', 'max', numeric token budget, or 'off'."
-    )
-
-
-def normalize_permission_mode(mode: str | None) -> str:
-    """Normalizes a permission mode to ``'auto'``, ``'ask'``, or ``'read-only'``."""
-    if mode is None:
-        return "auto"
-    val = str(mode).strip().lower()
-    if not val:
-        return "auto"
-    canonical = _PERMISSION_MODE_ALIASES.get(val)
-    if canonical is not None:
-        return canonical
-    raise ValueError(
-        f"Unsupported permission_mode: '{mode}'. Valid options: 'auto', 'ask', 'read-only'."
     )

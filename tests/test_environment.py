@@ -913,6 +913,9 @@ class TestDockerResourceLimitsAndGuardedEnvironment(unittest.TestCase):
         self.assertEqual(code_no_cb, 1)
         self.assertIn("no interactive confirmation handler", out_no_cb)
 
+        self.assertEqual(GuardedEnvironment(self.inner, mode="ro").mode, "read-only")
+        with self.assertRaises(ValueError):
+            GuardedEnvironment(self.inner, mode="")
         with self.assertRaises(ValueError):
             GuardedEnvironment(self.inner, mode="invalid")
 

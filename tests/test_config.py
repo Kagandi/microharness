@@ -473,6 +473,7 @@ class TestNormalizers(unittest.TestCase):
         self.assertEqual(normalize_permission_mode("read-only"), "read-only")
         self.assertEqual(normalize_permission_mode("readonly"), "read-only")
         self.assertEqual(normalize_permission_mode("read_only"), "read-only")
+        self.assertEqual(normalize_permission_mode("ro"), "read-only")
         with self.assertRaises(ValueError):
             normalize_permission_mode("yolo")
 
