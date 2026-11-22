@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.session import reconstruct_messages_from_steps
-from core.types import EvalResult, StepTrace, Task
+from core.types import EvalResult, StepTrace, Task, utc_timestamp
 from core.usage import summarize_run_usage
 
 __all__ = [
@@ -246,6 +246,33 @@ def _pair_calls_with_results(
     return pairs
 
 
+def _resolve_step_timestamp(step: Any) -> str:
+    """Returns a non-empty step timestamp, falling back to current UTC time."""
+    ts = getattr(step, "timestamp", None)
+    if isinstance(ts, str) and ts.strip():
+        return ts
+    return utc_timestamp()
+
+
+def _step_record(step: StepTrace) -> dict[str, Any]:
+    """Serializes a StepTrace into the canonical dict shared by JSONL and JSON exports."""
+    record: dict[str, Any] = {
+        "step_index": step.step_index,
+        "timestamp": _resolve_step_timestamp(step),
+        "duration_s": step.duration_s,
+        "compaction_applied": step.compaction_applied,
+        "usage": step.usage,
+        "prompt_messages": step.prompt_messages,
+        "model_response": step.model_response,
+        "tool_results": step.tool_results,
+    }
+    if step.stop_reason:
+        record["stop_reason"] = step.stop_reason
+    if step.stop_detail:
+        record["stop_detail"] = step.stop_detail
+    return record
+
+
 class Tracer:
     """Collects telemetry during the agent run and exports structured traces."""
 
@@ -269,6 +296,8 @@ class Tracer:
             **_ACTION_FORMATTERS,
             **(formatters or {}),
         }
+        self.started_at: str = utc_timestamp()
+        self.finished_at: str | None = None
         self.steps: list[StepTrace] = []
         self.eval_result: EvalResult | None = None
         self.finish_reason: str = "running"
@@ -281,19 +310,7 @@ class Tracer:
 
     def _append_jsonl(self, step: StepTrace) -> None:
         try:
-            record: dict[str, Any] = {
-                "step_index": step.step_index,
-                "duration_s": step.duration_s,
-                "compaction_applied": step.compaction_applied,
-                "usage": step.usage,
-                "prompt_messages": step.prompt_messages,
-                "model_response": step.model_response,
-                "tool_results": step.tool_results,
-            }
-            if step.stop_reason:
-                record["stop_reason"] = step.stop_reason
-            if step.stop_detail:
-                record["stop_detail"] = step.stop_detail
+            record = _step_record(step)
             with self.jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
                 f.flush()
@@ -302,6 +319,7 @@ class Tracer:
                 # Fallback: preserve step_index so crash recovery never has index holes
                 fallback = {
                     "step_index": step.step_index,
+                    "timestamp": _resolve_step_timestamp(step),
                     "duration_s": getattr(step, "duration_s", 0.0),
                     "compaction_applied": getattr(step, "compaction_applied", False),
                     "usage": {},
@@ -322,6 +340,11 @@ class Tracer:
 
     def record_step(self, step: StepTrace) -> None:
         """Persists a completed step, then renders it when verbose output is on."""
+        ts = _resolve_step_timestamp(step)
+        if hasattr(step, "timestamp") and not (
+            isinstance(step.timestamp, str) and step.timestamp.strip()
+        ):
+            step.timestamp = ts
         self.steps.append(step)
         self._append_jsonl(step)
 
@@ -364,7 +387,7 @@ class Tracer:
 
         divider = _dim(
             f"─── Step {step.step_index} · {step.duration_s:.2f}s{_token_suffix(step.usage)} "
-            + "─" * 25
+            f"· {_resolve_step_timestamp(step)} " + "─" * 25
         )
         print(f"\n{divider}")
 
@@ -412,6 +435,7 @@ class Tracer:
         telemetry: dict[str, Any] | None = None,
     ) -> tuple[Path, Path]:
         self.finish_reason = finish_reason
+        self.finished_at = utc_timestamp()
         self.eval_result = eval_result
         self.patch_diff = patch_diff
         self.telemetry = telemetry if isinstance(telemetry, dict) else self._compute_telemetry()
@@ -445,6 +469,8 @@ class Tracer:
                 "max_steps": self.task.max_steps,
             },
             "workspace": self.workspace,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
             "finish_reason": self.finish_reason,
             "total_steps": len(self.steps),
             "telemetry": self.telemetry,
@@ -455,20 +481,7 @@ class Tracer:
                 "feedback": self.eval_result.feedback if self.eval_result else None,
             },
             "messages": self._reconstruct_final_messages(),
-            "steps": [
-                {
-                    "step_index": s.step_index,
-                    "duration_s": s.duration_s,
-                    "compaction_applied": s.compaction_applied,
-                    "usage": s.usage,
-                    "prompt_messages": s.prompt_messages,
-                    "model_response": s.model_response,
-                    "tool_results": s.tool_results,
-                    **({"stop_reason": s.stop_reason} if s.stop_reason else {}),
-                    **({"stop_detail": s.stop_detail} if s.stop_detail else {}),
-                }
-                for s in self.steps
-            ],
+            "steps": [_step_record(s) for s in self.steps],
         }
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
@@ -483,12 +496,15 @@ class Tracer:
         path.write_text("\n".join(section for section in sections if section), encoding="utf-8")
 
     def _markdown_header(self) -> str:
-        """Run summary: status, step count, tokens, and evaluation verdict."""
+        """Run summary: status, timestamps, step count, tokens, and evaluation verdict."""
         lines = [
             f"# Run Trace: Task {self.task.id}",
             f"- **Status**: `{self.finish_reason}`",
-            f"- **Total Steps**: {len(self.steps)}",
+            f"- **Started**: `{self.started_at}`",
         ]
+        if self.finished_at:
+            lines.append(f"- **Finished**: `{self.finished_at}`")
+        lines.append(f"- **Total Steps**: {len(self.steps)}")
         prompt = int(self.telemetry.get("total_prompt_tokens") or 0)
         completion = int(self.telemetry.get("total_completion_tokens") or 0)
         cached = int(self.telemetry.get("total_cached_tokens") or 0)
@@ -520,6 +536,7 @@ class Tracer:
         header = (
             f"### Step {step.step_index} "
             f"({step.duration_s:.2f}s{_token_suffix(step.usage, bracketed=True)})"
+            f" · `{_resolve_step_timestamp(step)}`"
         )
         parts = [header]
         if step.compaction_applied:
