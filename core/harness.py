@@ -1129,7 +1129,7 @@ class Harness:
             env.workspace_dir,
             tracer,
             turns,
-            allow_bare_words=True,
+            allow_bare_words=False,
             subagents=subagents,
             checkpoints=self.checkpoint_manager,
         )

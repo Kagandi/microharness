@@ -204,11 +204,11 @@ class TestHarnessIntegration(unittest.TestCase):
         model = MockModel(script)
         harness = Harness(model=model, runs_dir=self.runs_dir, verbose=False)
 
-        # Mock user typing slash commands, follow-up, and then 'exit'
+        # Mock user typing slash commands, follow-up, and then '/exit'
         def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
             if initial_instruction:
                 on_user_submit(initial_instruction)
-            for user_input in ["/status", "/help", "/compact", "Now do step 2", "/status", "exit"]:
+            for user_input in ["/status", "/help", "/compact", "Now do step 2", "/status", "/exit"]:
                 on_user_submit(user_input)
 
         with patch("core.tui.CursesTUI.run", mock_tui_run):
@@ -714,11 +714,11 @@ class TestHarnessIntegration(unittest.TestCase):
             verbose=False,
         )
 
-        # Mock interactive inputs: /help, custom command /audit api.py, then exit
+        # Mock interactive inputs: /help, custom command /audit api.py, then /exit
         def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
             if initial_instruction:
                 on_user_submit(initial_instruction)
-            for user_input in ["/help", "/audit api.py", "exit"]:
+            for user_input in ["/help", "/audit api.py", "/exit"]:
                 on_user_submit(user_input)
 
         with patch("core.tui.CursesTUI.run", mock_tui_run):

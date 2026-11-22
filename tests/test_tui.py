@@ -1944,10 +1944,11 @@ class TestTUI(unittest.TestCase):
         tui.handle_key("\t", lambda text: submitted.append(text))
         self.assertEqual(state.input_buffer, "/model ")
 
-        # 10. Enter on /model [space] selects and submits the highlighted model
+        # 10. Enter on /model [space] selects and submits the highlighted model in one press
         state.selected_command_idx = 0  # fast
         tui.handle_key("\n", lambda text: submitted.append(text))
         self.assertEqual(submitted, ["/model fast"])
+        self.assertEqual(state.input_buffer, "")
 
         # 11. CursesTUI draw renders correct titles
         mock_stdscr = MagicMock()
@@ -2301,6 +2302,280 @@ class TestCommandCatalog(unittest.TestCase):
         tui.handle_key(27, submitted.append)
         worker2.join(timeout=2.0)
         self.assertEqual(results, [None])
+
+    def test_bare_words_without_slash_do_not_activate_commands_or_exit_in_tui(self):
+        """Invariant: TUI commands require a leading '/'; bare words like 'resume' or 'exit' go to the model."""
+        import tempfile
+        from pathlib import Path
+
+        from core.harness import Harness
+        from core.model import MockModel
+
+        # 1. CursesTUI.handle_key: bare 'exit'/'quit' submit as text and return True; '/exit'/'/quit' return False
+        state = TUIState()
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+        for bare in ("exit", "quit"):
+            state.input_buffer = bare
+            state.cursor_pos = len(bare)
+            self.assertTrue(tui.handle_key("\n", submitted.append))
+        self.assertEqual(submitted, ["exit", "quit"])
+
+        for cmd in ("/exit", "/quit"):
+            state.input_buffer = cmd
+            state.cursor_pos = len(cmd)
+            self.assertFalse(tui.handle_key("\n", submitted.append))
+        self.assertEqual(submitted, ["exit", "quit"])
+
+        # 2. Harness.run_tui: bare 'resume' / 'status' / 'model' trigger model turns instead of commands
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            model = MockModel(script=[("Resumed work.", []), ("Status noted.", [])])
+            harness = Harness(
+                model=model,
+                workspace_dir=tmp_path / "ws",
+                global_dir=tmp_path / "global",
+                runs_dir=tmp_path / "runs",
+                sandbox=False,
+                verbose=False,
+            )
+            captured = []
+
+            def mock_tui_run(tui_instance, on_user_submit, initial_instruction=None):
+                captured.append(tui_instance.state)
+                on_user_submit("resume")
+                on_user_submit("status")
+                on_user_submit("/status")
+
+            with patch("core.tui.CursesTUI.run", side_effect=mock_tui_run, autospec=True):
+                harness.run_tui()
+
+            lines = [ln.text for ln in captured[0].lines]
+            self.assertIn("> resume", lines)
+            self.assertIn("Resumed work.", lines)
+            self.assertIn("> status", lines)
+            self.assertIn("Status noted.", lines)
+            self.assertTrue(any("Context Tokens:" in ln for ln in lines))
+
+    def test_mouse_wheel_raw_page_keys_scroll_clamping_and_scrollbar(self):
+        """Invariant: mouse wheel, raw PgUp/PgDn, and modified arrows scroll; scroll_offset clamps; scrollbar draws on overflow."""
+        import curses
+
+        state = TUIState()
+        tui = CursesTUI(state)
+        for i in range(30):
+            state.add_action(f"step {i}")
+
+        # 1. Raw PageUp / PageDown and Ctrl/Alt+Arrow scroll sequences
+        tui.handle_key("\x1b[5~", lambda _: None)
+        self.assertEqual(state.scroll_offset, 5)
+        tui.handle_key("\x1b[6~", lambda _: None)
+        self.assertEqual(state.scroll_offset, 0)
+
+        tui.handle_key("\x1b[1;5A", lambda _: None)
+        self.assertEqual(state.scroll_offset, 5)
+        tui.handle_key("\x1b[1;5B", lambda _: None)
+        self.assertEqual(state.scroll_offset, 0)
+
+        tui.handle_key("\x1b[1;3A", lambda _: None)
+        self.assertEqual(state.scroll_offset, 1)
+        tui.handle_key("\x1b[1;3B", lambda _: None)
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 2. SGR mouse wheel sequences scroll by 3 and non-wheel mouse sequences are ignored
+        tui.handle_key("\x1b[<64;10;5M", lambda _: None)
+        self.assertEqual(state.scroll_offset, 3)
+        tui.handle_key("\x1b[<65;10;5M", lambda _: None)
+        self.assertEqual(state.scroll_offset, 0)
+        tui.handle_key("\x1b[<0;10;5M", lambda _: None)
+        self.assertEqual(state.input_buffer, "")
+        self.assertEqual(state.scroll_offset, 0)
+
+        # 3. curses KEY_MOUSE wheel events
+        with patch(
+            "core.tui.curses.getmouse",
+            side_effect=[
+                (0, 5, 5, 0, curses.BUTTON4_PRESSED),
+                (0, 5, 5, 0, curses.BUTTON5_PRESSED),
+            ],
+        ):
+            tui.handle_key(curses.KEY_MOUSE, lambda _: None)
+            self.assertEqual(state.scroll_offset, 3)
+            tui.handle_key(curses.KEY_MOUSE, lambda _: None)
+            self.assertEqual(state.scroll_offset, 0)
+
+        # 4. Scroll offset clamps to max_scroll on draw and draws scrollbar on overflow
+        state.scroll_up(500)
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (14, 60)  # transcript height = 14 - 4 - 2 = 8
+        tui.draw(mock_stdscr)
+        self.assertEqual(state.scroll_offset, 22)  # 30 lines - 8 visible rows
+
+        scrollbar_cells = [
+            c
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and c.args[1] == 59 and c.args[2] in ("│", "┃")
+        ]
+        self.assertEqual(len(scrollbar_cells), 8)
+        self.assertTrue(any(c.args[2] == "┃" for c in scrollbar_cells))
+
+    def test_enter_selects_in_one_press_while_tab_and_right_complete_and_resets_selection(self):
+        """Invariant: Enter opens subcommand roots and selects leaf options in 1 press; Tab/Right complete without running."""
+        import curses
+
+        state = TUIState()
+        state.set_available_models(
+            [
+                {"name": "fast", "model": "gemini", "provider": "google", "description": "Fast"},
+                {
+                    "name": "smart",
+                    "model": "claude",
+                    "provider": "anthropic",
+                    "description": "Smart",
+                },
+            ]
+        )
+        tui = CursesTUI(state)
+        submitted: list[str] = []
+
+        # 1. Enter on '/m' opens '/model ' (same as Tab/Right) instead of running bare '/model'
+        state.input_buffer = "/m"
+        state.cursor_pos = 2
+        tui.handle_key("\n", submitted.append)
+        self.assertEqual(state.input_buffer, "/model ")
+        self.assertEqual(submitted, [])
+        self.assertEqual(state.selected_command_idx, 0)
+
+        # 2. Navigating to 'smart' and pressing Enter selects and submits '/model smart' in 1 press
+        tui.handle_key(curses.KEY_DOWN, submitted.append)
+        self.assertEqual(state.selected_command_idx, 1)
+        tui.handle_key("\n", submitted.append)
+        self.assertEqual(submitted, ["/model smart"])
+        self.assertEqual(state.input_buffer, "")
+        self.assertEqual(state.selected_command_idx, 0)
+
+        # 3. Tab on a single match ('/model sm') completes into input without submitting
+        state.input_buffer = "/model sm"
+        state.cursor_pos = len(state.input_buffer)
+        tui.handle_key("\t", submitted.append)
+        self.assertEqual(state.input_buffer, "/model smart")
+        self.assertEqual(submitted, ["/model smart"])
+
+        # 4. Footer shows 'Enter: Select' on concrete options and 'Enter: Open' on unopened subcommand roots
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+        tui.draw(mock_stdscr)
+        footer_texts = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str) and "Navigate" in c.args[2]
+        ]
+        self.assertTrue(any("Enter: Select" in t for t in footer_texts))
+
+        mock_stdscr.reset_mock()
+        state.input_buffer = "/m"
+        state.cursor_pos = 2
+        tui.draw(mock_stdscr)
+        open_footer_texts = [
+            c.args[2]
+            for c in mock_stdscr.addstr.call_args_list
+            if len(c.args) >= 3 and isinstance(c.args[2], str) and "Navigate" in c.args[2]
+        ]
+        self.assertTrue(any("Enter: Open" in t for t in open_footer_texts))
+
+        # 5. Typing resets a non-zero selected_command_idx back to 0
+        state.input_buffer = "/"
+        state.cursor_pos = 1
+        tui.handle_key(curses.KEY_DOWN, submitted.append)
+        self.assertEqual(state.selected_command_idx, 1)
+        tui.handle_key("s", submitted.append)
+        self.assertEqual(state.selected_command_idx, 0)
+
+    def test_transcript_visual_separation_gutters_and_256_color_surfaces(self):
+        """Invariant: user, thought, action, error, and agent blocks get distinct gutters, turn dividers, and 256-color background fills."""
+        import curses
+
+        state = TUIState()
+        state.add_user("Fix `core/tui.py`")
+        state.add_thought("Inspecting code")
+        state.add_action("$ pytest (0.2s)")
+        state.add_error("$ false (exit 1: boom)")
+        state.add_agent("Done.")
+        state.add_user("Follow up")
+
+        mock_stdscr = MagicMock()
+        mock_stdscr.getmaxyx.return_value = (24, 80)
+
+        # 1. With 256-color support, _init_colors enables extended surface pairs and fills rows
+        tui = CursesTUI(state)
+        with (
+            patch("core.tui.curses.has_colors", return_value=True),
+            patch("core.tui.curses.start_color"),
+            patch("core.tui.curses.use_default_colors"),
+            patch("core.tui.curses.init_pair"),
+            patch("core.tui.curses.color_pair", side_effect=lambda p: p << 8),
+            patch("core.tui.curses.COLORS", 256, create=True),
+            patch("core.tui.curses.COLOR_PAIRS", 64, create=True),
+        ):
+            tui._init_colors()
+            self.assertTrue(tui.has_colors)
+            self.assertTrue(tui.has_extended_colors)
+            tui.draw(mock_stdscr)
+
+        calls = mock_stdscr.addstr.call_args_list
+        # Left-gutter markers identify each operation kind
+        gutter_glyphs = [c.args[2] for c in calls if len(c.args) >= 3 and c.args[1] == 0]
+        self.assertIn("▎", gutter_glyphs)
+        self.assertIn("◌", gutter_glyphs)
+        self.assertIn("▸", gutter_glyphs)
+        self.assertIn("✖", gutter_glyphs)
+        self.assertIn("◆", gutter_glyphs)
+
+        # Turn divider appears before the follow-up user turn
+        divider_calls = [
+            c
+            for c in calls
+            if len(c.args) >= 3
+            and isinstance(c.args[2], str)
+            and c.args[1] == 2
+            and c.args[2].startswith("─" * 10)
+        ]
+        self.assertEqual(len(divider_calls), 1)
+
+        # Full-width surface fills (78 cols = w - 2) for user, action, and error rows
+        bg_fills = [
+            ((c.args[3] & ~curses.A_BOLD) >> 8, c.args[2])
+            for c in calls
+            if len(c.args) >= 4 and c.args[1] == 1 and c.args[2] == " " * 78
+        ]
+        self.assertEqual(
+            [pair for pair, _ in bg_fills],
+            [7, 9, 11, 7],
+        )
+
+        # Inline code inside user message preserves the user surface background (pair 7)
+        code_in_user = [
+            c
+            for c in calls
+            if len(c.args) >= 4
+            and c.args[2] == "core/tui.py"
+            and ((c.args[3] & ~curses.A_BOLD) >> 8) == 7
+        ]
+        self.assertEqual(len(code_in_user), 1)
+
+        # 2. Fallback on 8-color terminal disables extended surfaces cleanly
+        tui_basic = CursesTUI(state)
+        with (
+            patch("core.tui.curses.has_colors", return_value=True),
+            patch("core.tui.curses.start_color"),
+            patch("core.tui.curses.use_default_colors"),
+            patch("core.tui.curses.init_pair"),
+            patch("core.tui.curses.COLORS", 8, create=True),
+            patch("core.tui.curses.COLOR_PAIRS", 64, create=True),
+        ):
+            tui_basic._init_colors()
+            self.assertTrue(tui_basic.has_colors)
+            self.assertFalse(tui_basic.has_extended_colors)
 
     def test_mode_subcommand_menu_and_confirm_prompt_lifecycle(self):
         """Invariant: /mode offers permission modes, status bar shows non-auto mode, and request_confirm handles y/n/Esc."""
