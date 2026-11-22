@@ -752,6 +752,84 @@ class ValidTool:
         finally:
             rec_env.teardown()
 
+    def test_bash_tool_timeout_tip_only_when_below_max_timeout(self):
+        """Invariant: timed-out commands suggest increasing `timeout` only when effective_timeout < max_timeout."""
+
+        class TimeoutEnv(Environment):
+            def execute_bash(self, command: str, timeout: float = 30.0) -> tuple[int, str]:
+                return 124, f"\n[Command timed out after {timeout} seconds]"
+
+        t_env = TimeoutEnv(workspace_dir=self.temp_dir, cleanup_on_teardown=False)
+        try:
+            tool = BashTool(t_env, timeout=300.0, max_timeout=1800.0)
+            code1, out1 = tool.execute(command="pytest")
+            self.assertEqual(code1, 124)
+            self.assertIn("Pass the 'timeout' tool parameter (up to 1800s)", out1)
+
+            # Negative case: already at ceiling -> no misleading tip
+            code2, out2 = tool.execute(command="pytest", timeout=1800.0)
+            self.assertEqual(code2, 124)
+            self.assertNotIn("Pass the 'timeout' tool parameter", out2)
+        finally:
+            t_env.teardown()
+
+    def test_format_tool_output_avoids_parallel_prefix_collisions_and_sanitizes_ids(self):
+        """Invariant: shared call_id prefixes (e.g. DeepSeek call_00_/call_01_) never overwrite spill logs."""
+        out_a = "A" * 500
+        out_b = "B" * 500
+        _, trunc_a, path_a = format_tool_output(
+            output=out_a,
+            call_id="call_00_first_parallel_id",
+            tool_name="read_file",
+            step_index=3,
+            logs_dir=self.env.logs_dir,
+            max_tokens=30,
+        )
+        _, trunc_b, path_b = format_tool_output(
+            output=out_b,
+            call_id="call_01_second_parallel_id",
+            tool_name="read_file",
+            step_index=3,
+            logs_dir=self.env.logs_dir,
+            max_tokens=30,
+        )
+        self.assertTrue(trunc_a)
+        self.assertTrue(trunc_b)
+        self.assertIsNotNone(path_a)
+        self.assertIsNotNone(path_b)
+        self.assertNotEqual(path_a, path_b)
+        self.assertEqual(Path(path_a).read_text(encoding="utf-8"), out_a)
+        self.assertEqual(Path(path_b).read_text(encoding="utf-8"), out_b)
+
+        # Duplicate identical call_id in the same step still disambiguates cleanly
+        out_c = "C" * 500
+        _, _, path_c = format_tool_output(
+            output=out_c,
+            call_id="call_01_second_parallel_id",
+            tool_name="read_file",
+            step_index=3,
+            logs_dir=self.env.logs_dir,
+            max_tokens=30,
+        )
+        self.assertIsNotNone(path_c)
+        self.assertNotEqual(path_c, path_b)
+        self.assertEqual(Path(path_c).read_text(encoding="utf-8"), out_c)
+        self.assertEqual(Path(path_b).read_text(encoding="utf-8"), out_b)
+
+        # Path traversal characters in call_id/tool_name stay strictly inside logs_dir
+        out_d = "D" * 500
+        _, _, path_d = format_tool_output(
+            output=out_d,
+            call_id="../../evil",
+            tool_name="../bash",
+            step_index=4,
+            logs_dir=self.env.logs_dir,
+            max_tokens=30,
+        )
+        self.assertIsNotNone(path_d)
+        self.assertTrue(Path(path_d).resolve().is_relative_to(self.env.logs_dir.resolve()))
+        self.assertEqual(Path(path_d).read_text(encoding="utf-8"), out_d)
+
     def test_dispatch_aligns_spilled_log_path_for_host_and_container_envs(self):
         """Invariant: ToolRegistry.dispatch reports env.agent_logs_dir paths in both marker and raw_log_path."""
 

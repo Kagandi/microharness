@@ -2660,6 +2660,9 @@ class TestCliContext(unittest.TestCase):
         self.assertEqual(meta["provider"], "vercel")
         self.assertEqual(meta["model"], "meta/muse-ember")
         self.assertEqual(meta["max_steps"], 500)
+        self.assertEqual(meta["max_context_tokens"], 262144)
+        self.assertEqual(meta["trigger_ratio"], 0.80)
+        self.assertEqual(meta["bash_timeout"], 300.0)
 
     def test_batch_mode_enables_require_finish_tool_only_for_non_mock_models(self):
         """Invariant: --batch requires finish tool for real models while leaving MockModel demos clean."""
@@ -2948,7 +2951,7 @@ class TestFinishToolAndContinuation(unittest.TestCase):
             env3.teardown()
 
     def test_harness_configures_bash_tool_timeout_from_task_and_harness(self):
-        """Invariant: BashTool timeout follows Task.bash_timeout > Harness.bash_timeout > config default (120.0)."""
+        """Invariant: BashTool timeout follows Task.bash_timeout > Harness.bash_timeout > config default (300.0)."""
         harness_default = Harness(model=MockModel([]), runs_dir=self.runs_dir, verbose=False)
         env1, reg1, _, _, _, _ = harness_default._setup_run(
             task_id="bash_t1",
@@ -2957,7 +2960,7 @@ class TestFinishToolAndContinuation(unittest.TestCase):
             initial_files={},
         )
         try:
-            self.assertEqual(reg1.get("bash").timeout, 120.0)
+            self.assertEqual(reg1.get("bash").timeout, 300.0)
         finally:
             env1.teardown()
 

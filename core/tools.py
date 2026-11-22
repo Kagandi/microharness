@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
 import json
 import math
+import os
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -45,6 +48,53 @@ def is_network_tool(tool: Any) -> bool:
     return getattr(tool, "name", "") in NETWORK_TOOL_NAMES
 
 
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _sanitize_filename_token(value: str, fallback: str) -> str:
+    """Normalizes an identifier into a safe single-segment filename token."""
+    cleaned = _SAFE_FILENAME_RE.sub("_", value or "").strip("._")
+    return cleaned or fallback
+
+
+def _reserve_spill_log_path(
+    logs_dir: Path,
+    step_index: int,
+    tool_name: str,
+    call_id: str,
+) -> Path:
+    """Atomically reserves a unique spill log path inside ``logs_dir``."""
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    safe_tool = _sanitize_filename_token(tool_name, "tool")
+    safe_call = _sanitize_filename_token(call_id, "call")
+    base_prefix = f"step_{step_index:02d}_{safe_tool}_{safe_call[:6]}"
+
+    candidates: list[str] = [f"{base_prefix}.log"]
+    if len(safe_call) > 6 or call_id != safe_call:
+        digest = hashlib.sha1((call_id or "").encode("utf-8")).hexdigest()[:6]
+        candidates.append(f"{base_prefix}_{digest}.log")
+
+    for name in candidates:
+        candidate = logs_dir / name
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+
+    counter = 1
+    while True:
+        candidate = logs_dir / f"{base_prefix}_{counter}.log"
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            counter += 1
+            continue
+        os.close(fd)
+        return candidate
+
+
 def format_tool_output(
     output: str,
     call_id: str,
@@ -63,19 +113,23 @@ def format_tool_output(
     if len(output) <= max_chars:
         return output, False, None
 
-    # Spill raw output to disk safely
+    # Spill raw output to disk safely without colliding across parallel calls
     raw_log_path: str | None = None
-    log_filename = f"step_{step_index:02d}_{tool_name}_{call_id[:6]}.log"
-    log_path = logs_dir / log_filename
+    log_path: Path | None = None
     try:
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = _reserve_spill_log_path(logs_dir, step_index, tool_name, call_id)
         log_path.write_text(output, encoding="utf-8")
         raw_log_path = (
-            f"{str(display_logs_dir).rstrip('/')}/{log_filename}"
+            f"{str(display_logs_dir).rstrip('/')}/{log_path.name}"
             if display_logs_dir is not None
             else str(log_path)
         )
     except OSError:
+        if log_path is not None:
+            try:
+                log_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raw_log_path = None
 
     # Compute head and tail bounds
@@ -145,7 +199,17 @@ class BashTool:
             return 1, f"Error: invalid bash timeout {timeout!r}. Must be a positive number."
         else:
             effective_timeout = min(float(timeout), self.max_timeout)
-        return self.env.execute_bash(command, timeout=effective_timeout)
+        exit_code, output = self.env.execute_bash(command, timeout=effective_timeout)
+        if (
+            exit_code == 124
+            and effective_timeout < self.max_timeout
+            and "[Command timed out after " in output
+        ):
+            output = (
+                f"{output}\n[Tip: Pass the 'timeout' tool parameter "
+                f"(up to {int(self.max_timeout)}s) for long-running test suites or builds.]"
+            )
+        return exit_code, output
 
 
 class ReadFileTool:

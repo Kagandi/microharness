@@ -422,6 +422,23 @@ class Harness:
         ok, canonical, error = self.resolve_model_spec(clean)
         return (True, canonical, "") if ok else (False, None, error)
 
+    def _resolve_model_context_cap(
+        self,
+        spec: str | dict[str, Any] | None,
+        model: Model,
+        cfg: dict[str, Any] | None = None,
+        registry: dict[str, dict[str, Any]] | None = None,
+    ) -> int | None:
+        """Resolves a model's context cap via static config, then live ``/models`` probe."""
+        value = resolve_model_context_tokens(
+            spec,
+            self.merged_config if cfg is None else cfg,
+            self.provider_registry if registry is None else registry,
+        )
+        if value is None and isinstance(model, ContextWindowAwareModel):
+            value = model.get_context_window()
+        return value if type(value) is int and value > 0 else None
+
     def apply_model_context_tokens(
         self,
         spec: str | dict[str, Any] | None,
@@ -429,14 +446,8 @@ class Harness:
         registry: dict[str, dict[str, Any]] | None = None,
     ) -> int | None:
         """Applies the per-model context cap for ``spec`` in place. No-op when None."""
-        value = resolve_model_context_tokens(
-            spec,
-            self.merged_config if cfg is None else cfg,
-            self.provider_registry if registry is None else registry,
-        )
-        if value is None and isinstance(self.model, ContextWindowAwareModel):
-            value = self.model.get_context_window()
-        if type(value) is not int or value <= 0:
+        value = self._resolve_model_context_cap(spec, self.model, cfg=cfg, registry=registry)
+        if value is None:
             return None
         self.max_context_tokens = value
         loop = self.active_loop
@@ -444,6 +455,17 @@ class Harness:
         if memory is not None:
             memory.max_context_tokens = value
         return value
+
+    def resolve_subagent_context_tokens(
+        self, spec: str | dict[str, Any], model: Model
+    ) -> int | None:
+        """Resolves a subagent model's context cap without mutating the parent harness."""
+        target_spec: str | dict[str, Any] = spec
+        if isinstance(spec, str):
+            ok, canonical, _ = self._canonical_model_spec(spec)
+            if ok and canonical is not None:
+                target_spec = canonical
+        return self._resolve_model_context_cap(target_spec, model)
 
     def switch_model(self, spec: str | dict[str, Any]) -> tuple[bool, str, Model]:
         """Switches active model dynamically using config and provider registry."""
@@ -672,6 +694,7 @@ class Harness:
                     effort_getter=self.get_reasoning_effort,
                     run_dir_getter=lambda: env.logs_dir.parent,
                     max_context_tokens_getter=lambda: self.max_context_tokens,
+                    context_tokens_resolver=self.resolve_subagent_context_tokens,
                     trigger_ratio=self.trigger_ratio,
                     max_retries=self.max_step_retries,
                     retry_delay=self.step_retry_delay,

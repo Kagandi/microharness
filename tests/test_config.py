@@ -131,7 +131,7 @@ class TestHarnessConfigCascade(unittest.TestCase):
         self.assertEqual(cfg.reasoning_effort, None)
         self.assertEqual(cfg.max_step_retries, 3)
         self.assertEqual(cfg.step_retry_delay, 5.0)
-        self.assertEqual(cfg.bash_timeout, 120.0)
+        self.assertEqual(cfg.bash_timeout, 300.0)
         self.assertIsNone(cfg.subagent_max_steps)
         self.assertEqual(cfg.hooks, ())
         self.assertEqual(cfg.disabled_hooks, ())

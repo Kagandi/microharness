@@ -4,7 +4,7 @@
   "keep_recent_turns": 4,
   "max_tool_tokens": 8000,
   "cache_ttl": "5m",
-  "bash_timeout": 120.0,
+  "bash_timeout": 300.0,
   "max_step_retries": 3,
   "step_retry_delay": 5.0,
   "subagent_max_steps": null,

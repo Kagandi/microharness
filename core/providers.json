@@ -32,6 +32,7 @@
     "endpoint": "https://api.openai.com/v1",
     "default_model": "gpt-4o",
     "env_keys": ["OPENAI_API_KEY"],
+    "context_tokens": 128000,
     "reasoning_format": "standard",
     "cache_strategy": "implicit"
   },

@@ -160,6 +160,7 @@ _CONTEXT_WINDOW_KEYS: tuple[str, ...] = (
     "context_window",
     "max_context_length",
     "max_context_tokens",
+    "max_input_tokens",
     "input_token_limit",
 )
 
