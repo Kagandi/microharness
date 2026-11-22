@@ -100,6 +100,11 @@ def active_subcommand(buf: str) -> tuple[str, str | None] | None:
     return None
 
 
+def _is_subcommand_root(command: str) -> bool:
+    """True when ``command`` is the bare name of a command with a value menu."""
+    return any(command in spellings for spellings, _t, _h in SUBCOMMAND_MENUS.values())
+
+
 SHIFT_ENTER_SEQUENCES: set[str | int] = {
     "\x1b[13;2u",
     "\x1b[27;2;13~",
@@ -133,9 +138,20 @@ RAW_KEY_SEQUENCES: dict[str, int] = {
     "\x1b[4~": curses.KEY_END,
     "\x1b[8~": curses.KEY_END,
     "\x1b[3~": curses.KEY_DC,
+    "\x1b[5~": curses.KEY_PPAGE,
+    "\x1b[6~": curses.KEY_NPAGE,
+    "\x1b[5;2~": curses.KEY_PPAGE,
+    "\x1b[6;2~": curses.KEY_NPAGE,
+    "\x1b[1;5A": curses.KEY_PPAGE,
+    "\x1b[1;5B": curses.KEY_NPAGE,
     "\x1b[1;2A": curses.KEY_SR,
     "\x1b[1;2B": curses.KEY_SF,
+    "\x1b[1;3A": curses.KEY_SR,
+    "\x1b[1;3B": curses.KEY_SF,
 }
+
+# SGR mouse wheel / button sequences: ESC [ < button ; x ; y M (or m).
+SGR_MOUSE_PATTERN = re.compile(r"^\x1b\[<(\d+);\d+;\d+[Mm]$")
 
 # Braille spinner frames and the seconds each frame is shown.
 SPINNER_FRAMES: tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -672,6 +688,7 @@ class TUIState:
         after = self.input_buffer[at_idx + 1 + len(query) :]
         self.input_buffer = f"{before}{chosen_tag} {after}"
         self.cursor_pos = len(before) + len(chosen_tag) + 1
+        self.selected_command_idx = 0
         self._reset_goal_column()
         return chosen_tag
 
@@ -792,6 +809,7 @@ class TUIState:
         chosen_cmd, _ = matches[idx]
         self.input_buffer = chosen_cmd
         self.cursor_pos = len(self.input_buffer)
+        self.selected_command_idx = 0
         self._reset_goal_column()
         return chosen_cmd
 
@@ -858,7 +876,7 @@ class TUIState:
         with self._lock:
             lines_snapshot = list(self.lines)
         wrapped: list[tuple[str, str]] = []
-        eff_width = max(10, width - 2)
+        eff_width = max(10, width - 3)
 
         for line_item in lines_snapshot:
             if not line_item.text:
@@ -889,26 +907,35 @@ class TUIState:
 
         return wrapped
 
-    def get_visible_slice(self, height: int, width: int) -> list[tuple[str, str]]:
-        """Calculates visible lines based on height and current scroll offset."""
-        with self._lock:
-            scroll = self.scroll_offset
+    def get_visible_slice_with_meta(
+        self, height: int, width: int
+    ) -> tuple[list[tuple[str, str]], int, int]:
+        """Returns ``(visible_lines, total_wrapped_lines, clamped_scroll_offset)``."""
         wrapped = self.get_wrapped_lines(width)
         total = len(wrapped)
-        if total <= height:
-            return wrapped
+        with self._lock:
+            if total <= height:
+                self.scroll_offset = 0
+                return wrapped, total, 0
 
-        max_scroll = max(0, total - height)
-        actual_scroll = min(scroll, max_scroll)
-        end_idx = total - actual_scroll
-        start_idx = max(0, end_idx - height)
-        return wrapped[start_idx:end_idx]
+            max_scroll = max(0, total - height)
+            actual_scroll = min(self.scroll_offset, max_scroll)
+            self.scroll_offset = actual_scroll
+            end_idx = total - actual_scroll
+            start_idx = max(0, end_idx - height)
+            return wrapped[start_idx:end_idx], total, actual_scroll
+
+    def get_visible_slice(self, height: int, width: int) -> list[tuple[str, str]]:
+        """Calculates visible lines based on height and current scroll offset."""
+        visible, _total, _scroll = self.get_visible_slice_with_meta(height, width)
+        return visible
 
     def handle_input_char(self, char_str: str) -> None:
         """Inserts character into input buffer at cursor position."""
         pos = min(self.cursor_pos, len(self.input_buffer))
         self.input_buffer = self.input_buffer[:pos] + char_str + self.input_buffer[pos:]
         self.cursor_pos = pos + len(char_str)
+        self.selected_command_idx = 0
         self._reset_goal_column()
 
     def handle_newline(self) -> None:
@@ -916,6 +943,7 @@ class TUIState:
         pos = min(self.cursor_pos, len(self.input_buffer))
         self.input_buffer = self.input_buffer[:pos] + "\n" + self.input_buffer[pos:]
         self.cursor_pos = pos + 1
+        self.selected_command_idx = 0
         self._reset_goal_column()
 
     def handle_backspace(self) -> None:
@@ -924,6 +952,7 @@ class TUIState:
             pos = min(self.cursor_pos, len(self.input_buffer))
             self.input_buffer = self.input_buffer[: pos - 1] + self.input_buffer[pos:]
             self.cursor_pos = max(0, pos - 1)
+        self.selected_command_idx = 0
         self._reset_goal_column()
 
     def _clamp_cursor(self) -> None:
@@ -992,12 +1021,14 @@ class TUIState:
         pos = self.cursor_pos
         if pos < len(self.input_buffer):
             self.input_buffer = self.input_buffer[:pos] + self.input_buffer[pos + 1 :]
+        self.selected_command_idx = 0
         self._reset_goal_column()
 
     def truncate_input(self, length: int) -> None:
         """Cuts the input buffer to the given length and places the caret at its end."""
         self.input_buffer = self.input_buffer[:length]
         self.cursor_pos = min(length, len(self.input_buffer))
+        self.selected_command_idx = 0
         self._reset_goal_column()
 
     def clear_input(self) -> str:
@@ -1005,6 +1036,7 @@ class TUIState:
         val = self.input_buffer.strip()
         self.input_buffer = ""
         self.cursor_pos = 0
+        self.selected_command_idx = 0
         self._reset_goal_column()
         return val
 
@@ -1060,6 +1092,17 @@ def _character_for(code: int, modifier: int) -> str | None:
 
 # Transcript tags whose lines are drawn segment by segment for inline styling.
 INLINE_MARKUP_TAGS = ("agent", "user", "blockquote", "table_row")
+AGENT_BLOCK_TAGS = (
+    "agent",
+    "heading",
+    "table_border",
+    "table_header",
+    "table_row",
+    "code_border",
+    "code",
+    "blockquote",
+)
+SURFACE_BG_TAGS = ("user", "action", "error", "code_border", "code")
 
 
 def _safe(write: Any, *args: Any) -> None:
@@ -1173,6 +1216,7 @@ class CursesTUI:
         self.state = state
         self.stdscr: Any = None
         self.has_colors = False
+        self.has_extended_colors = False
         self._cancel_requested = False
         self._redraw_requested = False
         self._draw_lock = threading.Lock()
@@ -1245,19 +1289,41 @@ class CursesTUI:
             event.set()
 
     def _init_colors(self) -> None:
+        self.has_extended_colors = False
         try:
             if curses.has_colors():
                 curses.start_color()
                 curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_CYAN, -1)  # User / Heading
+                curses.init_pair(1, curses.COLOR_CYAN, -1)  # User / Heading / Accent
                 curses.init_pair(2, curses.COLOR_GREEN, -1)  # Action / Code
                 curses.init_pair(3, curses.COLOR_YELLOW, -1)  # Tool / Thought
                 curses.init_pair(4, curses.COLOR_RED, -1)  # Error
                 curses.init_pair(5, curses.COLOR_BLUE, -1)  # Header / Brand
                 curses.init_pair(6, curses.COLOR_WHITE, -1)  # Agent text
                 self.has_colors = True
+                colors = getattr(curses, "COLORS", 0)
+                pairs = getattr(curses, "COLOR_PAIRS", 0)
+                if (
+                    isinstance(colors, int)
+                    and isinstance(pairs, int)
+                    and colors >= 256
+                    and pairs >= 16
+                ):
+                    try:
+                        curses.init_pair(7, 255, 237)  # User prompt surface
+                        curses.init_pair(8, 81, 237)  # User prompt left accent bar
+                        curses.init_pair(9, 114, 235)  # Tool action / code border surface
+                        curses.init_pair(10, 78, 235)  # Tool action gutter glyph
+                        curses.init_pair(11, 224, 52)  # Error surface
+                        curses.init_pair(12, 203, 52)  # Error gutter glyph
+                        curses.init_pair(13, 252, 235)  # Code block text surface
+                        curses.init_pair(14, 245, -1)  # Muted system / turn divider
+                        self.has_extended_colors = True
+                    except curses.error:
+                        self.has_extended_colors = False
         except curses.error:
             self.has_colors = False
+            self.has_extended_colors = False
 
     def draw(self, stdscr: Any) -> None:
         """Draws the complete TUI screen: Header, Transcript, Status, and Bottom Input."""
@@ -1314,31 +1380,126 @@ class CursesTUI:
         """Draws the scrollable conversation area above the status cockpit."""
         height = max(1, layout.separator_row - 2)
         italic = getattr(curses, "A_ITALIC", 0) or curses.A_UNDERLINE
-        for index, (text, tag) in enumerate(self.state.get_visible_slice(height=height, width=w)):
+        visible, total, actual_scroll = self.state.get_visible_slice_with_meta(
+            height=height, width=w
+        )
+        content_width = max(0, w - 2)
+        for index, (text, tag) in enumerate(visible):
             row = 2 + index
             if row >= layout.separator_row:
                 break
+            prev_tag = visible[index - 1][1] if index > 0 else None
+            next_tag = visible[index + 1][1] if index + 1 < len(visible) else None
+
+            if tag == "dim" and not text:
+                if next_tag == "user" and index > 0 and content_width > 2:
+                    div_attr = self._extended_colored(14, curses.A_DIM)
+                    _safe(stdscr.addstr, row, 2, "─" * (content_width - 1), div_attr)
+                continue
+
             attr = self._tag_attribute(tag)
+            if self.has_extended_colors and tag in SURFACE_BG_TAGS and content_width > 0:
+                _safe(stdscr.addstr, row, 1, " " * content_width, attr)
+
+            if gutter := self._gutter_marker(tag, text, prev_tag):
+                glyph, g_attr = gutter
+                _safe(stdscr.addstr, row, 0, glyph, g_attr)
+
             if tag in INLINE_MARKUP_TAGS:
-                self._draw_markup_row(stdscr, row, w, text, attr, italic)
+                preserve_bg = self.has_extended_colors and tag == "user"
+                self._draw_markup_row(stdscr, row, w, text, attr, italic, preserve_bg=preserve_bg)
             else:
-                _safe(stdscr.addstr, row, 1, text[: w - 2], attr)
+                _safe(stdscr.addstr, row, 2, text[: max(0, w - 3)], attr)
+        if total > height and height >= 2 and w >= 20:
+            self._draw_scrollbar(stdscr, w, height, total, actual_scroll)
+
+    def _gutter_marker(self, tag: str, text: str, prev_tag: str | None) -> tuple[str, int] | None:
+        """Returns the left-gutter glyph and attribute separating transcript operations."""
+        if tag == "user":
+            attr = (
+                self._extended_colored(8, curses.A_BOLD)
+                if self.has_extended_colors
+                else self._colored(1, curses.A_BOLD)
+            )
+            return ("▎", attr)
+        if tag == "action":
+            glyph = "↳" if text.lstrip().startswith("↳") else "▸"
+            attr = (
+                self._extended_colored(10, curses.A_BOLD)
+                if self.has_extended_colors
+                else self._colored(2, curses.A_BOLD)
+            )
+            return (glyph, attr)
+        if tag == "thought":
+            glyph = "◌" if prev_tag != "thought" else "┆"
+            return (glyph, self._colored(3, curses.A_DIM))
+        if tag == "error":
+            attr = (
+                self._extended_colored(12, curses.A_BOLD)
+                if self.has_extended_colors
+                else self._colored(4, curses.A_BOLD)
+            )
+            return ("✖", attr)
+        if tag in ("agent", "heading") and text and prev_tag not in AGENT_BLOCK_TAGS:
+            return ("◆", self._colored(1, curses.A_BOLD))
+        if tag == "system" and text and prev_tag != "system":
+            attr = (
+                self._extended_colored(14, curses.A_DIM)
+                if self.has_extended_colors
+                else curses.A_DIM
+            )
+            return ("·", attr)
+        return None
+
+    def _draw_scrollbar(
+        self, stdscr: Any, w: int, height: int, total: int, scroll_offset: int
+    ) -> None:
+        """Draws a thin scrollbar on the right edge when the transcript overflows."""
+        max_scroll = max(1, total - height)
+        thumb_size = min(height, max(1, round(height * height / total)))
+        ratio = 1.0 - (min(scroll_offset, max_scroll) / max_scroll)
+        thumb_start = round(ratio * (height - thumb_size))
+        col = w - 1
+        for offset in range(height):
+            row = 2 + offset
+            in_thumb = thumb_start <= offset < thumb_start + thumb_size
+            glyph = "┃" if in_thumb else "│"
+            attr = curses.A_NORMAL if in_thumb else curses.A_DIM
+            _safe(stdscr.addstr, row, col, glyph, attr)
 
     def _tag_attribute(self, tag: str) -> int:
         """Curses attribute for a transcript line tag, falling back to normal."""
-        if tag in ("user", "heading"):
+        if tag == "user":
+            if self.has_extended_colors:
+                return self._extended_colored(7, curses.A_BOLD)
+            return self._colored(1, curses.A_BOLD)
+        if tag == "heading":
             return self._colored(1, curses.A_BOLD)
         if tag == "table_header":
             return curses.A_BOLD
-        if tag in ("table_border", "code_border", "blockquote", "dim", "system"):
+        if tag == "code_border":
+            if self.has_extended_colors:
+                return self._extended_colored(9, curses.A_DIM)
+            return curses.A_DIM
+        if tag == "system":
+            if self.has_extended_colors:
+                return self._extended_colored(14, curses.A_DIM)
+            return curses.A_DIM
+        if tag in ("table_border", "blockquote", "dim"):
             return curses.A_DIM
         if tag == "action":
+            if self.has_extended_colors:
+                return self._extended_colored(9, curses.A_NORMAL)
             return self._colored(2, curses.A_NORMAL)
         if tag == "thought":
             return self._colored(3, curses.A_DIM)
         if tag == "error":
+            if self.has_extended_colors:
+                return self._extended_colored(11, curses.A_BOLD)
             return self._colored(4, curses.A_BOLD)
         if tag == "code":
+            if self.has_extended_colors:
+                return self._extended_colored(13, curses.A_NORMAL)
             return self._colored(2, curses.A_NORMAL)
         if tag == "agent":
             return self._colored(6, curses.A_NORMAL)
@@ -1348,19 +1509,37 @@ class CursesTUI:
         """A color pair when colors are available, otherwise a plain attribute."""
         return curses.color_pair(pair) | fallback if self.has_colors else fallback
 
+    def _extended_colored(self, pair: int, fallback: int) -> int:
+        """An extended 256-color pair when available, otherwise a plain attribute."""
+        return curses.color_pair(pair) | fallback if self.has_extended_colors else fallback
+
     def _draw_markup_row(
-        self, stdscr: Any, row: int, w: int, text: str, attr: int, italic: int
+        self,
+        stdscr: Any,
+        row: int,
+        w: int,
+        text: str,
+        attr: int,
+        italic: int,
+        *,
+        preserve_bg: bool = False,
     ) -> None:
         """Draws one line segment by segment so inline styles survive."""
-        col = 1
+        col = 2
         for segment, style in parse_inline_segments(text):
             if col >= w - 1:
                 break
             chunk = segment[: w - 1 - col]
-            _safe(stdscr.addstr, row, col, chunk, self._styled(attr, style, italic))
+            _safe(
+                stdscr.addstr,
+                row,
+                col,
+                chunk,
+                self._styled(attr, style, italic, preserve_bg=preserve_bg),
+            )
             col += len(chunk)
 
-    def _styled(self, base: int, style: str, italic: int) -> int:
+    def _styled(self, base: int, style: str, italic: int, *, preserve_bg: bool = False) -> int:
         """Applies an inline markdown style on top of a line's base attribute."""
         if style == "bold":
             return base | curses.A_BOLD
@@ -1369,6 +1548,8 @@ class CursesTUI:
         if style == "bold_italic":
             return base | curses.A_BOLD | italic
         if style == "code":
+            if preserve_bg:
+                return base | curses.A_BOLD
             return self._colored(2, curses.A_BOLD)
         return base
 
@@ -1437,6 +1618,13 @@ class CursesTUI:
         box_height = len(visible) + 4
         box_width = max(10, w - 1)
         top = max(1, layout.separator_row - box_height)
+        idx = max(0, min(self.state.selected_command_idx, len(matches) - 1))
+        selected_cmd = matches[idx][0]
+        opens_submenu = (
+            not is_file_menu
+            and _is_subcommand_root(selected_cmd)
+            and self.state.input_buffer.strip() != selected_cmd
+        )
         try:
             self._draw_menu_frame(stdscr, top, box_width, box_height, menu_kind, is_file_menu)
             column_width = menu_column_width(menu_kind, box_width, is_file_menu)
@@ -1450,7 +1638,9 @@ class CursesTUI:
                     column_width,
                     row - 1 == selected,
                 )
-            self._draw_menu_footer(stdscr, top, box_width, box_height, len(visible))
+            self._draw_menu_footer(
+                stdscr, top, box_width, box_height, len(visible), opens_submenu=opens_submenu
+            )
         except curses.error:
             pass
 
@@ -1502,9 +1692,19 @@ class CursesTUI:
         stdscr.addstr(y, 1, content, attr)
         stdscr.addstr(y, width - 1, "│", curses.A_DIM)
 
-    def _draw_menu_footer(self, stdscr: Any, top: int, width: int, height: int, rows: int) -> None:
+    def _draw_menu_footer(
+        self,
+        stdscr: Any,
+        top: int,
+        width: int,
+        height: int,
+        rows: int,
+        *,
+        opens_submenu: bool = False,
+    ) -> None:
         """Draws the menu's separator, keyboard hint, and bottom border."""
-        tip = "   Tab / ↑ / ↓: Navigate  ·  Enter / →: Select  ·  Esc: Dismiss"
+        action_hint = "Enter: Open" if opens_submenu else "Enter: Select"
+        tip = f"   Tab / ↑ / ↓: Navigate  ·  →: Complete  ·  {action_hint}  ·  Esc: Dismiss"
         separator_row = top + 1 + rows
         stdscr.addstr(separator_row, 0, ("├" + "─" * (width - 2) + "┤")[:width], curses.A_DIM)
         stdscr.addstr(separator_row + 1, 0, "│", curses.A_DIM)
@@ -1620,10 +1820,7 @@ class CursesTUI:
         completed = self.state.complete_selected_command()
         if completed is None:
             return
-        takes_argument = any(
-            completed in spellings for spellings, _t, _h in SUBCOMMAND_MENUS.values()
-        )
-        if takes_argument:
+        if _is_subcommand_root(completed):
             self.state.input_buffer = f"{completed} "
             self.state.cursor_pos = len(self.state.input_buffer)
 
@@ -1705,12 +1902,32 @@ class CursesTUI:
                 self.stdscr.clear()
             return True
 
+        # 0a. Mouse wheel / SGR mouse events (transcript scrolling)
+        if ch == getattr(curses, "KEY_MOUSE", -1):
+            try:
+                _, _, _, _, bstate = curses.getmouse()
+            except curses.error:
+                return True
+            if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+                self.state.scroll_up(3)
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+                self.state.scroll_down(3)
+            return True
+
+        if isinstance(ch, str) and (mouse_match := SGR_MOUSE_PATTERN.match(ch)):
+            base_button = int(mouse_match.group(1)) & ~28
+            if base_button == 64:
+                self.state.scroll_up(3)
+            elif base_button == 65:
+                self.state.scroll_down(3)
+            return True
+
         # 1. Shift+Enter / Alt+Enter: Insert newline for multiline input
         if ch in SHIFT_ENTER_SEQUENCES:
             self.state.handle_newline()
             return True
 
-        # 2. Enter: Complete open autocomplete selection or submit
+        # 2. Enter: Open an unselected subcommand menu, complete @file, or select & submit
         if ch in ("\n", "\r", curses.KEY_ENTER, 10, 13):
             if self.state.turn_active:
                 self.state.add_system("⏳ Turn is running (press Esc or Ctrl+C to cancel)")
@@ -1719,11 +1936,19 @@ class CursesTUI:
                 self.state.complete_selected_file_tag()
                 return True
             if cmd_matches:
+                idx = max(0, min(self.state.selected_command_idx, len(cmd_matches) - 1))
+                selected_cmd, _ = cmd_matches[idx]
+                if (
+                    _is_subcommand_root(selected_cmd)
+                    and self.state.input_buffer.strip() != selected_cmd
+                ):
+                    self._complete_command_keeping_value_menu()
+                    return True
                 self.state.complete_selected_command()
             user_text = self.state.clear_input()
             if not user_text:
                 return True
-            if user_text.lower() in ("/exit", "/quit", "exit", "quit"):
+            if user_text.lower() in ("/exit", "/quit"):
                 return False
             on_user_submit(user_text)
             return True
@@ -1878,6 +2103,14 @@ class CursesTUI:
             curses.cbreak()
             stdscr.keypad(True)
             curses.curs_set(1)
+            wheel_mask = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(
+                curses, "BUTTON5_PRESSED", 0
+            )
+            if wheel_mask and hasattr(curses, "mousemask"):
+                try:
+                    curses.mousemask(wheel_mask)
+                except curses.error:
+                    pass
             if hasattr(stdscr, "timeout"):
                 stdscr.timeout(50)
 
@@ -1888,49 +2121,55 @@ class CursesTUI:
             if initial_instruction and initial_instruction.strip():
                 _execute_submit(initial_instruction.strip())
 
-            while True:
-                if self._redraw_requested:
-                    self._redraw_requested = False
-                    self.draw(stdscr)
-
-                try:
-                    ch = stdscr.get_wch()
-                except (KeyboardInterrupt, EOFError):
-                    if self._confirm_prompt is not None:
-                        self._finish_confirm_prompt(False)
-                        self.draw(stdscr)
-                        continue
-                    if self._secret_prompt is not None:
-                        self._finish_secret_prompt(None)
-                        self.draw(stdscr)
-                        continue
-                    if self.state.turn_active:
-                        self._cancel_requested = True
-                        self.state.add_system("⚠️ Cancellation requested...")
-                        self.draw(stdscr)
-                        continue
-                    break
-                except curses.error:
-                    if self.state.turn_active or self._redraw_requested:
+            try:
+                while True:
+                    if self._redraw_requested:
                         self._redraw_requested = False
                         self.draw(stdscr)
-                    continue
 
-                if ch in (27, "\x1b"):
-                    seq = _drain_escape_sequence(stdscr)
-                    if len(seq) > 1:
-                        ch = seq
+                    try:
+                        ch = stdscr.get_wch()
+                    except (KeyboardInterrupt, EOFError):
+                        if self._confirm_prompt is not None:
+                            self._finish_confirm_prompt(False)
+                            self.draw(stdscr)
+                            continue
+                        if self._secret_prompt is not None:
+                            self._finish_secret_prompt(None)
+                            self.draw(stdscr)
+                            continue
+                        if self.state.turn_active:
+                            self._cancel_requested = True
+                            self.state.add_system("⚠️ Cancellation requested...")
+                            self.draw(stdscr)
+                            continue
+                        break
+                    except curses.error:
+                        if self.state.turn_active or self._redraw_requested:
+                            self._redraw_requested = False
+                            self.draw(stdscr)
+                        continue
 
-                if not self.handle_key(ch, _execute_submit):
-                    break
-                self.draw(stdscr)
+                    if ch in (27, "\x1b"):
+                        seq = _drain_escape_sequence(stdscr)
+                        if len(seq) > 1:
+                            ch = seq
 
-            self._finish_confirm_prompt(False)
-            self._finish_secret_prompt(None)
-            if self.worker_thread and self.worker_thread.is_alive():
-                self._cancel_requested = True
-                self.worker_thread.join(timeout=5.0)
+                    if not self.handle_key(ch, _execute_submit):
+                        break
+                    self.draw(stdscr)
+            finally:
+                if hasattr(curses, "mousemask"):
+                    try:
+                        curses.mousemask(0)
+                    except curses.error:
+                        pass
+                self._finish_confirm_prompt(False)
+                self._finish_secret_prompt(None)
+                if self.worker_thread and self.worker_thread.is_alive():
+                    self._cancel_requested = True
+                    self.worker_thread.join(timeout=5.0)
 
-            _reset_key_reporting()
+                _reset_key_reporting()
 
         curses.wrapper(_main)
