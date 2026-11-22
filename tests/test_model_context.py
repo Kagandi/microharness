@@ -482,6 +482,143 @@ class TestContextWindowAutoDetection(unittest.TestCase):
         self.assertEqual(harness.max_context_tokens, 262144)
         self.assertEqual(memory.max_context_tokens, 262144)
 
+    def test_anthropic_max_input_tokens_and_builtin_openai_profile_fallback(self):
+        """Invariant: /models parses max_input_tokens and built-in openai profile provides 128k fallback."""
+        from core.providers import load_builtin_providers
+
+        builtins = load_builtin_providers()
+        self.assertEqual(resolve_model_context_tokens("openai/gpt-4o", {}, builtins), 128000)
+        self.assertEqual(
+            resolve_model_context_tokens("deepseek/deepseek-flash", {}, builtins), None
+        )
+
+        resp_anthropic = MagicMock()
+        resp_anthropic.read.return_value = json.dumps(
+            {"data": [{"id": "claude-sonnet-5-5", "max_input_tokens": 1000000}]}
+        ).encode("utf-8")
+        resp_anthropic.__enter__.return_value = resp_anthropic
+
+        with patch("urllib.request.urlopen", return_value=resp_anthropic):
+            m = HttpChatModel(
+                base_url="https://api.anthropic.com/v1",
+                model="claude-sonnet-5-5",
+                api_key="test-key",
+            )
+            self.assertEqual(m.get_context_window(), 1000000)
+
+    def test_subagent_resolves_its_own_context_window_without_mutating_parent(self):
+        """Invariant: subagents overriding model get their own context cap, while inheriting subagents share parent's."""
+        from core.subagents import Subagent
+
+        tmp = tempfile.mkdtemp()
+        ws = Path(tmp)
+        agents_dir = ws / ".microharness" / "agents"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "capped.md").write_text(
+            "---\nname: capped\ndescription: Capped model\nmodel: capped_alias\n---\nCheck.",
+            encoding="utf-8",
+        )
+        (agents_dir / "probed.md").write_text(
+            "---\nname: probed\ndescription: Probed model\nmodel: probed_alias\n---\nCheck.",
+            encoding="utf-8",
+        )
+        (agents_dir / "fallback.md").write_text(
+            "---\nname: fallback\ndescription: Fallback model\nmodel: fallback_alias\n---\nCheck.",
+            encoding="utf-8",
+        )
+        (ws / ".microharness" / "config.json").write_text(
+            json.dumps(
+                {
+                    "models": {
+                        "capped_alias": {
+                            "model": "m-capped",
+                            "provider": "openai",
+                            "max_context_tokens": 65536,
+                        },
+                        "probed_alias": {
+                            "model": "m-probed",
+                            "provider": "vllm",
+                        },
+                        "fallback_alias": {
+                            "model": "m-unknown",
+                            "provider": "vllm",
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        parent_model = MockModel([("parent", [])])
+        harness = Harness(
+            model=parent_model,
+            workspace_dir=ws,
+            global_dir=Path(tempfile.mkdtemp()),
+            runs_dir=Path(tempfile.mkdtemp()),
+            max_context_tokens=1024000,
+            verbose=False,
+        )
+        env, reg, parent_mem, _, _, _ = harness._setup_run(
+            task_id="sub_ctx",
+            system_prompt="SYS",
+            initial_instruction="hi",
+            initial_files={},
+        )
+        try:
+            sub_tool = reg.get("subagent")
+            sub_tool.subagents["inherited"] = Subagent(
+                name="inherited",
+                description="Inherited",
+                system_prompt="Check.",
+                scope="project",
+                model=None,
+            )
+
+            seen_caps: list[int] = []
+
+            class FakeLoop:
+                def __init__(self, model, memory, tools):
+                    self.model = model
+                    self.memory = memory
+                    self.tools = tools
+                    seen_caps.append(memory.max_context_tokens)
+
+            with (
+                patch("core.subagents.AgentLoop", FakeLoop),
+                patch(
+                    "core.subagents.run_steps",
+                    return_value=MagicMock(finished=True, reason="completed"),
+                ),
+            ):
+                # 1. Inherited model shares parent's 1,024,000 cap
+                c0, _ = sub_tool.execute(agent="inherited", task="t0")
+                self.assertEqual(c0, 0)
+
+                # 2. Config-capped model uses its own 65,536 cap, not parent's 1,024,000
+                c1, _ = sub_tool.execute(agent="capped", task="t1")
+                self.assertEqual(c1, 0)
+
+                # 3. Live /models-probed child model uses its 131,072 cap
+                resp_probe = MagicMock()
+                resp_probe.read.return_value = json.dumps(
+                    {"data": [{"id": "m-probed", "max_model_len": 131072}]}
+                ).encode("utf-8")
+                resp_probe.__enter__.return_value = resp_probe
+                with patch("urllib.request.urlopen", return_value=resp_probe):
+                    c2, _ = sub_tool.execute(agent="probed", task="t2")
+                self.assertEqual(c2, 0)
+
+                # 4. Negative case: failed probe + no profile cap uses default 262,144 (never parent's 1,024,000)
+                with patch("urllib.request.urlopen", side_effect=OSError("down")):
+                    c3, _ = sub_tool.execute(agent="fallback", task="t3")
+                self.assertEqual(c3, 0)
+
+            self.assertEqual(seen_caps, [1024000, 65536, 131072, 262144])
+            self.assertEqual(harness.max_context_tokens, 1024000)
+            self.assertEqual(parent_mem.max_context_tokens, 1024000)
+        finally:
+            env.teardown()
+
 
 if __name__ == "__main__":
     unittest.main()

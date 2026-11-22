@@ -37,6 +37,7 @@ from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from core.protocols import (
     CacheAwareModel,
     CancellableModel,
+    ContextWindowAwareModel,
     DeadlineAwareModel,
     EndpointAwareModel,
     Model,
@@ -648,6 +649,7 @@ class SubagentTool:
         effort_getter: Callable[[], str | None] | None = None,
         run_dir_getter: Callable[[], Path | None] | None = None,
         max_context_tokens_getter: Callable[[], int] | None = None,
+        context_tokens_resolver: Callable[[str | dict[str, Any], Model], int | None] | None = None,
         trigger_ratio: float = DEFAULT_TRIGGER_RATIO,
         max_retries: int = 3,
         retry_delay: float = 5.0,
@@ -666,6 +668,7 @@ class SubagentTool:
         self.effort_getter = effort_getter
         self.run_dir_getter = run_dir_getter
         self.max_context_tokens_getter = max_context_tokens_getter
+        self.context_tokens_resolver = context_tokens_resolver
         self.trigger_ratio = trigger_ratio
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -881,6 +884,26 @@ class SubagentTool:
                 )
                 setattr(parent_model, "total_cached_tokens", cur_cached + child_usage.cached_tokens)
 
+    def _resolve_child_max_context_tokens(
+        self, target_model_spec: str | None, child_model: Model
+    ) -> int:
+        """Resolves the child's context budget from its own model when overridden, else parent's."""
+        if target_model_spec is None:
+            return (
+                self.max_context_tokens_getter()
+                if self.max_context_tokens_getter is not None
+                else DEFAULT_MAX_CONTEXT_TOKENS
+            )
+        if self.context_tokens_resolver is not None:
+            resolved = self.context_tokens_resolver(target_model_spec, child_model)
+            if type(resolved) is int and resolved > 0:
+                return resolved
+        if isinstance(child_model, ContextWindowAwareModel):
+            detected = child_model.get_context_window()
+            if type(detected) is int and detected > 0:
+                return detected
+        return DEFAULT_MAX_CONTEXT_TOKENS
+
     def _run_single(
         self,
         task: str = "",
@@ -954,11 +977,7 @@ class SubagentTool:
             agents_instructions=self.agents_instructions,
             skills_index=self.skills_index,
         )
-        max_ctx = (
-            self.max_context_tokens_getter()
-            if self.max_context_tokens_getter is not None
-            else DEFAULT_MAX_CONTEXT_TOKENS
-        )
+        max_ctx = self._resolve_child_max_context_tokens(target_model_spec, child_model)
         child_memory = Memory(
             system_prompt=child_system_prompt,
             user_prompt=task.strip(),

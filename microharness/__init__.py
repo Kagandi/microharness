@@ -3,6 +3,6 @@
 from core.harness import Harness
 from core.types import RunResult, Task, ToolCall
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 
 __all__ = ["Harness", "Task", "ToolCall", "RunResult", "__version__"]

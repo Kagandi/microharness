@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from core.auth_store import get_auth_store_path
 from core.config import ConfigLayers, resolve_project_tool_trust
+from core.defaults import get_default
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import Harness, get_default_global_dir
 from core.model import (
@@ -44,6 +45,7 @@ from core.providers import (
     parse_model_spec,
     resolve_auth_provider,
     resolve_connection,
+    resolve_model_context_tokens,
 )
 from core.types import RunResult, Task, ToolCall
 
@@ -228,7 +230,10 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--bash-timeout",
         type=float,
         default=None,
-        help="Per-command timeout in seconds for the bash tool (default: 120.0 or from config)",
+        help=(
+            "Per-command timeout in seconds for the bash tool "
+            f"(default: {get_default('bash_timeout')} or from config)"
+        ),
     )
 
 
@@ -589,6 +594,20 @@ def _task_requires_finish_tool(context: CliContext) -> bool:
 def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
     """The model/limits summary recorded alongside a benchmark's scorecard."""
     model = context.model
+    max_context_tokens = resolve_model_context_tokens(context.model_spec, context.config) or int(
+        get_default("max_context_tokens")
+    )
+    raw_trigger_ratio = context.config.get("trigger_ratio")
+    trigger_ratio = (
+        float(raw_trigger_ratio)
+        if raw_trigger_ratio is not None
+        else float(get_default("trigger_ratio"))
+    )
+    bash_timeout = (
+        context.bash_timeout
+        if context.bash_timeout is not None
+        else float(get_default("bash_timeout"))
+    )
     return {
         "provider": (
             getattr(context.args, "provider", None)
@@ -601,6 +620,9 @@ def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
         "reasoning_effort": context.reasoning_effort,
         "max_steps": getattr(context.args, "max_steps", None)
         or int(context.config.get("max_steps", 30)),
+        "max_context_tokens": max_context_tokens,
+        "trigger_ratio": trigger_ratio,
+        "bash_timeout": bash_timeout,
     }
 
 
