@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+
+
+def utc_timestamp() -> str:
+    """Returns the current UTC time as an ISO-8601 string with millisecond precision."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
 
 ASSISTANT_EXTRA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning", "reasoning_details")
 
@@ -174,6 +181,7 @@ class StepTrace:
     usage: dict[str, Any] = field(default_factory=dict)
     stop_reason: str | None = None
     stop_detail: str | None = None
+    timestamp: str = field(default_factory=utc_timestamp)
 
 
 @dataclass

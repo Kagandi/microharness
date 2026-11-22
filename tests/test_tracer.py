@@ -874,6 +874,137 @@ class TestTracer(unittest.TestCase):
             # Only the pass-1 ceiling is consulted, far fewer than the 401 on disk.
             self.assertEqual(len(reads), 50)
 
+    def test_tracer_records_iso_utc_timestamps_across_outputs(self):
+        """Invariant: trajectory.jsonl, trace.json, trace.md, and verbose logs carry ISO-8601 UTC timestamps."""
+        import io
+        import sys
+        from datetime import datetime, timezone
+
+        from core.types import StepTrace
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            tracer = Tracer(
+                task=Task(id="ts_task", instruction="Check timestamps"),
+                output_dir=out_dir,
+                verbose=True,
+            )
+
+            explicit_ts = "2026-11-22T19:30:44.123Z"
+            step1 = StepTrace(
+                step_index=1,
+                prompt_messages=[{"role": "user", "content": "hi"}],
+                model_response={"content": "hello", "tool_calls": []},
+                tool_results=[],
+                duration_s=0.25,
+                timestamp=explicit_ts,
+            )
+            # Empty timestamp must be populated automatically rather than persisted blank.
+            step2 = StepTrace(
+                step_index=2,
+                prompt_messages=[{"role": "user", "content": "next"}],
+                model_response={"content": "done", "tool_calls": []},
+                tool_results=[],
+                duration_s=0.10,
+                timestamp="",
+            )
+
+            buf = io.StringIO()
+            orig_stdout = sys.stdout
+            try:
+                sys.stdout = buf
+                tracer.record_step(step1)
+                tracer.record_step(step2)
+            finally:
+                sys.stdout = orig_stdout
+
+            stdout_text = buf.getvalue()
+            self.assertIn(explicit_ts, stdout_text)
+            self.assertNotEqual(step2.timestamp, "")
+            self.assertIn(step2.timestamp, stdout_text)
+
+            # Parseability and UTC check on generated timestamp
+            self.assertTrue(step2.timestamp.endswith("Z"))
+            parsed_step2 = datetime.fromisoformat(step2.timestamp)
+            self.assertEqual(parsed_step2.tzinfo, timezone.utc)
+
+            # trajectory.jsonl carries exact timestamps for every step
+            jsonl_rows = [
+                json.loads(line)
+                for line in (out_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(jsonl_rows), 2)
+            self.assertEqual(jsonl_rows[0]["timestamp"], explicit_ts)
+            self.assertEqual(jsonl_rows[1]["timestamp"], step2.timestamp)
+
+            # Finalize writes started_at, finished_at, and matching step timestamps
+            json_path, md_path = tracer.finalize(finish_reason="completed")
+            trace_data = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(trace_data["started_at"], tracer.started_at)
+            self.assertEqual(trace_data["finished_at"], tracer.finished_at)
+            self.assertTrue(trace_data["started_at"].endswith("Z"))
+            self.assertTrue(trace_data["finished_at"].endswith("Z"))
+            self.assertGreaterEqual(
+                datetime.fromisoformat(trace_data["finished_at"]),
+                datetime.fromisoformat(trace_data["started_at"]),
+            )
+            self.assertEqual(trace_data["steps"][0]["timestamp"], explicit_ts)
+            self.assertEqual(trace_data["steps"][1]["timestamp"], step2.timestamp)
+
+            md_text = md_path.read_text(encoding="utf-8")
+            self.assertIn(f"- **Started**: `{tracer.started_at}`", md_text)
+            self.assertIn(f"- **Finished**: `{tracer.finished_at}`", md_text)
+            self.assertIn(f"### Step 1 (0.25s) · `{explicit_ts}`", md_text)
+            self.assertIn(f"### Step 2 (0.10s) · `{step2.timestamp}`", md_text)
+
+    def test_serialization_fallback_and_duck_typed_step_preserve_timestamp(self):
+        """Invariant: serialization-error fallback and timestamp-less step objects still emit timestamps."""
+        from datetime import datetime, timezone
+
+        from core.types import StepTrace
+
+        class DuckStep:
+            step_index = 1
+            duration_s = 0.05
+            compaction_applied = False
+            usage: dict[str, Any] = {}
+            prompt_messages = [{"role": "user", "content": "duck"}]
+            model_response = {"content": "quack", "tool_calls": []}
+            tool_results: list[dict[str, Any]] = []
+            stop_reason = None
+            stop_detail = None
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = Path(tmp_dir)
+            tracer = Tracer(
+                task=Task(id="fallback_ts", instruction="i"), output_dir=out_dir, verbose=False
+            )
+            tracer.record_step(DuckStep())  # type: ignore[arg-type]
+
+            bad_ts = "2026-11-22T20:00:00.000Z"
+            tracer.record_step(
+                StepTrace(
+                    step_index=2,
+                    duration_s=0.1,
+                    prompt_messages=[{"role": "user", "content": "bad"}],
+                    model_response={(1, 2): "unserializable"},  # type: ignore[dict-item]
+                    tool_results=[],
+                    timestamp=bad_ts,
+                )
+            )
+
+            rows = [
+                json.loads(line)
+                for line in tracer.jsonl_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(rows[0]["timestamp"].endswith("Z"))
+            self.assertEqual(datetime.fromisoformat(rows[0]["timestamp"]).tzinfo, timezone.utc)
+            self.assertTrue(rows[1]["serialization_error"])
+            self.assertEqual(rows[1]["timestamp"], bad_ts)
+
 
 if __name__ == "__main__":
     unittest.main()
