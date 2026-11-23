@@ -125,13 +125,18 @@ def _load_skill(entry: Path, scope: str, workspace: Path | None) -> tuple[str, S
 def discover_skills(
     workspace: Path | None,
     global_dir: Path | None = None,
+    *,
+    path_base: Path | None = None,
 ) -> dict[str, Skill]:
     """Discovers skills from global and project directories.
 
     Returns a mapping of skill name to :class:`Skill`; project skills cleanly
-    shadow global ones with the same name.
+    shadow global ones with the same name. When ``path_base`` is supplied,
+    skill paths are formatted relative to ``path_base`` rather than ``workspace``
+    so skills outside a sandboxed workspace retain absolute host paths.
     """
-    ws = Path(workspace).resolve() if workspace else None
+    base_dir = path_base if path_base is not None else workspace
+    ws = Path(base_dir).resolve() if base_dir else None
 
     def loader(entry: Path, scope: str) -> tuple[str, Skill] | None:
         return _load_skill(entry, scope, ws)
