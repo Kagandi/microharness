@@ -961,6 +961,27 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         self.assertTrue(md_file.is_file())
         self.assertEqual(md_file.read_text(encoding="utf-8"), md)
 
+    def test_get_mini_swe_suite_supports_comma_separated_task_filter(self):
+        """Invariant: comma-separated --task filters select multiple tasks and reject unknown IDs."""
+        from benchmarks.runner import parse_task_filters
+
+        self.assertEqual(parse_task_filters(None), [])
+        self.assertEqual(parse_task_filters(" , , "), [])
+        self.assertEqual(
+            parse_task_filters(" Rate_Limiter , query_builder "), ["rate_limiter", "query_builder"]
+        )
+
+        filtered = get_mini_swe_suite(task_filter="rate_limiter, mini_swe_query_builder")
+        self.assertEqual(
+            [t.id for t, _ in filtered], ["mini_swe_rate_limiter", "mini_swe_query_builder"]
+        )
+
+        empty_match = get_mini_swe_suite(task_filter="nonexistent_task_id")
+        self.assertEqual(empty_match, [])
+
+        all_tasks = get_mini_swe_suite(task_filter=" , ")
+        self.assertEqual(len(all_tasks), len(MINI_SWE_TASKS))
+
 
 if __name__ == "__main__":
     unittest.main()

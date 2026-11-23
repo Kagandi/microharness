@@ -27,6 +27,7 @@ from core.defaults import get_default
 from core.evaluator import CommandTestEvaluator, Evaluator, FileContentEvaluator
 from core.harness import Harness, get_default_global_dir
 from core.model import (
+    ContextWindowAwareModel,
     MockModel,
     Model,
     ResettableModel,
@@ -283,7 +284,7 @@ def _add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--task",
         default=None,
-        help="Filter to a specific task ID in the benchmark suite (e.g. 'rate_limiter')",
+        help="Filter benchmark tasks by ID or comma-separated IDs (e.g. 'textual,termenv')",
     )
     parser.add_argument(
         "--demo",
@@ -594,9 +595,17 @@ def _task_requires_finish_tool(context: CliContext) -> bool:
 def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
     """The model/limits summary recorded alongside a benchmark's scorecard."""
     model = context.model
-    max_context_tokens = resolve_model_context_tokens(context.model_spec, context.config) or int(
-        get_default("max_context_tokens")
+    registry = load_provider_registry(
+        global_dir=context.global_dir,
+        project_dir=context.target_dir,
+        inline_providers=context.config.get("providers"),
     )
+    max_context_tokens = resolve_model_context_tokens(context.model_spec, context.config, registry)
+    if max_context_tokens is None and isinstance(model, ContextWindowAwareModel):
+        detected = model.get_context_window()
+        max_context_tokens = detected if type(detected) is int and detected > 0 else None
+    if max_context_tokens is None:
+        max_context_tokens = int(get_default("max_context_tokens"))
     raw_trigger_ratio = context.config.get("trigger_ratio")
     trigger_ratio = (
         float(raw_trigger_ratio)

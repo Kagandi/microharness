@@ -2664,6 +2664,74 @@ class TestCliContext(unittest.TestCase):
         self.assertEqual(meta["trigger_ratio"], 0.80)
         self.assertEqual(meta["bash_timeout"], 300.0)
 
+    def test_benchmark_metadata_resolves_detected_and_registry_context_window(self):
+        """Invariant: benchmark metadata checks config/registry first, then /models-detected windows, then default."""
+        import argparse
+
+        from main import _benchmark_metadata
+
+        class ContextProbedModel:
+            provider = "vercel"
+            model = "tencent/hy4-flash"
+            endpoint = "https://ai-gateway.vercel.sh/v1/chat/completions"
+
+            def __init__(self, detected: object = 1048576):
+                self.detected = detected
+                self.probe_calls = 0
+
+            def generate(self, messages, tools):
+                return "done", []
+
+            def get_context_window(self) -> object:
+                self.probe_calls += 1
+                return self.detected
+
+        # 1. ContextWindowAwareModel probe result used when static config has no cap
+        probed_model = ContextProbedModel(1048576)
+        ctx_probed = self._context(
+            model=probed_model,
+            args=argparse.Namespace(provider=None, max_steps=500),
+            model_spec={"provider": "vercel", "model": "tencent/hy4-flash"},
+        )
+        self.assertEqual(_benchmark_metadata(ctx_probed)["max_context_tokens"], 1048576)
+        self.assertEqual(probed_model.probe_calls, 1)
+
+        # 2. Explicit provider registry context_tokens takes precedence and skips live probe
+        (Path(self.tmp) / "providers.json").write_text(
+            json.dumps(
+                {
+                    "custom_gw": {
+                        "base_url": "https://example.test/v1",
+                        "context_tokens": 524288,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        for spec in (
+            {"provider": "custom_gw", "model": "my-model"},
+            "custom_gw/my-model",
+        ):
+            reg_model = ContextProbedModel(1048576)
+            ctx_registry = self._context(
+                model=reg_model,
+                args=argparse.Namespace(provider=None, max_steps=500),
+                model_spec=spec,
+            )
+            self.assertEqual(_benchmark_metadata(ctx_registry)["max_context_tokens"], 524288)
+            self.assertEqual(reg_model.probe_calls, 0)
+
+        # 3. Invalid detected values (0, negative, bool, None) fall back to 262144 default
+        for bad_window in (0, -100, True, False, None):
+            bad_model = ContextProbedModel(bad_window)
+            ctx_bad = self._context(
+                model=bad_model,
+                args=argparse.Namespace(provider=None, max_steps=500),
+                model_spec=None,
+            )
+            self.assertEqual(_benchmark_metadata(ctx_bad)["max_context_tokens"], 262144)
+            self.assertEqual(bad_model.probe_calls, 1)
+
     def test_batch_mode_enables_require_finish_tool_only_for_non_mock_models(self):
         """Invariant: --batch requires finish tool for real models while leaving MockModel demos clean."""
         import argparse
