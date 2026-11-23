@@ -11,6 +11,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
+from benchmarks.runner import parse_task_filters
 from core.environment import ContainerEnvironment, Environment
 from core.types import EvalResult, StepTrace, Task
 
@@ -205,11 +206,12 @@ def get_deepswe_mini_suite(
     if not base_path.is_dir():
         return []
 
+    terms = parse_task_filters(task_filter)
     suite: list[tuple[Task, HarborEvaluator]] = []
     for tid in DEEPSWE_MINI_TASKS:
-        if task_filter:
-            tf = task_filter.lower().strip()
-            if tf not in tid.lower() and tid.lower() not in tf:
+        if terms:
+            tid_lower = tid.lower()
+            if not any(term in tid_lower or tid_lower in term for term in terms):
                 continue
 
         task_path = base_path / tid

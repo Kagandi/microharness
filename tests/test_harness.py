@@ -2664,6 +2664,50 @@ class TestCliContext(unittest.TestCase):
         self.assertEqual(meta["trigger_ratio"], 0.80)
         self.assertEqual(meta["bash_timeout"], 300.0)
 
+    def test_benchmark_metadata_resolves_detected_and_registry_context_window(self):
+        """Invariant: benchmark metadata reflects /models-detected windows and custom provider caps."""
+        import argparse
+
+        from main import _benchmark_metadata
+
+        class ContextProbedModel:
+            provider = "vercel"
+            model = "tencent/hy4-flash"
+            endpoint = "https://ai-gateway.vercel.sh/v1/chat/completions"
+
+            def generate(self, messages, tools):
+                return "done", []
+
+            def get_context_window(self) -> int | None:
+                return 1048576
+
+        # 1. ContextWindowAwareModel probe result used when static config has no cap
+        ctx_probed = self._context(
+            model=ContextProbedModel(),
+            args=argparse.Namespace(provider=None, max_steps=500),
+            model_spec={"provider": "vercel", "model": "tencent/hy4-flash"},
+        )
+        self.assertEqual(_benchmark_metadata(ctx_probed)["max_context_tokens"], 1048576)
+
+        # 2. Explicit provider registry context_tokens takes precedence over probed window
+        (Path(self.tmp) / "providers.json").write_text(
+            json.dumps(
+                {
+                    "custom_gw": {
+                        "base_url": "https://example.test/v1",
+                        "context_tokens": 524288,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        ctx_registry = self._context(
+            model=ContextProbedModel(),
+            args=argparse.Namespace(provider=None, max_steps=500),
+            model_spec={"provider": "custom_gw", "model": "my-model"},
+        )
+        self.assertEqual(_benchmark_metadata(ctx_registry)["max_context_tokens"], 524288)
+
     def test_batch_mode_enables_require_finish_tool_only_for_non_mock_models(self):
         """Invariant: --batch requires finish tool for real models while leaving MockModel demos clean."""
         import argparse

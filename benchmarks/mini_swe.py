@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+from benchmarks.runner import parse_task_filters
 from core.environment import Environment
 from core.evaluator import Evaluator
 from core.types import EvalResult, StepTrace, Task
@@ -531,12 +532,12 @@ MINI_SWE_TASKS: list[MiniSWETaskDef] = [
 
 def get_mini_swe_suite(task_filter: str | None = None) -> list[tuple[Task, Evaluator]]:
     """Returns list of (Task, Evaluator) instances for the Mini-SWE benchmark suite."""
+    terms = parse_task_filters(task_filter)
     suite: list[tuple[Task, Evaluator]] = []
     for item in MINI_SWE_TASKS:
-        if task_filter:
-            tf = task_filter.lower().strip()
+        if terms:
             allowed = {item.id.lower(), f"mini_swe_{item.id}".lower(), item.name.lower()}
-            if tf not in allowed:
+            if not any(term in allowed for term in terms):
                 continue
         task, evaluator = item.task_factory()
         suite.append((task, evaluator))

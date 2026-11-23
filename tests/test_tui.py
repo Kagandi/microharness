@@ -2392,17 +2392,18 @@ class TestCommandCatalog(unittest.TestCase):
         self.assertEqual(state.scroll_offset, 0)
 
         # 3. curses KEY_MOUSE wheel events
-        with patch(
-            "core.tui.curses.getmouse",
-            side_effect=[
-                (0, 5, 5, 0, curses.BUTTON4_PRESSED),
-                (0, 5, 5, 0, curses.BUTTON5_PRESSED),
-            ],
-        ):
+        button5 = getattr(curses, "BUTTON5_PRESSED", 0)
+        mouse_events = [(0, 5, 5, 0, curses.BUTTON4_PRESSED)]
+        if button5:
+            mouse_events.append((0, 5, 5, 0, button5))
+        with patch("core.tui.curses.getmouse", side_effect=mouse_events):
             tui.handle_key(curses.KEY_MOUSE, lambda _: None)
             self.assertEqual(state.scroll_offset, 3)
-            tui.handle_key(curses.KEY_MOUSE, lambda _: None)
-            self.assertEqual(state.scroll_offset, 0)
+            if button5:
+                tui.handle_key(curses.KEY_MOUSE, lambda _: None)
+                self.assertEqual(state.scroll_offset, 0)
+            else:
+                state.scroll_offset = 0
 
         # 4. Scroll offset clamps to max_scroll on draw and draws scrollbar on overflow
         state.scroll_up(500)

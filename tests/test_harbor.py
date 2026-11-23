@@ -194,6 +194,41 @@ class TestHarborBenchmark(unittest.TestCase):
             self.assertIsNone(task_default.docker_network)
             self.assertTrue(task_default.allow_network_tools)
 
+    def test_get_deepswe_mini_suite_multi_task_filter(self):
+        """Invariant: get_deepswe_mini_suite supports comma-separated task filters and rejects unknown ones."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for tid in (
+                "bandit-structured-nosec-directives",
+                "termenv-preserve-ansi-resets",
+                "textual-kitty-key-phases",
+            ):
+                tdir = root / tid
+                tdir.mkdir()
+                (tdir / "task.toml").write_text(
+                    f'[metadata]\ntask_id = "{tid}"\n[environment]\ndocker_image = "python:3.11"\n',
+                    encoding="utf-8",
+                )
+                (tdir / "instruction.md").write_text(f"Solve {tid}", encoding="utf-8")
+
+            selected = get_deepswe_mini_suite(dataset_dir=root, task_filter="textual, bandit")
+            self.assertEqual(
+                [t.id for t, _ in selected],
+                ["bandit-structured-nosec-directives", "textual-kitty-key-phases"],
+            )
+            self.assertEqual(
+                [t.id for t, _ in get_deepswe_mini_suite(dataset_dir=root, task_filter=" , ")],
+                [
+                    "bandit-structured-nosec-directives",
+                    "termenv-preserve-ansi-resets",
+                    "textual-kitty-key-phases",
+                ],
+            )
+            self.assertEqual(
+                get_deepswe_mini_suite(dataset_dir=root, task_filter="no_such_task"),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

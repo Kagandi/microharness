@@ -12,6 +12,13 @@ from core.harness import Harness
 from core.types import EvalResult, RunResult, Task
 
 
+def parse_task_filters(task_filter: str | None) -> list[str]:
+    """Splits a comma-separated task filter string into normalized lowercase terms."""
+    if not task_filter:
+        return []
+    return [part.strip().lower() for part in task_filter.split(",") if part.strip()]
+
+
 @dataclass
 class TaskReport:
     task_id: str
