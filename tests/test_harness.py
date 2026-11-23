@@ -3426,11 +3426,16 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
             "Run project check on $ARGUMENTS",
             encoding="utf-8",
         )
+        (dot_mh / "config.json").write_text('{"secret_token": "do-not-read"}', encoding="utf-8")
+        (self.project_dir / "secret.txt").write_text("TOP_SECRET_HOST_FILE", encoding="utf-8")
 
     def test_sandbox_run_discovers_project_instructions_agents_skills_and_commands(self):
         """Invariant: sandboxed runs with workspace_dir still load project .microharness/ resources."""
         from core.subagents import SubagentTool
 
+        expected_skill_path = str(
+            self.project_dir / ".microharness" / "skills" / "proj-skill" / "SKILL.md"
+        )
         captured_prompts: list[str] = []
         captured_user_prompts: list[str] = []
 
@@ -3438,15 +3443,21 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
             def generate(self, messages, tools):
                 captured_prompts.append(messages[0].content)
                 captured_user_prompts.append(messages[1].content)
-                if len(captured_prompts) == 1:
-                    return "Delegating review", [
+                turn = len(captured_prompts)
+                if turn == 1:
+                    return "Reading skill and delegating review", [
+                        ToolCall(
+                            id="read_skill",
+                            name="read_file",
+                            arguments={"path": expected_skill_path},
+                        ),
                         ToolCall(
                             id="sub1",
                             name="subagent",
                             arguments={"agent": "reviewer", "task": "Review sandbox"},
-                        )
+                        ),
                     ]
-                if len(captured_prompts) == 2:
+                if turn == 2:
                     # Child subagent call
                     return "Review clean", []
                 return "All done", []
@@ -3460,7 +3471,7 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
             verbose=False,
         )
 
-        # Verify _setup_run wires SubagentTool and system prompt from explicit_workspace_dir
+        # Verify _setup_run wires SubagentTool, system prompt, and read boundaries
         env, tool_registry, memory, _, _, _ = harness._setup_run(
             task_id="setup_check",
             system_prompt="Base prompt",
@@ -3474,10 +3485,31 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
             )
             self.assertIn("Project custom sandbox reviewer", memory.system_prompt)
             self.assertIn("proj-skill: Project sandbox skill summary", memory.system_prompt)
+            self.assertIn(f"read `{expected_skill_path}`", memory.system_prompt)
             self.assertNotIn(
                 "working directly in an existing project directory", memory.system_prompt
             )
             self.assertEqual(memory.messages[1].content, "Run project check on src/app.py")
+
+            # Positive: project SKILL.md is readable in sandbox mode
+            skill_res = tool_registry.dispatch(
+                ToolCall(id="s_ok", name="read_file", arguments={"path": expected_skill_path}),
+                step_index=1,
+            )
+            self.assertEqual(skill_res.exit_code, 0)
+            self.assertIn("Full body.", skill_res.output)
+
+            # Negative: arbitrary host project files and config remain denied in sandbox mode
+            for blocked_path in (
+                str(self.project_dir / "secret.txt"),
+                str(self.project_dir / ".microharness" / "config.json"),
+            ):
+                blocked_res = tool_registry.dispatch(
+                    ToolCall(id="s_deny", name="read_file", arguments={"path": blocked_path}),
+                    step_index=2,
+                )
+                self.assertEqual(blocked_res.exit_code, 1)
+                self.assertIn("Access denied", blocked_res.output)
 
             subagent_tool = tool_registry.get("subagent")
             self.assertIsInstance(subagent_tool, SubagentTool)
@@ -3496,7 +3528,7 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
         finally:
             env.teardown()
 
-        # Full run: verify both parent and child subagent receive project AGENTS.md in sandbox mode
+        # Full run: verify parent reads skill and both parent and child receive project AGENTS.md
         result = harness.run(Task(id="sandbox_full", instruction="/check target.py", max_steps=5))
         self.assertEqual(result.finish_reason, "completed")
         self.assertNotEqual(Path(result.workspace_path), self.project_dir)
@@ -3506,6 +3538,43 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
         )
         self.assertIn(
             "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.", captured_prompts[1]
+        )
+        trace_data = json.loads(Path(result.trace_path).read_text(encoding="utf-8"))
+        self.assertEqual(trace_data["steps"][0]["tool_results"][0]["exit_code"], 0)
+        self.assertIn("Full body.", trace_data["steps"][0]["tool_results"][0]["output"])
+
+    def test_run_tui_sandbox_discovers_project_capabilities(self):
+        """Invariant: run_tui in sandbox mode seeds TUIState with project commands, skills, and subagents."""
+        from core.tui import compact_path
+
+        captured_states = []
+
+        def fake_tui_run(tui_self, on_user_submit, initial_instruction=None):
+            captured_states.append(tui_self.state)
+
+        harness = Harness(
+            model=MockModel([("done", [])]),
+            workspace_dir=self.project_dir,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+        with patch("core.tui.CursesTUI.run", fake_tui_run):
+            harness.run_tui()
+
+        self.assertEqual(len(captured_states), 1)
+        state = captured_states[0]
+        self.assertNotEqual(state.cwd, compact_path(str(self.project_dir)))
+        self.assertIn("check", state.custom_commands)
+        self.assertIn("proj-skill", state.skills)
+        self.assertEqual(
+            state.skills["proj-skill"].path,
+            str(self.project_dir / ".microharness" / "skills" / "proj-skill" / "SKILL.md"),
+        )
+        self.assertEqual(
+            state.subagents["reviewer"].description,
+            "Project custom sandbox reviewer",
         )
 
     def test_sandbox_without_explicit_workspace_falls_back_to_runtime_workspace(self):

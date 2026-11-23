@@ -618,6 +618,7 @@ class Harness:
         init_workdir: str | None,
         initial_files: dict[str, str],
         docker_network: str | None = None,
+        extra_allowed_reads: Sequence[Path] = (),
     ) -> Environment:
         allowed_reads: list[Path] = [logs_dir]
         if self.global_dir:
@@ -625,6 +626,7 @@ class Harness:
                 sub_path = self.global_dir / sub
                 allowed_reads.append(sub_path)
             allowed_reads.append(self.global_dir / "AGENTS.md")
+        allowed_reads.extend(extra_allowed_reads)
         if active_docker:
             active_network = docker_network if docker_network is not None else self.docker_network
             env: Environment = DockerEnvironment(
@@ -665,6 +667,9 @@ class Harness:
         require_finish_tool: bool = False,
         allow_network_tools: bool | None = None,
         bash_timeout: float | None = None,
+        sandboxed: bool | None = None,
+        agents_instructions: str | None = None,
+        skills_index: str | None = None,
     ) -> ToolRegistry:
         registry = ToolRegistry(
             env=env,
@@ -680,6 +685,23 @@ class Harness:
             self.allow_network_tools if allow_network_tools is None else allow_network_tools
         )
         config_ws = self._config_workspace(env.workspace_dir)
+        effective_sandboxed = (
+            sandboxed
+            if sandboxed is not None
+            else (self.sandbox or (self.explicit_workspace_dir is None))
+        )
+        effective_agents = (
+            agents_instructions
+            if agents_instructions is not None
+            else load_agents_instructions(config_ws, self.global_dir)
+        )
+        effective_skills = (
+            skills_index
+            if skills_index is not None
+            else render_skills_index(
+                discover_skills(config_ws, self.global_dir, path_base=env.workspace_dir)
+            )
+        )
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
@@ -702,9 +724,9 @@ class Harness:
                     trigger_ratio=self.trigger_ratio,
                     max_retries=self.max_step_retries,
                     retry_delay=self.step_retry_delay,
-                    sandboxed=self.sandbox or (self.explicit_workspace_dir is None),
-                    agents_instructions=load_agents_instructions(config_ws, self.global_dir),
-                    skills_index=render_skills_index(discover_skills(config_ws, self.global_dir)),
+                    sandboxed=effective_sandboxed,
+                    agents_instructions=effective_agents,
+                    skills_index=effective_skills,
                     default_max_steps=self.subagent_max_steps,
                 )
             )
@@ -809,6 +831,17 @@ class Harness:
         use_sandbox = self.sandbox or force_sandbox or (self.explicit_workspace_dir is None)
         workspace = (run_dir / "workspace") if use_sandbox else self.explicit_workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
+        config_ws = self._config_workspace(workspace)
+        preloaded_skills = (
+            discover_skills(config_ws, self.global_dir, path_base=workspace)
+            if config_ws != workspace
+            else None
+        )
+        skill_read_paths = (
+            [Path(skill.path) for skill in preloaded_skills.values() if skill.scope == "project"]
+            if preloaded_skills is not None
+            else []
+        )
 
         effective_network = docker_network if docker_network is not None else self.docker_network
         base_allow_network = (
@@ -826,8 +859,16 @@ class Harness:
             init_workdir=init_workdir,
             initial_files=initial_files,
             docker_network=effective_network,
+            extra_allowed_reads=skill_read_paths,
         )
         self.active_env = env
+        agents_instructions = load_agents_instructions(config_ws, self.global_dir)
+        skills = (
+            preloaded_skills
+            if preloaded_skills is not None
+            else discover_skills(config_ws, self.global_dir, path_base=workspace)
+        )
+        skills_index = render_skills_index(skills)
         if (not use_sandbox) and self.checkpoints_enabled:
             self.checkpoint_manager = CheckpointManager(
                 workspace_dir=workspace,
@@ -840,10 +881,10 @@ class Harness:
             require_finish_tool=require_finish_tool,
             allow_network_tools=effective_allow_network,
             bash_timeout=bash_timeout,
+            sandboxed=use_sandbox,
+            agents_instructions=agents_instructions,
+            skills_index=skills_index,
         )
-        config_ws = self._config_workspace(workspace)
-        agents_instructions = load_agents_instructions(config_ws, self.global_dir)
-        skills_index = render_skills_index(discover_skills(config_ws, self.global_dir))
         active_system_prompt = self._build_system_prompt(
             workspace,
             system_prompt,
@@ -894,9 +935,6 @@ class Harness:
 
         subagent_tool = tool_registry.get("subagent")
         if isinstance(subagent_tool, SubagentTool):
-            subagent_tool.sandboxed = use_sandbox
-            subagent_tool.agents_instructions = agents_instructions
-            subagent_tool.skills_index = skills_index
             subagent_tool.run_dir_getter = lambda: run_dir
             subagent_tool.max_context_tokens_getter = lambda: memory.max_context_tokens
             subagent_tool.on_file_modified = memory.record_modified_file
@@ -1149,8 +1187,13 @@ class Harness:
 
         config_ws = self._config_workspace(env.workspace_dir)
         commands = discover_commands(config_ws, self.global_dir)
-        skills = discover_skills(config_ws, self.global_dir)
-        subagents = discover_subagents(config_ws, self.global_dir)
+        skills = discover_skills(config_ws, self.global_dir, path_base=env.workspace_dir)
+        subagent_tool = tool_registry.get("subagent")
+        subagents = (
+            dict(subagent_tool.subagents)
+            if isinstance(subagent_tool, SubagentTool)
+            else discover_subagents(config_ws, self.global_dir)
+        )
         state = self._build_tui_state(
             TUIState(title="microharness"), env, commands, skills, subagents=subagents
         )
