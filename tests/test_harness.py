@@ -3392,5 +3392,199 @@ class TestFinishToolAndContinuation(unittest.TestCase):
             env.teardown()
 
 
+class TestSandboxedProjectDiscovery(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="sandbox_discovery_")).resolve()
+        self.runs_dir = self.tmp / "runs"
+        self.runs_dir.mkdir()
+        self.global_dir = self.tmp / "global"
+        self.global_dir.mkdir()
+        self.project_dir = self.tmp / "project"
+        dot_mh = self.project_dir / ".microharness"
+        (dot_mh / "agents").mkdir(parents=True)
+        (dot_mh / "skills" / "proj-skill").mkdir(parents=True)
+        (dot_mh / "commands").mkdir(parents=True)
+
+        (dot_mh / "AGENTS.md").write_text(
+            "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.\n",
+            encoding="utf-8",
+        )
+        (dot_mh / "agents" / "reviewer.md").write_text(
+            "---\n"
+            "name: reviewer\n"
+            "description: Project custom sandbox reviewer\n"
+            "tools: [read_file, bash]\n"
+            "---\n"
+            "Inspect carefully in sandbox.\n",
+            encoding="utf-8",
+        )
+        (dot_mh / "skills" / "proj-skill" / "SKILL.md").write_text(
+            "---\ndescription: Project sandbox skill summary\n---\nFull body.\n",
+            encoding="utf-8",
+        )
+        (dot_mh / "commands" / "check.md").write_text(
+            "Run project check on $ARGUMENTS",
+            encoding="utf-8",
+        )
+
+    def test_sandbox_run_discovers_project_instructions_agents_skills_and_commands(self):
+        """Invariant: sandboxed runs with workspace_dir still load project .microharness/ resources."""
+        from core.subagents import SubagentTool
+
+        captured_prompts: list[str] = []
+        captured_user_prompts: list[str] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(messages[0].content)
+                captured_user_prompts.append(messages[1].content)
+                if len(captured_prompts) == 1:
+                    return "Delegating review", [
+                        ToolCall(
+                            id="sub1",
+                            name="subagent",
+                            arguments={"agent": "reviewer", "task": "Review sandbox"},
+                        )
+                    ]
+                if len(captured_prompts) == 2:
+                    # Child subagent call
+                    return "Review clean", []
+                return "All done", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=self.project_dir,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+
+        # Verify _setup_run wires SubagentTool and system prompt from explicit_workspace_dir
+        env, tool_registry, memory, _, _, _ = harness._setup_run(
+            task_id="setup_check",
+            system_prompt="Base prompt",
+            initial_instruction="/check src/app.py",
+            initial_files={},
+        )
+        try:
+            self.assertNotEqual(env.workspace_dir, self.project_dir)
+            self.assertIn(
+                "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.", memory.system_prompt
+            )
+            self.assertIn("Project custom sandbox reviewer", memory.system_prompt)
+            self.assertIn("proj-skill: Project sandbox skill summary", memory.system_prompt)
+            self.assertNotIn(
+                "working directly in an existing project directory", memory.system_prompt
+            )
+            self.assertEqual(memory.messages[1].content, "Run project check on src/app.py")
+
+            subagent_tool = tool_registry.get("subagent")
+            self.assertIsInstance(subagent_tool, SubagentTool)
+            assert isinstance(subagent_tool, SubagentTool)
+            self.assertTrue(subagent_tool.sandboxed)
+            self.assertIn(
+                "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.",
+                subagent_tool.agents_instructions,
+            )
+            self.assertIn("proj-skill: Project sandbox skill summary", subagent_tool.skills_index)
+            self.assertEqual(subagent_tool.subagents["reviewer"].scope, "project")
+            self.assertEqual(
+                subagent_tool.subagents["reviewer"].description,
+                "Project custom sandbox reviewer",
+            )
+        finally:
+            env.teardown()
+
+        # Full run: verify both parent and child subagent receive project AGENTS.md in sandbox mode
+        result = harness.run(Task(id="sandbox_full", instruction="/check target.py", max_steps=5))
+        self.assertEqual(result.finish_reason, "completed")
+        self.assertNotEqual(Path(result.workspace_path), self.project_dir)
+        self.assertEqual(captured_user_prompts[0], "Run project check on target.py")
+        self.assertIn(
+            "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.", captured_prompts[0]
+        )
+        self.assertIn(
+            "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.", captured_prompts[1]
+        )
+
+    def test_sandbox_without_explicit_workspace_falls_back_to_runtime_workspace(self):
+        """Invariant: when workspace_dir is None, initial_files in the sandbox workspace still load."""
+        captured_prompts: list[str] = []
+
+        class RecordingModel:
+            def generate(self, messages, tools):
+                captured_prompts.append(messages[0].content)
+                return "Done", []
+
+        harness = Harness(
+            model=RecordingModel(),
+            workspace_dir=None,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+        result = harness.run(
+            Task(
+                id="no_explicit_ws",
+                instruction="Do work",
+                initial_files={"AGENTS.md": "RUNTIME_SANDBOX_RULE: Use strict typing.\n"},
+                max_steps=3,
+            )
+        )
+        self.assertEqual(result.finish_reason, "completed")
+        self.assertIn("RUNTIME_SANDBOX_RULE: Use strict typing.", captured_prompts[0])
+
+    def test_router_and_tui_state_use_project_dir_for_subagent_discovery_when_sandboxed(self):
+        """Invariant: TUI router/state fallback discovers project subagents even with sandbox env dir."""
+        from core.interactive import NullUI, TurnState
+        from core.tui import TUIState
+
+        harness = Harness(
+            model=MockModel([("done", [])]),
+            workspace_dir=self.project_dir,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+        env, _, memory, tracer, _, _ = harness._setup_run(
+            task_id="tui_sandbox",
+            system_prompt="Base",
+            initial_instruction="",
+            initial_files={},
+        )
+        try:
+            router = harness._make_router(
+                memory,
+                {},
+                {},
+                NullUI(),
+                env.workspace_dir,
+                tracer,
+                TurnState(),
+            )
+            self.assertEqual(router.ctx.workspace, env.workspace_dir)
+            self.assertEqual(router.ctx.subagents["reviewer"].scope, "project")
+            self.assertEqual(
+                router.ctx.subagents["reviewer"].description,
+                "Project custom sandbox reviewer",
+            )
+
+            tui_state = harness._build_tui_state(
+                TUIState(title="test"),
+                env,
+                {},
+                {},
+            )
+            self.assertEqual(
+                tui_state.subagents["reviewer"].description,
+                "Project custom sandbox reviewer",
+            )
+        finally:
+            env.teardown()
+
+
 if __name__ == "__main__":
     unittest.main()

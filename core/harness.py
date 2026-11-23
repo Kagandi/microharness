@@ -654,6 +654,10 @@ class Harness:
             confirm_handler=self.confirm_handler,
         )
 
+    def _config_workspace(self, runtime_workspace: Path) -> Path:
+        """Returns the project directory used for config, steering, and capability discovery."""
+        return self.explicit_workspace_dir or runtime_workspace
+
     def _init_tools(
         self,
         env: Environment,
@@ -675,6 +679,7 @@ class Harness:
         effective_allow_network = (
             self.allow_network_tools if allow_network_tools is None else allow_network_tools
         )
+        config_ws = self._config_workspace(env.workspace_dir)
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
@@ -682,8 +687,7 @@ class Harness:
             registry.register(ReadFileTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
-            ws_dir = self.explicit_workspace_dir or env.workspace_dir
-            subagents = discover_subagents(ws_dir, self.global_dir)
+            subagents = discover_subagents(config_ws, self.global_dir)
             registry.register(
                 SubagentTool(
                     env=env,
@@ -699,8 +703,8 @@ class Harness:
                     max_retries=self.max_step_retries,
                     retry_delay=self.step_retry_delay,
                     sandboxed=self.sandbox or (self.explicit_workspace_dir is None),
-                    agents_instructions=load_agents_instructions(ws_dir, self.global_dir),
-                    skills_index=render_skills_index(discover_skills(ws_dir, self.global_dir)),
+                    agents_instructions=load_agents_instructions(config_ws, self.global_dir),
+                    skills_index=render_skills_index(discover_skills(config_ws, self.global_dir)),
                     default_max_steps=self.subagent_max_steps,
                 )
             )
@@ -718,9 +722,8 @@ class Harness:
 
         # 3. Dynamic plugins auto-discovered from global and project directories
         if self.auto_discover_tools:
-            ws_dir = self.explicit_workspace_dir or env.workspace_dir
             discovered = discover_tool_plugins(
-                workspace_dir=ws_dir,
+                workspace_dir=config_ws,
                 global_dir=self.global_dir,
                 env=env,
                 trust_project_tools=self.trust_project_tools,
@@ -749,20 +752,35 @@ class Harness:
         use_sandbox: bool,
         *,
         require_finish_tool: bool = False,
+        agents_instructions: str | None = None,
+        skills_index: str | None = None,
     ) -> str:
         """Assembles the system prompt from tools, steering, skills, and subagents."""
-        subagents_index = (
-            render_subagents_index(discover_subagents(workspace, self.global_dir))
-            if "subagent" in tool_registry
-            else ""
+        config_ws = self._config_workspace(workspace)
+        subagent_tool = tool_registry.get("subagent")
+        if isinstance(subagent_tool, SubagentTool):
+            subagents_index = render_subagents_index(subagent_tool.subagents)
+        elif "subagent" in tool_registry:
+            subagents_index = render_subagents_index(discover_subagents(config_ws, self.global_dir))
+        else:
+            subagents_index = ""
+        effective_agents = (
+            agents_instructions
+            if agents_instructions is not None
+            else load_agents_instructions(config_ws, self.global_dir)
+        )
+        effective_skills = (
+            skills_index
+            if skills_index is not None
+            else render_skills_index(discover_skills(config_ws, self.global_dir))
         )
         return build_system_prompt(
             base_prompt,
             tool_docs=tool_registry.to_system_prompt_snippet(),
             workspace=workspace,
             sandboxed=use_sandbox,
-            agents_instructions=load_agents_instructions(workspace, self.global_dir),
-            skills_index=render_skills_index(discover_skills(workspace, self.global_dir)),
+            agents_instructions=effective_agents,
+            skills_index=effective_skills,
             subagents_index=subagents_index,
             require_finish_tool=require_finish_tool,
         )
@@ -823,12 +841,17 @@ class Harness:
             allow_network_tools=effective_allow_network,
             bash_timeout=bash_timeout,
         )
+        config_ws = self._config_workspace(workspace)
+        agents_instructions = load_agents_instructions(config_ws, self.global_dir)
+        skills_index = render_skills_index(discover_skills(config_ws, self.global_dir))
         active_system_prompt = self._build_system_prompt(
             workspace,
             system_prompt,
             tool_registry,
             use_sandbox,
             require_finish_tool=require_finish_tool,
+            agents_instructions=agents_instructions,
+            skills_index=skills_index,
         )
 
         # A batch instruction may itself be a custom command, e.g. "/review src/auth.py".
@@ -836,7 +859,7 @@ class Harness:
         if initial_instruction.startswith("/"):
             outcome = resolve_slash_input(
                 initial_instruction,
-                discover_commands(workspace, self.global_dir),
+                discover_commands(config_ws, self.global_dir),
                 allow_skills=False,
             )
             if outcome.prompt is not None:
@@ -872,10 +895,8 @@ class Harness:
         subagent_tool = tool_registry.get("subagent")
         if isinstance(subagent_tool, SubagentTool):
             subagent_tool.sandboxed = use_sandbox
-            subagent_tool.agents_instructions = load_agents_instructions(workspace, self.global_dir)
-            subagent_tool.skills_index = render_skills_index(
-                discover_skills(workspace, self.global_dir)
-            )
+            subagent_tool.agents_instructions = agents_instructions
+            subagent_tool.skills_index = skills_index
             subagent_tool.run_dir_getter = lambda: run_dir
             subagent_tool.max_context_tokens_getter = lambda: memory.max_context_tokens
             subagent_tool.on_file_modified = memory.record_modified_file
@@ -1044,7 +1065,9 @@ class Harness:
         """Builds a command router bound to this harness and the caller's session state."""
         resolved_ws = workspace_dir or self.workspace_dir
         resolved_subagents = (
-            subagents if subagents is not None else discover_subagents(resolved_ws, self.global_dir)
+            subagents
+            if subagents is not None
+            else discover_subagents(self._config_workspace(resolved_ws), self.global_dir)
         )
         resolved_checkpoints = checkpoints if checkpoints is not None else self.checkpoint_manager
         return CommandRouter(
@@ -1124,9 +1147,10 @@ class Harness:
         tracer.verbose = False
         tracer.compact = True
 
-        commands = discover_commands(env.workspace_dir, self.global_dir)
-        skills = discover_skills(env.workspace_dir, self.global_dir)
-        subagents = discover_subagents(env.workspace_dir, self.global_dir)
+        config_ws = self._config_workspace(env.workspace_dir)
+        commands = discover_commands(config_ws, self.global_dir)
+        skills = discover_skills(config_ws, self.global_dir)
+        subagents = discover_subagents(config_ws, self.global_dir)
         state = self._build_tui_state(
             TUIState(title="microharness"), env, commands, skills, subagents=subagents
         )
@@ -1248,7 +1272,7 @@ class Harness:
         state.set_subagents(
             subagents
             if subagents is not None
-            else discover_subagents(env.workspace_dir, self.global_dir)
+            else discover_subagents(self._config_workspace(env.workspace_dir), self.global_dir)
         )
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.set_available_models(self.get_available_models())
