@@ -228,6 +228,10 @@ class TestHarborBenchmark(unittest.TestCase):
                 get_deepswe_mini_suite(dataset_dir=root, task_filter="no_such_task"),
                 [],
             )
+            self.assertEqual(
+                get_deepswe_mini_suite(dataset_dir=root, task_filter="textual-kitty-key-phases-v2"),
+                [],
+            )
 
 
 if __name__ == "__main__":

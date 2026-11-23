@@ -600,12 +600,12 @@ def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
         project_dir=context.target_dir,
         inline_providers=context.config.get("providers"),
     )
-    detected = model.get_context_window() if isinstance(model, ContextWindowAwareModel) else None
-    max_context_tokens = (
-        resolve_model_context_tokens(context.model_spec, context.config, registry)
-        or (detected if type(detected) is int and detected > 0 else None)
-        or int(get_default("max_context_tokens"))
-    )
+    max_context_tokens = resolve_model_context_tokens(context.model_spec, context.config, registry)
+    if max_context_tokens is None and isinstance(model, ContextWindowAwareModel):
+        detected = model.get_context_window()
+        max_context_tokens = detected if type(detected) is int and detected > 0 else None
+    if max_context_tokens is None:
+        max_context_tokens = int(get_default("max_context_tokens"))
     raw_trigger_ratio = context.config.get("trigger_ratio")
     trigger_ratio = (
         float(raw_trigger_ratio)

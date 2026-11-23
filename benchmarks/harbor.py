@@ -211,7 +211,7 @@ def get_deepswe_mini_suite(
     for tid in DEEPSWE_MINI_TASKS:
         if terms:
             tid_lower = tid.lower()
-            if not any(term in tid_lower or tid_lower in term for term in terms):
+            if not any(term in tid_lower for term in terms):
                 continue
 
         task_path = base_path / tid
