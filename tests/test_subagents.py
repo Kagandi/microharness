@@ -1158,6 +1158,81 @@ class TestSubagentInteractiveAndTUI(unittest.TestCase):
             self.assertEqual(result.completion_tokens, 60)
             self.assertIsNone(DEFAULT_SUBAGENT_MAX_STEPS)
 
+    def test_max_steps_exceeded_without_final_text_requests_tool_free_wrapup(self):
+        """Invariant: a capped subagent ending on an empty-text tool call runs one tool-free wrapup."""
+        seen_tools: list[int] = []
+
+        class EmptyStepThenWrapupModel:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, messages, tools):
+                self.calls += 1
+                seen_tools.append(len(tools))
+                if self.calls <= 2:
+                    return "", [
+                        ToolCall(id=f"b{self.calls}", name="bash", arguments={"command": "echo hi"})
+                    ]
+                if not tools:
+                    return "Synthesized partial findings", []
+                return "", []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "ws"
+            logs = root / "logs"
+            ws.mkdir()
+            logs.mkdir()
+            env = Environment(workspace_dir=ws, logs_dir=logs)
+            registry = ToolRegistry(env=env)
+            registry.register(BashTool(env))
+            registry.register(ReadFileTool(env))
+
+            subagents = discover_subagents(ws, None)
+            model = EmptyStepThenWrapupModel()
+            tool = SubagentTool(
+                env=env,
+                parent_registry=registry,
+                subagents=subagents,
+                model_getter=lambda: model,
+            )
+            code, out = tool.execute(agent="reviewer", task="Review code", max_steps=2)
+            self.assertEqual(code, 1)
+            self.assertEqual(seen_tools, [2, 2, 0])
+            self.assertIn("max_steps_exceeded in 2 step(s)", out)
+            self.assertIn("Synthesized partial findings", out)
+
+            # Negative case: if wrap-up raises, fall back cleanly to the last tool result
+            class FailingWrapupModel:
+                def __init__(self):
+                    self.calls = 0
+
+                def generate(self, messages, tools):
+                    self.calls += 1
+                    if self.calls <= 2:
+                        return "", [
+                            ToolCall(
+                                id=f"b{self.calls}",
+                                name="bash",
+                                arguments={"command": "echo fallback_line"},
+                            )
+                        ]
+                    raise RuntimeError("wrapup failed")
+
+            failing_model = FailingWrapupModel()
+            failing_tool = SubagentTool(
+                env=env,
+                parent_registry=registry,
+                subagents=subagents,
+                model_getter=lambda: failing_model,
+            )
+            code_fail, out_fail = failing_tool.execute(
+                agent="reviewer", task="Review code", max_steps=2
+            )
+            self.assertEqual(code_fail, 1)
+            self.assertIn("max_steps_exceeded in 2 step(s)", out_fail)
+            self.assertIn("fallback_line", out_fail)
+
 
 if __name__ == "__main__":
     unittest.main()

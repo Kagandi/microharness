@@ -3673,6 +3673,52 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
         self.assertEqual(result.finish_reason, "completed")
         self.assertIn("RUNTIME_SANDBOX_RULE: Use strict typing.", captured_prompts[0])
 
+    def test_init_workdir_keeps_project_agents_but_skips_host_project_skills(self):
+        """Invariant: container tasks (init_workdir) load host AGENTS.md/agents without leaking host repo skills."""
+        from core.subagents import SubagentTool
+
+        harness = Harness(
+            model=MockModel([("done", [])]),
+            workspace_dir=self.project_dir,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+        with patch.object(
+            harness,
+            "_create_environment",
+            wraps=harness._create_environment,
+        ) as create_env_spy:
+            env, tool_registry, memory, _, _, _ = harness._setup_run(
+                task_id="container_task",
+                system_prompt="Base prompt",
+                initial_instruction="Solve container task",
+                initial_files={
+                    "skills/container-skill/SKILL.md": "# Container Skill\nInside app.\n"
+                },
+                force_sandbox=True,
+                init_workdir="/app",
+            )
+        try:
+            # Host AGENTS.md and custom subagent presets still load
+            self.assertIn(
+                "SANDBOX_PROJECT_RULE: Always delegate review to reviewer.", memory.system_prompt
+            )
+            self.assertIn("Project custom sandbox reviewer", memory.system_prompt)
+            # Negative: host repo skill path is NOT leaked into container prompt or allowed reads
+            self.assertNotIn("proj-skill", memory.system_prompt)
+            self.assertNotIn(str(self.project_dir), memory.system_prompt)
+            self.assertEqual(create_env_spy.call_args.kwargs["extra_allowed_reads"], [])
+            # Positive: skills inside the container workspace itself still load
+            self.assertIn("container-skill: Container Skill", memory.system_prompt)
+            subagent_tool = tool_registry.get("subagent")
+            assert isinstance(subagent_tool, SubagentTool)
+            self.assertNotIn("proj-skill", subagent_tool.skills_index)
+            self.assertIn("container-skill: Container Skill", subagent_tool.skills_index)
+        finally:
+            env.teardown()
+
     def test_router_and_tui_state_use_project_dir_for_subagent_discovery_when_sandboxed(self):
         """Invariant: TUI router/state fallback discovers project subagents even with sandbox env dir."""
         from core.interactive import NullUI, TurnState

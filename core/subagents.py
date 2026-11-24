@@ -14,6 +14,7 @@ import copy
 import re
 import sys
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ from core.protocols import (
     ModelCancelledError,
     ReasoningAwareModel,
 )
-from core.session import INTERRUPTED, _final_response_text, run_steps
+from core.session import INTERRUPTED, MAX_STEPS_EXCEEDED, _final_response_text, run_steps
 from core.skills import _description_from_frontmatter, _first_heading, _split_frontmatter
 from core.tools import (
     BashTool,
@@ -55,7 +56,7 @@ from core.tools import (
     WriteFileTool,
 )
 from core.tracer import Tracer
-from core.types import StepTrace, Task
+from core.types import Message, StepTrace, Task
 from core.usage import TokenUsage, summarize_run_usage
 
 TOOL_NAME_ALIASES: dict[str, str] = {
@@ -1045,6 +1046,17 @@ class SubagentTool:
                     require_finish_tool=False,
                     propagate_interrupts=True,
                 )
+                wrapup_text = ""
+                if (
+                    outcome.reason == MAX_STEPS_EXCEEDED
+                    and child_tracer.steps
+                    and not (
+                        isinstance(child_tracer.steps[-1].model_response.get("content"), str)
+                        and child_tracer.steps[-1].model_response.get("content", "").strip()
+                    )
+                    and (parent_deadline is None or time.time() < parent_deadline)
+                ):
+                    wrapup_text = self._request_wrapup_summary(child_model, child_memory)
             finally:
                 if child_model is not parent_model:
                     if isinstance(child_model, DeadlineAwareModel):
@@ -1068,8 +1080,8 @@ class SubagentTool:
         if outcome.reason == INTERRUPTED:
             raise ModelCancelledError("Subagent interrupted.")
 
-        final_text = ""
-        if child_tracer.steps:
+        final_text = wrapup_text
+        if not final_text and child_tracer.steps:
             final_text = _final_response_text(child_tracer.steps[-1]).strip()
         if not final_text:
             final_text = f"(Subagent exited with status '{outcome.reason}' without final text.)"
@@ -1077,3 +1089,23 @@ class SubagentTool:
         header = f"[Subagent: {spec.name}] ({outcome.reason} in {len(child_tracer.steps)} step(s))"
         exit_code = 0 if outcome.finished else 1
         return exit_code, f"{header}\n{final_text}"
+
+    @staticmethod
+    def _request_wrapup_summary(child_model: Model, child_memory: Memory) -> str:
+        """Asks a step-capped subagent for a single tool-free summary when its last turn had no text."""
+        wrapup_messages = [
+            *child_memory.messages,
+            Message(
+                role="user",
+                content=(
+                    "Step budget reached. Without calling any tools, provide a concise "
+                    "summary of your findings and current status based strictly on what "
+                    "you observed above."
+                ),
+            ),
+        ]
+        try:
+            response_text, _ = child_model.generate(wrapup_messages, [])
+        except Exception:
+            return ""
+        return response_text.strip() if isinstance(response_text, str) else ""
