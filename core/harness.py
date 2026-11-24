@@ -832,9 +832,12 @@ class Harness:
         workspace = (run_dir / "workspace") if use_sandbox else self.explicit_workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
         config_ws = self._config_workspace(workspace)
+        # Container tasks with init_workdir (e.g. Harbor/DeepSWE /app) have their own
+        # repo inside `workspace`, so avoid leaking host-repo skills from explicit_workspace_dir.
+        skills_ws = workspace if init_workdir else config_ws
         preloaded_skills = (
-            discover_skills(config_ws, self.global_dir, path_base=workspace)
-            if config_ws != workspace
+            discover_skills(skills_ws, self.global_dir, path_base=workspace)
+            if skills_ws != workspace
             else None
         )
         skill_read_paths = (
@@ -866,7 +869,7 @@ class Harness:
         skills = (
             preloaded_skills
             if preloaded_skills is not None
-            else discover_skills(config_ws, self.global_dir, path_base=workspace)
+            else discover_skills(skills_ws, self.global_dir, path_base=workspace)
         )
         skills_index = render_skills_index(skills)
         if (not use_sandbox) and self.checkpoints_enabled:
