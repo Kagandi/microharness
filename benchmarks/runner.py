@@ -19,6 +19,45 @@ def parse_task_filters(task_filter: str | None) -> list[str]:
     return [part.strip().lower() for part in task_filter.split(",") if part.strip()]
 
 
+def split_task_filters(task_filter: str | None) -> tuple[list[str], list[str]]:
+    """Splits a task filter string into ``(include_terms, exclude_terms)``.
+
+    Terms prefixed with ``!`` or ``-`` exclude matching tasks.
+    """
+    includes: list[str] = []
+    excludes: list[str] = []
+    for term in parse_task_filters(task_filter):
+        if term.startswith(("!", "-")):
+            clean = term[1:].strip()
+            if clean:
+                excludes.append(clean)
+        else:
+            includes.append(term)
+    return includes, excludes
+
+
+def matches_task_filter(
+    candidates: list[str] | tuple[str, ...] | set[str],
+    includes: list[str],
+    excludes: list[str],
+    *,
+    exact: bool = False,
+) -> bool:
+    """Checks whether normalized task candidate identifiers match include/exclude filters."""
+    normalized = [c.lower() for c in candidates]
+
+    def _matches(term: str) -> bool:
+        if exact:
+            return any(term == cand for cand in normalized)
+        return any(term in cand for cand in normalized)
+
+    if includes and not any(_matches(term) for term in includes):
+        return False
+    if excludes and any(_matches(term) for term in excludes):
+        return False
+    return True
+
+
 @dataclass
 class TaskReport:
     task_id: str

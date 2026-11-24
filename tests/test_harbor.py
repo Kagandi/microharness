@@ -233,6 +233,55 @@ class TestHarborBenchmark(unittest.TestCase):
                 [],
             )
 
+    def test_get_deepswe_mini_suite_exclusions_and_arm64_narwhals_skip(self):
+        """Invariant: !/- excludes tasks and arm64 skips narwhals unless explicitly selected."""
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for tid in (
+                "bandit-structured-nosec-directives",
+                "narwhals-rolling-window-suite",
+                "textual-kitty-key-phases",
+            ):
+                tdir = root / tid
+                tdir.mkdir()
+                (tdir / "task.toml").write_text(
+                    f'[metadata]\ntask_id = "{tid}"\n[environment]\ndocker_image = "python:3.11"\n',
+                    encoding="utf-8",
+                )
+                (tdir / "instruction.md").write_text(f"Solve {tid}", encoding="utf-8")
+
+            with patch("benchmarks.harbor.platform.machine", return_value="arm64"):
+                default_arm64 = get_deepswe_mini_suite(dataset_dir=root)
+                self.assertEqual(
+                    [t.id for t, _ in default_arm64],
+                    ["bandit-structured-nosec-directives", "textual-kitty-key-phases"],
+                )
+
+                forced_arm64 = get_deepswe_mini_suite(dataset_dir=root, task_filter="narwhals")
+                self.assertEqual(
+                    [t.id for t, _ in forced_arm64],
+                    ["narwhals-rolling-window-suite"],
+                )
+
+            with patch("benchmarks.harbor.platform.machine", return_value="x86_64"):
+                default_x86 = get_deepswe_mini_suite(dataset_dir=root)
+                self.assertEqual(
+                    [t.id for t, _ in default_x86],
+                    [
+                        "bandit-structured-nosec-directives",
+                        "narwhals-rolling-window-suite",
+                        "textual-kitty-key-phases",
+                    ],
+                )
+
+                excluded_x86 = get_deepswe_mini_suite(dataset_dir=root, task_filter="!narwhals")
+                self.assertEqual(
+                    [t.id for t, _ in excluded_x86],
+                    ["bandit-structured-nosec-directives", "textual-kitty-key-phases"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
