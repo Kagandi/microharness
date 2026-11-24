@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import importlib.util
 import inspect
@@ -7,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -14,7 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.defaults import get_default
 from core.discovery import discover_resources
-from core.environment import Environment
+from core.environment import Environment, validate_read_only_git_args
 from core.hooks import POST_TOOL, PRE_TOOL, HookContext, HookRegistry
 from core.protocols import ModelCancelledError
 from core.types import ToolCall, ToolResult
@@ -35,6 +37,9 @@ class Tool(Protocol):
 
 
 DEFAULT_MAX_TOOL_TOKENS: int = int(get_default("max_tool_tokens"))
+DEFAULT_MAX_GREP_MATCHES: int = int(get_default("max_grep_matches"))
+DEFAULT_MAX_GREP_CONTEXT_LINES: int = int(get_default("max_grep_context_lines"))
+DEFAULT_MAX_GLOB_RESULTS: int = int(get_default("max_glob_results"))
 
 NETWORK_TOOL_NAMES: frozenset[str] = frozenset(
     {"web_fetch", "web_search", "fetch_url", "http_request"}
@@ -337,6 +342,377 @@ class FinishTool:
 
     def execute(self, summary: str = "") -> tuple[int, str]:
         return 0, summary.strip() or "Task completed."
+
+
+_SEARCH_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+    }
+)
+
+_GIT_READ_ACTIONS: tuple[str, ...] = (
+    "status",
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "ls-files",
+    "branch",
+    "rev-parse",
+)
+
+
+def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
+    """Compiles a POSIX-style glob pattern (supporting ``**``) into a regex."""
+    normalized = pattern.strip().lstrip("./")
+    if not normalized:
+        return re.compile(r"^$")
+    parts: list[str] = ["^"]
+    i, n = 0, len(normalized)
+    while i < n:
+        if normalized.startswith("**/", i):
+            parts.append("(?:.+/)?")
+            i += 3
+        elif normalized.startswith("**", i):
+            parts.append(".*")
+            i += 2
+        elif normalized[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif normalized[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        elif normalized[i] == "[":
+            end = normalized.find("]", i + 1)
+            if end == -1:
+                parts.append(re.escape("["))
+                i += 1
+            else:
+                body = normalized[i + 1 : end]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                parts.append(f"[{body}]")
+                i = end + 1
+        else:
+            parts.append(re.escape(normalized[i]))
+            i += 1
+    parts.append("$")
+    return re.compile("".join(parts))
+
+
+def _iter_searchable_files(base: Path) -> list[Path]:
+    """Collects sorted regular files under ``base``, skipping noisy VCS and cache directories."""
+    files: list[Path] = []
+    for root, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d not in _SEARCH_SKIP_DIRS)
+        root_path = Path(root)
+        for name in sorted(filenames):
+            candidate = root_path / name
+            if candidate.is_file():
+                files.append(candidate)
+    return files
+
+
+def _display_path(target: Path, env: Environment, base: Path) -> str:
+    """Formats a resolved path relative to the workspace when inside it, otherwise relative to ``base``."""
+    if target.is_relative_to(env.workspace_dir):
+        rel = target.relative_to(env.workspace_dir).as_posix()
+        return rel or "."
+    if target.is_relative_to(base):
+        rel = target.relative_to(base).as_posix()
+        return rel or target.name
+    return str(target)
+
+
+def _validate_positive_int(value: int | None, default: int, name: str) -> tuple[int | None, str]:
+    """Validates an optional positive integer parameter."""
+    if value is None:
+        return default, ""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None, f"Error: '{name}' must be a positive integer."
+    return value, ""
+
+
+class GlobTool:
+    """Read-only file discovery tool matching glob patterns inside the workspace."""
+
+    name = "glob"
+    parallel_safe = True
+    description = (
+        "Find files in the workspace matching a glob pattern (e.g. '**/*.py' or 'tests/*.py')."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern relative to `path` (supports `**`, `*`, `?`).",
+            },
+            "path": {
+                "type": "string",
+                "description": "Directory relative to workspace root to search (default: '.').",
+                "default": ".",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": f"Maximum matching file paths to return (default: {DEFAULT_MAX_GLOB_RESULTS}).",
+            },
+        },
+        "required": ["pattern"],
+    }
+
+    def __init__(self, env: Environment):
+        self.env = env
+
+    def execute(
+        self,
+        pattern: str,
+        path: str = ".",
+        max_results: int | None = None,
+    ) -> tuple[int, str]:
+        if not isinstance(pattern, str) or not pattern.strip():
+            return 1, "Error: 'pattern' must be a non-empty string."
+        limit, limit_err = _validate_positive_int(
+            max_results, DEFAULT_MAX_GLOB_RESULTS, "max_results"
+        )
+        if limit is None:
+            return 1, limit_err
+
+        try:
+            base = self.env.resolve_read_path(path)
+        except Exception as exc:
+            return 1, f"Error resolving path '{path}': {exc}"
+        if not base.exists():
+            return 1, f"Error: Directory not found: '{path}'"
+        if not base.is_dir():
+            return 1, f"Error: Path is not a directory: '{path}'"
+
+        regex = _compile_glob_pattern(pattern)
+        matches: list[str] = []
+        for file_path in _iter_searchable_files(base):
+            rel = file_path.relative_to(base).as_posix()
+            if regex.match(rel):
+                matches.append(_display_path(file_path, self.env, base))
+
+        if not matches:
+            return 0, "No files matched."
+        total = len(matches)
+        if total > limit:
+            shown = "\n".join(matches[:limit])
+            return 0, f"{shown}\n\n[... showing first {limit} of {total} matched files]"
+        return 0, "\n".join(matches)
+
+
+class GrepTool:
+    """Read-only content search tool using Python regex/literal matching."""
+
+    name = "grep"
+    parallel_safe = True
+    description = "Search file contents in the workspace (or allowed log directories) for a regex or literal pattern."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Regular expression (or literal string when `literal=true`) to search for.",
+            },
+            "path": {
+                "type": "string",
+                "description": "File or directory path relative to workspace root (default: '.').",
+                "default": ".",
+            },
+            "include": {
+                "type": "string",
+                "description": "Optional filename/path glob filter (e.g. '*.py' or 'src/**/*.ts').",
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "description": "Perform case-insensitive matching (default: false).",
+                "default": False,
+            },
+            "literal": {
+                "type": "boolean",
+                "description": "Treat `pattern` as a literal substring instead of a regex (default: false).",
+                "default": False,
+            },
+            "context": {
+                "type": "integer",
+                "description": f"Context lines before and after each match (0..{DEFAULT_MAX_GREP_CONTEXT_LINES}, default: 0).",
+                "default": 0,
+            },
+            "max_matches": {
+                "type": "integer",
+                "description": f"Maximum matching lines to return (default: {DEFAULT_MAX_GREP_MATCHES}).",
+            },
+        },
+        "required": ["pattern"],
+    }
+
+    def __init__(self, env: Environment):
+        self.env = env
+
+    def execute(
+        self,
+        pattern: str,
+        path: str = ".",
+        include: str | None = None,
+        case_insensitive: bool = False,
+        literal: bool = False,
+        context: int = 0,
+        max_matches: int | None = None,
+    ) -> tuple[int, str]:
+        if not isinstance(pattern, str) or not pattern:
+            return 1, "Error: 'pattern' must be a non-empty string."
+        if isinstance(context, bool) or not isinstance(context, int) or context < 0:
+            return 1, "Error: 'context' must be a non-negative integer."
+        limit, limit_err = _validate_positive_int(
+            max_matches, DEFAULT_MAX_GREP_MATCHES, "max_matches"
+        )
+        if limit is None:
+            return 1, limit_err
+
+        effective_context = min(context, DEFAULT_MAX_GREP_CONTEXT_LINES)
+        flags = re.IGNORECASE if case_insensitive else 0
+        raw_pattern = re.escape(pattern) if literal else pattern
+        try:
+            compiled = re.compile(raw_pattern, flags)
+        except re.error as exc:
+            return 1, f"Error: Invalid regex pattern {pattern!r}: {exc}"
+
+        try:
+            target = self.env.resolve_read_path(path)
+        except Exception as exc:
+            return 1, f"Error resolving path '{path}': {exc}"
+        if not target.exists():
+            return 1, f"Error: Path not found: '{path}'"
+
+        include_re = (
+            _compile_glob_pattern(include)
+            if isinstance(include, str) and include.strip() and "/" in include
+            else None
+        )
+        include_name = include.strip() if isinstance(include, str) and include.strip() else None
+
+        if target.is_file():
+            candidates = [target]
+            base = target.parent
+        else:
+            candidates = []
+            base = target
+            for file_path in _iter_searchable_files(target):
+                if include_re is not None:
+                    if not include_re.match(file_path.relative_to(target).as_posix()):
+                        continue
+                elif include_name is not None and not fnmatch.fnmatch(file_path.name, include_name):
+                    continue
+                candidates.append(file_path)
+
+        output_lines: list[str] = []
+        total_matches = 0
+        truncated = False
+
+        for file_path in candidates:
+            try:
+                raw_bytes = file_path.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in raw_bytes[:8192]:
+                continue
+            text = raw_bytes.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            matched_indices = [idx for idx, line in enumerate(lines) if compiled.search(line)]
+            if not matched_indices:
+                continue
+
+            display = _display_path(file_path, self.env, base)
+            selected: set[int] = set()
+            matched_set: set[int] = set()
+            for idx in matched_indices:
+                if total_matches >= limit:
+                    truncated = True
+                    break
+                total_matches += 1
+                matched_set.add(idx)
+                start = max(0, idx - effective_context)
+                end = min(len(lines) - 1, idx + effective_context)
+                selected.update(range(start, end + 1))
+
+            prev_idx: int | None = None
+            for idx in sorted(selected):
+                if prev_idx is not None and idx > prev_idx + 1:
+                    output_lines.append("--")
+                sep = ":" if idx in matched_set else "-"
+                output_lines.append(f"{display}{sep}{idx + 1}{sep}{lines[idx]}")
+                prev_idx = idx
+
+            if truncated:
+                break
+
+        if not output_lines:
+            return 0, "No matches found."
+        body = "\n".join(output_lines)
+        if truncated:
+            return 0, f"{body}\n\n[... reached max_matches={limit}; refine pattern or path]"
+        return 0, body
+
+
+class GitReadTool:
+    """Read-only Git inspection tool backed by ``validate_read_only_git_args``."""
+
+    name = "git_read"
+    parallel_safe = True
+    description = (
+        "Run a read-only git inspection command (`status`, `diff`, `log`, `show`, "
+        "`blame`, `ls-files`, `branch`, `rev-parse`)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": list(_GIT_READ_ACTIONS),
+                "description": "Read-only git subcommand to execute.",
+            },
+            "args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional flags/refs/paths for the git subcommand (e.g. ['--stat'] or ['-n', '5', '--oneline']).",
+            },
+        },
+        "required": ["action"],
+    }
+
+    def __init__(self, env: Environment):
+        self.env = env
+
+    def execute(self, action: str, args: list[str] | None = None) -> tuple[int, str]:
+        if not isinstance(action, str) or not action.strip():
+            return 1, "Error: 'action' must be a non-empty string."
+        clean_action = action.strip()
+        if clean_action not in _GIT_READ_ACTIONS:
+            allowed = ", ".join(_GIT_READ_ACTIONS)
+            return 1, f"Error: Unsupported git_read action '{clean_action}'. Allowed: {allowed}"
+
+        if args is None:
+            clean_args: list[str] = []
+        elif isinstance(args, list) and all(isinstance(item, str) for item in args):
+            clean_args = list(args)
+        else:
+            return 1, "Error: 'args' must be a list of strings."
+
+        ok, reason = validate_read_only_git_args([clean_action, *clean_args])
+        if not ok:
+            return 1, f"Error: {reason}"
+
+        cmd = " ".join(shlex.quote(tok) for tok in ["git", clean_action, *clean_args])
+        return self.env.execute_bash(cmd)
 
 
 class ToolRegistry:

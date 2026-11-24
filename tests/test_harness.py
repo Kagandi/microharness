@@ -1704,17 +1704,23 @@ class TestHarnessIntegration(unittest.TestCase):
         step2_out = trace_data["steps"][1]["tool_results"][0]["output"]
         self.assertEqual(step2_out, "additive_ok\n")
 
-        # Verify registered tools in tool registry include default 5 + extra tool
+        # Verify registered tools in tool registry include default 8 + extra tool
         env = Environment(workspace_dir=Path(result.workspace_path), logs_dir=Path(self.runs_dir))
         registry = harness._init_tools(env)
         registered = list(registry._tools.keys())
-        self.assertEqual(len(registered), 6)
-        self.assertIn("bash", registered)
-        self.assertIn("read_file", registered)
-        self.assertIn("write_file", registered)
-        self.assertIn("edit_file", registered)
-        self.assertIn("subagent", registered)
-        self.assertIn("custom_inspect", registered)
+        self.assertEqual(len(registered), 9)
+        for expected in (
+            "bash",
+            "read_file",
+            "grep",
+            "glob",
+            "git_read",
+            "write_file",
+            "edit_file",
+            "subagent",
+            "custom_inspect",
+        ):
+            self.assertIn(expected, registered)
 
     def test_harness_auto_discovers_tool_plugins_from_workspace_and_executes(self):
         """Invariant: Harness auto-discovers tool plugins from project .microharness/tools/ and executes them."""

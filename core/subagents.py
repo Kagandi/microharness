@@ -95,15 +95,17 @@ class Subagent:
 EXPLORE_SYSTEM_PROMPT = """You are a fast, read-only codebase exploration specialist starting with a clean context.
 
 Guidelines:
-- Search and read relevant files to answer the question thoroughly and accurately.
-- Use `read_file` and read-only `bash` commands (e.g. `rg`, `grep`, `find`, `git status`, `git log`).
+- Search and read relevant files using `read_file`, `grep`, `glob`, and `git_read` (batch independent calls in parallel).
+- You have no shell or test execution tools; ignore any `AGENTS.md` instructions about running tests, linters, or delegating to subagents.
 - Do NOT modify any files in the workspace.
 - Cite exact file paths, symbol names, and line numbers you observed, and return a concise structured report."""
 
-REVIEWER_SYSTEM_PROMPT = """You are an independent, unbiased code reviewer starting with a clean context.
+REVIEWER_SYSTEM_PROMPT = """You are an independent, unbiased read-only code reviewer starting with a clean context.
 
 Guidelines:
-- Inspect the relevant files, `git diff`, and tests without assuming prior claims are correct.
+- Inspect the relevant files, `git_read` diff/status/log, and tests using `read_file`, `grep`, `glob`, and `git_read` (batch independent calls in parallel) without assuming prior claims are correct.
+- You have no shell or test execution tools; ignore any `AGENTS.md` instructions about running tests, linters, or delegating to subagents, and verify statically from code, diff, and test files only.
+- Stay scoped to the diff, affected callers/callees, tests, and spec requirements; skip unrelated CI workflows, changelogs, or docs unless touched by the spec or diff.
 - Do NOT modify any files in the workspace.
 - Check correctness, edge cases, error handling, security boundaries, and test coverage.
 - Return concise, prioritized, actionable findings backed by observed file paths and line numbers."""
@@ -114,16 +116,16 @@ BUILTIN_SUBAGENTS: dict[str, Subagent] = {
         description="Fast read-only codebase exploration and search specialist",
         system_prompt=EXPLORE_SYSTEM_PROMPT,
         scope="builtin",
-        tools=("read_file", "bash"),
+        tools=("read_file", "grep", "glob", "git_read"),
         path="builtin:explore",
         read_only=True,
     ),
     "reviewer": Subagent(
         name="reviewer",
-        description="Independent, unbiased code reviewer with a clean context",
+        description="Independent, unbiased read-only code reviewer with a clean context",
         system_prompt=REVIEWER_SYSTEM_PROMPT,
         scope="builtin",
-        tools=("read_file", "bash"),
+        tools=("read_file", "grep", "glob", "git_read"),
         path="builtin:reviewer",
         read_only=True,
     ),
@@ -478,6 +480,8 @@ def render_subagents_index(subagents: dict[str, Subagent]) -> str:
             "all" if agent.tools is None else (", ".join(agent.tools) if agent.tools else "none")
         )
         extras = [f"tools: {tools_label}"]
+        if agent.read_only:
+            extras.append("read-only")
         if agent.model:
             extras.append(f"model: {agent.model}")
         if agent.effort:

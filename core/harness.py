@@ -85,6 +85,9 @@ from core.tools import (
     BashTool,
     EditFileTool,
     FinishTool,
+    GitReadTool,
+    GlobTool,
+    GrepTool,
     ReadFileTool,
     Tool,
     ToolRegistry,
@@ -707,6 +710,9 @@ class Harness:
         if not self.disable_default_tools and not self.custom_tools:
             registry.register(BashTool(env, timeout=effective_bash_timeout))
             registry.register(ReadFileTool(env))
+            registry.register(GrepTool(env))
+            registry.register(GlobTool(env))
+            registry.register(GitReadTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
             subagents = discover_subagents(config_ws, self.global_dir)

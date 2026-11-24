@@ -389,6 +389,11 @@ def _split_shell_segments(command: str) -> tuple[bool, list[str], str]:
             if i == -1:
                 break
             continue
+        elif command.startswith(("&&", "||"), i):
+            if not _flush():
+                return False, [], "Empty command segment before operator."
+            i += 2
+            continue
         elif (not cur or cur[-1].isspace()) and ch in (">", "1", "2", "&"):
             matched = next(
                 (
@@ -405,17 +410,12 @@ def _split_shell_segments(command: str) -> tuple[bool, list[str], str]:
                 continue
             if ch == ">":
                 return False, [], "Output redirection is not allowed in read-only mode."
-            if ch == "&" and not command.startswith("&&", i):
+            if ch == "&":
                 return False, [], "Background execution `&` is not allowed in read-only mode."
         elif ch == ">":
             return False, [], "Output redirection is not allowed in read-only mode."
         elif command.startswith(";;", i):
             return False, [], "Shell `;;` operator is not allowed in read-only mode."
-        elif command.startswith(("&&", "||"), i):
-            if not _flush():
-                return False, [], "Empty command segment before operator."
-            i += 2
-            continue
         elif ch in ("|", ";", "\n"):
             if not _flush() and ch == "|":
                 return False, [], "Empty command segment before pipe."
@@ -478,6 +478,11 @@ def _validate_git_args(args: list[str]) -> tuple[bool, str]:
             return False, f"Creating or modifying git {sub}s is not allowed in read-only mode."
         return True, ""
     return False, f"Git subcommand '{sub}' is not allowed in read-only mode."
+
+
+def validate_read_only_git_args(args: list[str]) -> tuple[bool, str]:
+    """Validates that a ``git`` argument list uses only read-only subcommands and flags."""
+    return _validate_git_args(args)
 
 
 def _validate_read_only_segment(segment: str) -> tuple[bool, str]:
