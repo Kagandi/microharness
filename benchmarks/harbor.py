@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore
 
-from benchmarks.runner import parse_task_filters
+from benchmarks.runner import matches_task_filter, split_task_filters
 from core.environment import ContainerEnvironment, Environment
 from core.types import EvalResult, StepTrace, Task
 
@@ -33,6 +34,8 @@ DEEPSWE_MINI_TASKS: list[str] = [
     "valibot-recursive-schema-composition",
     "yaegi-go-embed-directives",
 ]
+
+ARM64_UNSUPPORTED_DEEPSWE_TASKS: frozenset[str] = frozenset({"narwhals-rolling-window-suite"})
 
 
 @dataclass
@@ -206,16 +209,22 @@ def get_deepswe_mini_suite(
     if not base_path.is_dir():
         return []
 
-    terms = parse_task_filters(task_filter)
+    includes, excludes = split_task_filters(task_filter)
+    is_arm64 = platform.machine().lower() in ("arm64", "aarch64")
     suite: list[tuple[Task, HarborEvaluator]] = []
     for tid in DEEPSWE_MINI_TASKS:
-        if terms:
-            tid_lower = tid.lower()
-            if not any(term in tid_lower for term in terms):
-                continue
+        if not matches_task_filter((tid,), includes, excludes):
+            continue
 
         task_path = base_path / tid
         if not task_path.is_dir():
+            continue
+
+        if is_arm64 and not includes and tid in ARM64_UNSUPPORTED_DEEPSWE_TASKS:
+            print(
+                f"⚠️ Skipping '{tid}' on {platform.machine()} host "
+                "(upstream polars AVX2 segfaults under x86_64 emulation; pass --task narwhals to force)."
+            )
             continue
 
         try:

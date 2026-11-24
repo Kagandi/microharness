@@ -982,6 +982,21 @@ class TestMiniSWEBenchmarks(unittest.TestCase):
         all_tasks = get_mini_swe_suite(task_filter=" , ")
         self.assertEqual(len(all_tasks), len(MINI_SWE_TASKS))
 
+    def test_split_task_filters_and_exclusions(self):
+        """Invariant: !term and -term exclude matching tasks across mini-swe suites."""
+        from benchmarks.runner import split_task_filters
+
+        self.assertEqual(
+            split_task_filters("!narwhals, -textual, bandit"), (["bandit"], ["narwhals", "textual"])
+        )
+        self.assertEqual(split_task_filters("!, -"), ([], []))
+
+        excluded = get_mini_swe_suite(task_filter="!rate_limiter, -query_builder")
+        self.assertEqual(
+            [t.id for t, _ in excluded],
+            ["mini_swe_circular_serializer", "mini_swe_auth_middleware", "mini_swe_lru_ttl_cache"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
