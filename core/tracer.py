@@ -72,6 +72,36 @@ def _format_edit_file_action(args: Any) -> str:
     return f"● Edit {path}"
 
 
+def _format_grep_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Grep {args}"
+    pattern = str(args.get("pattern", "")).strip()
+    path = str(args.get("path") or ".").strip() or "."
+    if len(pattern) > 50:
+        pattern = f"{pattern[:50]}..."
+    return f"● Grep {pattern!r} in {path}"
+
+
+def _format_glob_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Glob {args}"
+    pattern = str(args.get("pattern", "")).strip()
+    path = str(args.get("path") or ".").strip() or "."
+    return f"● Glob {pattern!r} in {path}"
+
+
+def _format_git_read_action(args: Any) -> str:
+    if not isinstance(args, dict):
+        return f"● Git {args}"
+    action = str(args.get("action", "")).strip()
+    extra = args.get("args")
+    extra_str = " ".join(str(x) for x in extra) if isinstance(extra, list) and extra else ""
+    cmd = f"{action} {extra_str}".strip()
+    if len(cmd) > 60:
+        cmd = f"{cmd[:60]}..."
+    return f"● Git {cmd}"
+
+
 def _format_finish_action(args: Any) -> str:
     if not isinstance(args, dict):
         return f"● Finish ({args})"
@@ -111,6 +141,9 @@ ActionFormatter = Callable[[Any], str]
 _ACTION_FORMATTERS: dict[str, ActionFormatter] = {
     "bash": _format_bash_action,
     "read_file": _format_read_file_action,
+    "grep": _format_grep_action,
+    "glob": _format_glob_action,
+    "git_read": _format_git_read_action,
     "write_file": _format_write_file_action,
     "edit_file": _format_edit_file_action,
     "finish": _format_finish_action,

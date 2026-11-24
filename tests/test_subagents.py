@@ -17,6 +17,7 @@ from core.memory import Memory
 from core.model import HttpChatModel, MockModel
 from core.protocols import ModelCancelledError
 from core.subagents import (
+    BUILTIN_SUBAGENTS,
     DEFAULT_SUBAGENT_MAX_STEPS,
     Subagent,
     SubagentTool,
@@ -26,7 +27,17 @@ from core.subagents import (
     render_subagents_index,
     resolve_subagent_command,
 )
-from core.tools import BashTool, EditFileTool, FinishTool, ReadFileTool, ToolRegistry, WriteFileTool
+from core.tools import (
+    BashTool,
+    EditFileTool,
+    FinishTool,
+    GitReadTool,
+    GlobTool,
+    GrepTool,
+    ReadFileTool,
+    ToolRegistry,
+    WriteFileTool,
+)
 from core.tracer import _format_action_summary
 from core.tui import CursesTUI, TUIState
 from core.types import Message, Task, ToolCall
@@ -216,6 +227,9 @@ class TestSubagentToolExecution(unittest.TestCase):
         self.registry = ToolRegistry(env=self.env)
         self.registry.register(BashTool(self.env))
         self.registry.register(ReadFileTool(self.env))
+        self.registry.register(GrepTool(self.env))
+        self.registry.register(GlobTool(self.env))
+        self.registry.register(GitReadTool(self.env))
         self.registry.register(WriteFileTool(self.env))
         self.registry.register(EditFileTool(self.env))
         self.registry.register(FinishTool())
@@ -266,8 +280,8 @@ class TestSubagentToolExecution(unittest.TestCase):
         self.assertEqual([m.role for m in captured_child_messages[0]], ["system", "user"])
         self.assertEqual(captured_child_messages[0][1].content, "Review secret.py")
 
-        # Tool allow-list: reviewer only gets read_file and bash (no write_file, edit_file, finish, subagent)
-        self.assertEqual(set(captured_child_tools[0]), {"read_file", "bash"})
+        # Tool allow-list: reviewer only gets static read-only inspection tools (no bash, write_file, edit_file, finish, subagent)
+        self.assertEqual(set(captured_child_tools[0]), {"read_file", "grep", "glob", "git_read"})
         self.assertFalse((self.ws / "hacked.txt").exists())
 
         # Child trace persisted under <run_dir>/subagents/
@@ -312,7 +326,10 @@ class TestSubagentToolExecution(unittest.TestCase):
 
         code, output = tool.execute(agent="worker", task="Create created.txt")
         self.assertEqual(code, 0)
-        self.assertEqual(set(seen_tools[0]), {"bash", "read_file", "write_file", "edit_file"})
+        self.assertEqual(
+            set(seen_tools[0]),
+            {"bash", "read_file", "grep", "glob", "git_read", "write_file", "edit_file"},
+        )
         self.assertNotIn("subagent", seen_tools[0])
         self.assertNotIn("finish", seen_tools[0])
         self.assertEqual((self.ws / "created.txt").read_text(encoding="utf-8"), "hello")
@@ -616,7 +633,7 @@ class TestSubagentToolExecution(unittest.TestCase):
         self.assertIn("child:branch-2", trace1.tool_results[1]["output"])
 
     def test_read_only_enforcement_blocks_shell_mutations_and_modifies_files_tools(self):
-        """Invariant: explore, reviewer, and read_only=True subagents block mutating bash commands and file-modifying tools."""
+        """Invariant: explore/reviewer expose only static read-only tools and read_only=True subagents block shell/file mutations."""
         (self.ws / "keep.txt").write_text("original\n", encoding="utf-8")
 
         class CustomMutatingTool:
@@ -639,6 +656,12 @@ class TestSubagentToolExecution(unittest.TestCase):
         subagents["auditor"] = custom_ro
         self.assertTrue(subagents["explore"].read_only)
         self.assertTrue(subagents["reviewer"].read_only)
+        self.assertEqual(
+            BUILTIN_SUBAGENTS["explore"].tools, ("read_file", "grep", "glob", "git_read")
+        )
+        self.assertEqual(
+            BUILTIN_SUBAGENTS["reviewer"].tools, ("read_file", "grep", "glob", "git_read")
+        )
         self.assertFalse(subagents["worker"].read_only)
 
         seen_tools_by_agent: dict[str, list[str]] = {}
@@ -653,6 +676,11 @@ class TestSubagentToolExecution(unittest.TestCase):
                 seen_tools_by_agent[self.agent_name] = [t["function"]["name"] for t in tools]
                 if self.step == 1:
                     return "Trying read and mutating commands", [
+                        ToolCall(
+                            id="ok_read",
+                            name="read_file",
+                            arguments={"path": "keep.txt"},
+                        ),
                         ToolCall(
                             id="ok1",
                             name="bash",
@@ -669,7 +697,7 @@ class TestSubagentToolExecution(unittest.TestCase):
                             arguments={"command": "rm keep.txt"},
                         ),
                     ]
-                return f"Done: {messages[-3].content}", []
+                return f"Done: {messages[-4].content}", []
 
         for agent_name in ("explore", "reviewer", "auditor"):
             model = MutatingAttemptModel(agent_name)
@@ -682,7 +710,6 @@ class TestSubagentToolExecution(unittest.TestCase):
             )
             code, out = tool.execute(agent=agent_name, task="Attempt mutations")
             self.assertEqual(code, 0)
-            self.assertIn("original", out)
             self.assertNotIn("write_file", seen_tools_by_agent[agent_name])
             self.assertNotIn("edit_file", seen_tools_by_agent[agent_name])
             self.assertNotIn("custom_mutator", seen_tools_by_agent[agent_name])
@@ -694,11 +721,23 @@ class TestSubagentToolExecution(unittest.TestCase):
             trace = json.loads(traces[0].read_text(encoding="utf-8"))
             results = trace["steps"][0]["tool_results"]
             self.assertEqual(results[0]["exit_code"], 0)
-            self.assertEqual(results[0]["output"].strip(), "original")
-            self.assertEqual(results[1]["exit_code"], 1)
-            self.assertIn("Read-only environment blocked bash command", results[1]["output"])
-            self.assertEqual(results[2]["exit_code"], 1)
-            self.assertIn("Read-only environment blocked bash command", results[2]["output"])
+            self.assertIn("original", results[0]["output"])
+            if agent_name in ("explore", "reviewer"):
+                self.assertEqual(
+                    set(seen_tools_by_agent[agent_name]),
+                    {"read_file", "grep", "glob", "git_read"},
+                )
+                self.assertEqual(results[1]["exit_code"], 1)
+                self.assertIn("Unknown tool 'bash'", results[1]["output"])
+                self.assertEqual(results[2]["exit_code"], 1)
+                self.assertIn("Unknown tool 'bash'", results[2]["output"])
+            else:
+                self.assertEqual(results[1]["exit_code"], 0)
+                self.assertEqual(results[1]["output"].strip(), "original")
+                self.assertEqual(results[2]["exit_code"], 1)
+                self.assertIn("Read-only environment blocked bash command", results[2]["output"])
+                self.assertEqual(results[3]["exit_code"], 1)
+                self.assertIn("Read-only environment blocked bash command", results[3]["output"])
 
     def test_parallel_worker_guard_and_agent_loop_serialization(self):
         """Invariant: parallel `tasks` rejects write-capable batches and concurrent AgentLoop worker calls serialize safely."""
@@ -1093,6 +1132,7 @@ class TestSubagentInteractiveAndTUI(unittest.TestCase):
         idx_text = render_subagents_index(self.subagents)
         self.assertIn("--- Available Subagents ---", idx_text)
         self.assertIn("[project] reviewer", idx_text)
+        self.assertIn("read-only", idx_text)
 
     def test_harness_run_with_subagent_end_to_end_and_usage_rollup(self):
         """Invariant: Harness.run executes subagents end-to-end, injects subagent index into system prompt, and rolls up token usage."""
@@ -1171,7 +1211,11 @@ class TestSubagentInteractiveAndTUI(unittest.TestCase):
                 seen_tools.append(len(tools))
                 if self.calls <= 2:
                     return "", [
-                        ToolCall(id=f"b{self.calls}", name="bash", arguments={"command": "echo hi"})
+                        ToolCall(
+                            id=f"r{self.calls}",
+                            name="read_file",
+                            arguments={"path": "sample.py"},
+                        )
                     ]
                 if not tools:
                     return "Synthesized partial findings", []
@@ -1183,10 +1227,12 @@ class TestSubagentInteractiveAndTUI(unittest.TestCase):
             logs = root / "logs"
             ws.mkdir()
             logs.mkdir()
+            _write(ws / "sample.py", "fallback_line = 1\n")
             env = Environment(workspace_dir=ws, logs_dir=logs)
             registry = ToolRegistry(env=env)
             registry.register(BashTool(env))
             registry.register(ReadFileTool(env))
+            registry.register(GrepTool(env))
 
             subagents = discover_subagents(ws, None)
             model = EmptyStepThenWrapupModel()
@@ -1212,9 +1258,9 @@ class TestSubagentInteractiveAndTUI(unittest.TestCase):
                     if self.calls <= 2:
                         return "", [
                             ToolCall(
-                                id=f"b{self.calls}",
-                                name="bash",
-                                arguments={"command": "echo fallback_line"},
+                                id=f"r{self.calls}",
+                                name="read_file",
+                                arguments={"path": "sample.py"},
                             )
                         ]
                     raise RuntimeError("wrapup failed")

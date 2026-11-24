@@ -8,6 +8,9 @@ from core.environment import Environment
 from core.tools import (
     BashTool,
     EditFileTool,
+    GitReadTool,
+    GlobTool,
+    GrepTool,
     ReadFileTool,
     ToolRegistry,
     WriteFileTool,
@@ -1229,6 +1232,152 @@ class ValidTool:
         )
         self.assertEqual(ok_res.exit_code, 0)
         self.assertEqual(ok_res.output, "Successfully wrote 6 bytes to 'clean.py'")
+
+
+class TestReadOnlyInspectionTools(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.env = Environment(workspace_dir=self.temp_dir, cleanup_on_teardown=True)
+        self.env.populate_files(
+            {
+                "app.py": "def greet(name: str) -> str:\n    return f'hello {name}'\n",
+                "src/core/parser.py": (
+                    "import re\n\ndef parse(text: str) -> str:\n    return text.strip()\n"
+                ),
+                "src/core/helper.ts": "export const token = 'abc';\n",
+                "tests/test_app.py": "def test_greet():\n    assert True\n",
+                ".git/HEAD": "ref: refs/heads/main\n",
+                "__pycache__/app.cpython-311.pyc": "cached",
+            }
+        )
+        binary_path = Path(self.temp_dir) / "src" / "image.bin"
+        binary_path.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRparse")
+
+    def tearDown(self):
+        self.env.teardown()
+
+    def test_glob_tool_matches_patterns_skips_noise_and_enforces_limits(self):
+        tool = GlobTool(self.env)
+        self.assertTrue(tool.parallel_safe)
+
+        code, out = tool.execute(pattern="**/*.py")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.splitlines(),
+            ["app.py", "src/core/parser.py", "tests/test_app.py"],
+        )
+
+        code_sub, out_sub = tool.execute(pattern="tests/*.py")
+        self.assertEqual(code_sub, 0)
+        self.assertEqual(out_sub, "tests/test_app.py")
+
+        code_lim, out_lim = tool.execute(pattern="**/*.py", max_results=2)
+        self.assertEqual(code_lim, 0)
+        self.assertEqual(
+            out_lim,
+            "app.py\nsrc/core/parser.py\n\n[... showing first 2 of 3 matched files]",
+        )
+
+        code_empty, out_empty = tool.execute(pattern="**/*.rs")
+        self.assertEqual(code_empty, 0)
+        self.assertEqual(out_empty, "No files matched.")
+
+        for bad_kwargs in (
+            {"pattern": ""},
+            {"pattern": "**/*.py", "path": "../outside"},
+            {"pattern": "**/*.py", "path": "app.py"},
+            {"pattern": "**/*.py", "max_results": 0},
+            {"pattern": "**/*.py", "max_results": True},
+        ):
+            bad_code, bad_out = tool.execute(**bad_kwargs)
+            self.assertEqual(bad_code, 1, f"expected error for {bad_kwargs!r}")
+            self.assertTrue(bad_out.startswith("Error"))
+
+    def test_grep_tool_supports_regex_literal_context_includes_and_guards(self):
+        tool = GrepTool(self.env)
+        self.assertTrue(tool.parallel_safe)
+
+        code, out = tool.execute(pattern=r"def\s+parse", include="*.py", context=1)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out,
+            "src/core/parser.py-2-\n"
+            "src/core/parser.py:3:def parse(text: str) -> str:\n"
+            "src/core/parser.py-4-    return text.strip()",
+        )
+
+        code_lit, out_lit = tool.execute(pattern="f'hello {name}'", literal=True)
+        self.assertEqual(code_lit, 0)
+        self.assertEqual(out_lit, "app.py:2:    return f'hello {name}'")
+
+        code_ci, out_ci = tool.execute(pattern="EXPORT CONST", case_insensitive=True)
+        self.assertEqual(code_ci, 0)
+        self.assertEqual(out_ci, "src/core/helper.ts:1:export const token = 'abc';")
+
+        code_max, out_max = tool.execute(pattern="def ", max_matches=1)
+        self.assertEqual(code_max, 0)
+        self.assertIn("app.py:1:def greet", out_max)
+        self.assertIn("reached max_matches=1", out_max)
+
+        code_none, out_none = tool.execute(pattern="nonexistent_symbol_xyz")
+        self.assertEqual(code_none, 0)
+        self.assertEqual(out_none, "No matches found.")
+
+        for bad_kwargs in (
+            {"pattern": ""},
+            {"pattern": "[unclosed"},
+            {"pattern": "def", "context": -1},
+            {"pattern": "def", "max_matches": 0},
+            {"pattern": "def", "path": "../escape"},
+        ):
+            bad_code, bad_out = tool.execute(**bad_kwargs)
+            self.assertEqual(bad_code, 1, f"expected error for {bad_kwargs!r}")
+            self.assertTrue(bad_out.startswith("Error"))
+
+    def test_git_read_tool_runs_read_only_commands_and_blocks_mutations(self):
+        import subprocess
+
+        subprocess.run(["git", "init"], cwd=self.temp_dir, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.temp_dir,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Tester"],
+            cwd=self.temp_dir,
+            check=True,
+        )
+        subprocess.run(["git", "add", "app.py"], cwd=self.temp_dir, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=self.temp_dir,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        self.env.write_file("app.py", "def greet(name: str) -> str:\n    return f'hi {name}'\n")
+
+        tool = GitReadTool(self.env)
+        self.assertTrue(tool.parallel_safe)
+
+        code_status, out_status = tool.execute(action="status", args=["--short"])
+        self.assertEqual(code_status, 0)
+        self.assertIn(" M app.py", out_status)
+
+        code_diff, out_diff = tool.execute(action="diff", args=["--", "app.py"])
+        self.assertEqual(code_diff, 0)
+        self.assertIn("-    return f'hello {name}'", out_diff)
+        self.assertIn("+    return f'hi {name}'", out_diff)
+
+        for bad_kwargs in (
+            {"action": "commit", "args": ["-m", "nope"]},
+            {"action": "diff", "args": ["--output=leak.diff"]},
+            {"action": "branch", "args": ["-D", "main"]},
+            {"action": "status", "args": "not-a-list"},
+        ):
+            bad_code, bad_out = tool.execute(**bad_kwargs)
+            self.assertEqual(bad_code, 1, f"expected error for {bad_kwargs!r}")
+            self.assertTrue(bad_out.startswith("Error:"))
 
 
 if __name__ == "__main__":

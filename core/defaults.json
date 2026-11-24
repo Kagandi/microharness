@@ -23,5 +23,8 @@
   "session_search_limit": 50,
   "max_snapshot_files": 5000,
   "max_snapshot_bytes": 52428800,
-  "max_discovery_files": 2000
+  "max_discovery_files": 2000,
+  "max_grep_matches": 200,
+  "max_grep_context_lines": 5,
+  "max_glob_results": 200
 }
