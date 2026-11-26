@@ -26,5 +26,8 @@
   "max_discovery_files": 2000,
   "max_grep_matches": 200,
   "max_grep_context_lines": 5,
-  "max_glob_results": 200
+  "max_glob_results": 200,
+  "experiments_runs_csv": "experiments.csv",
+  "experiments_tasks_csv": "experiments_tasks.csv",
+  "experiments_list_limit": 20
 }

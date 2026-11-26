@@ -353,7 +353,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="microharness: Interactive AI coding agent microframework for existing projects or benchmarks.",
         usage="%(prog)s [instruction] [-d DIR] [--sandbox] [--batch] [--demo {calculator,greeting}] [options]",
-        epilog="Credential management: %(prog)s auth {login,list,logout} --help",
+        epilog="Commands: %(prog)s auth {login,list,logout} | %(prog)s experiments {backfill,list}",
     )
     _add_run_arguments(parser)
     _add_model_arguments(parser)
@@ -592,8 +592,16 @@ def _task_requires_finish_tool(context: CliContext) -> bool:
     return not isinstance(context.model, MockModel)
 
 
-def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
-    """The model/limits summary recorded alongside a benchmark's scorecard."""
+def _benchmark_metadata(
+    context: CliContext,
+    *,
+    docker: bool | None = None,
+) -> dict[str, Any]:
+    """The model/version/limits summary recorded alongside a benchmark's scorecard."""
+    from datetime import datetime, timezone
+
+    from benchmarks.experiments import collect_agent_metadata, collect_subagents_summary
+
     model = context.model
     registry = load_provider_registry(
         global_dir=context.global_dir,
@@ -617,7 +625,15 @@ def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
         if context.bash_timeout is not None
         else float(get_default("bash_timeout"))
     )
+    agent_meta = collect_agent_metadata(context.target_dir or Path.cwd())
+    task_filter = _normalize_optional_str(getattr(context.args, "task", None))
     return {
+        "timestamp_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        "harness_version": agent_meta["harness_version"],
+        "git_commit": agent_meta["git_commit"],
+        "git_dirty": agent_meta["git_dirty"],
         "provider": (
             getattr(context.args, "provider", None)
             or getattr(model, "provider", None)
@@ -632,6 +648,12 @@ def _benchmark_metadata(context: CliContext) -> dict[str, Any]:
         "max_context_tokens": max_context_tokens,
         "trigger_ratio": trigger_ratio,
         "bash_timeout": bash_timeout,
+        "docker": context.use_docker if docker is None else docker,
+        "task_filter": task_filter,
+        "subagents": collect_subagents_summary(
+            global_dir=context.global_dir,
+            target_dir=context.target_dir,
+        ),
     }
 
 
@@ -653,6 +675,7 @@ def _normalize_optional_str(value: Any) -> str | None:
 
 def _run_mini_swe(context: CliContext) -> None:
     """Runs the bundled Mini-SWE suite."""
+    from benchmarks.experiments import CsvExperimentTracker
     from benchmarks.mini_swe import get_mini_swe_suite
     from benchmarks.runner import run_benchmark_suite
 
@@ -696,12 +719,14 @@ def _run_mini_swe(context: CliContext) -> None:
         output_dir=context.runs_dir,
         verbose=True,
         resume=bool(args.resume),
-        config=_benchmark_metadata(context),
+        config=_benchmark_metadata(context, docker=docker_active_any),
+        tracker=CsvExperimentTracker(context.global_dir),
     )
 
 
 def _run_deepswe_mini(context: CliContext) -> None:
     """Runs the DeepSWE-mini suite from the on-disk dataset."""
+    from benchmarks.experiments import CsvExperimentTracker
     from benchmarks.harbor import get_deepswe_mini_suite
     from benchmarks.runner import run_benchmark_suite
 
@@ -748,7 +773,8 @@ def _run_deepswe_mini(context: CliContext) -> None:
         output_dir=context.runs_dir,
         verbose=True,
         resume=bool(args.resume),
-        config=_benchmark_metadata(context),
+        config=_benchmark_metadata(context, docker=True),
+        tracker=CsvExperimentTracker(context.global_dir),
     )
 
 
@@ -1061,11 +1087,119 @@ def _run_auth_cli(argv: list[str]) -> int:
     return 1
 
 
+def _build_experiments_arg_parser() -> argparse.ArgumentParser:
+    from benchmarks.experiments import DEFAULT_LIST_LIMIT
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--global-dir",
+        default=argparse.SUPPRESS,
+        help="Global directory storing experiments.csv (default: ~/.microharness)",
+    )
+    common.add_argument(
+        "--runs-dir",
+        default=argparse.SUPPRESS,
+        help="Runs root directory to scan (default: <global-dir>/runs)",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="microharness experiments",
+        description="Inspect and backfill central experiment CSV logs.",
+        parents=[common],
+    )
+    subparsers = parser.add_subparsers(dest="experiments_command", metavar="command")
+
+    subparsers.add_parser(
+        "backfill",
+        parents=[common],
+        help="Import existing *_report.json benchmark runs into experiments.csv and experiments_tasks.csv",
+    )
+    list_parser = subparsers.add_parser(
+        "list",
+        parents=[common],
+        help="Display tracked benchmark runs from experiments.csv",
+    )
+    list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIST_LIMIT,
+        help=f"Maximum number of runs to display (default: {DEFAULT_LIST_LIMIT})",
+    )
+    return parser
+
+
+def _print_experiments_table(rows: list[dict[str, str]], csv_path: Path) -> None:
+    if not rows:
+        print(f"No experiments recorded yet in {csv_path}.")
+        return
+    print(f"\nExperiments ({csv_path}):\n")
+    header = (
+        f"{'Date (UTC)':<20} {'Run Name':<28} {'Suite':<13} {'Ver':<7} "
+        f"{'Model':<26} {'Pass':<7} {'Score':<6} {'Steps':<6} {'Time'}"
+    )
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        ts = r.get("timestamp_utc", "")[:19]
+        name = r.get("run_name", "")[:27]
+        suite = r.get("suite_name", "")[:12]
+        ver = (r.get("harness_version") or "-")[:6]
+        model = (r.get("model") or "-")[:25]
+        passed = f"{r.get('passed_tasks', '0')}/{r.get('total_tasks', '0')}"
+        score = r.get("mean_score", "")[:6]
+        steps = r.get("total_steps", "")[:5]
+        dur = f"{float(r['duration_s']):.1f}s" if r.get("duration_s") else "-"
+        print(
+            f"{ts:<20} {name:<28} {suite:<13} {ver:<7} "
+            f"{model:<26} {passed:<7} {score:<6} {steps:<6} {dur}"
+        )
+    print()
+
+
+def _run_experiments_cli(argv: list[str]) -> int:
+    from benchmarks.experiments import CsvExperimentTracker, backfill_runs, load_experiment_runs
+
+    parser = _build_experiments_arg_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "experiments_command", None):
+        parser.print_help()
+        return 1
+
+    global_dir = (
+        Path(args.global_dir).resolve()
+        if getattr(args, "global_dir", None)
+        else get_default_global_dir()
+    )
+    runs_dir = (
+        Path(args.runs_dir).resolve()
+        if getattr(args, "runs_dir", None)
+        else (global_dir / "runs").resolve()
+    )
+    tracker = CsvExperimentTracker(global_dir)
+
+    if args.experiments_command == "backfill":
+        count = backfill_runs(runs_dir, tracker)
+        print(f"Imported {count} benchmark run(s) from {runs_dir} into {tracker.runs_csv_path}")
+        return 0
+    if args.experiments_command == "list":
+        rows = load_experiment_runs(tracker.runs_csv_path, limit=args.limit)
+        _print_experiments_table(rows, tracker.runs_csv_path)
+        return 0
+
+    parser.print_help()
+    return 1
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
     raw_argv = sys.argv[1:] if argv is None else list(argv)
     if raw_argv and raw_argv[0] == "auth":
         exit_code = _run_auth_cli(raw_argv[1:])
+        if exit_code != 0:
+            sys.exit(exit_code)
+        return
+    if raw_argv and raw_argv[0] == "experiments":
+        exit_code = _run_experiments_cli(raw_argv[1:])
         if exit_code != 0:
             sys.exit(exit_code)
         return

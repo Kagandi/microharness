@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from benchmarks.experiments import ExperimentTracker, derive_run_id
 from core.evaluator import Evaluator
 from core.harness import Harness
 from core.types import EvalResult, RunResult, Task
@@ -238,6 +239,31 @@ def _save_report_json(report: BenchmarkReport, output_dir: Path | str, suite_nam
     return report_file
 
 
+def _persist_benchmark_progress(
+    *,
+    suite_name: str,
+    total_tasks: int,
+    task_reports: list[TaskReport],
+    duration_s: float,
+    config: dict[str, Any],
+    output_dir: Path | None,
+    tracker: ExperimentTracker | None,
+    run_id: str,
+) -> tuple[BenchmarkReport, Path | None]:
+    """Builds a report snapshot and persists JSON/MD/experiment-tracker outputs."""
+    report = _build_report(
+        suite_name=suite_name,
+        total_tasks=total_tasks,
+        task_reports=task_reports,
+        duration_s=duration_s,
+        config=config,
+    )
+    report_file = _save_report_json(report, output_dir, suite_name) if output_dir else None
+    if tracker is not None:
+        tracker.record_run(report, output_dir=output_dir, run_id=run_id)
+    return report, report_file
+
+
 def run_benchmark_suite(
     harness_factory: Callable[[Evaluator], Harness],
     tasks: Sequence[tuple[Task, Evaluator]],
@@ -246,11 +272,20 @@ def run_benchmark_suite(
     verbose: bool = True,
     resume: bool = False,
     config: dict[str, Any] | None = None,
+    tracker: ExperimentTracker | None = None,
 ) -> BenchmarkReport:
     """Executes a list of (Task, Evaluator) instances sequentially and aggregates results."""
     start_time = time.time()
     task_reports: list[TaskReport] = []
     effective_config: dict[str, Any] = dict(config or {})
+    out_dir_path = Path(output_dir) if output_dir else None
+    run_id, _ = derive_run_id(
+        suite_name,
+        output_dir=out_dir_path,
+        timestamp_utc=str(effective_config["timestamp_utc"])
+        if effective_config.get("timestamp_utc")
+        else None,
+    )
 
     retained_tasks_map: dict[str, TaskReport] = {}
     if resume and output_dir:
@@ -381,15 +416,17 @@ def run_benchmark_suite(
         )
 
         # Incrementally persist benchmark report after each task
-        if output_dir:
-            cur_report = _build_report(
+        if out_dir_path is not None or tracker is not None:
+            _persist_benchmark_progress(
                 suite_name=suite_name,
                 total_tasks=len(tasks),
                 task_reports=task_reports,
                 duration_s=time.time() - start_time,
                 config=effective_config,
+                output_dir=out_dir_path,
+                tracker=tracker,
+                run_id=run_id,
             )
-            _save_report_json(cur_report, output_dir, suite_name)
 
         if run_result.finish_reason == "rate_limited" or halt_reason is not None:
             # Preserve any remaining retained tasks from previous run so they are not lost
@@ -397,15 +434,17 @@ def run_benchmark_suite(
             for rem_task, _ in tasks[idx:]:
                 if rem_task.id in retained_tasks_map and rem_task.id not in seen_ids:
                     task_reports.append(retained_tasks_map[rem_task.id])
-            if output_dir:
-                cur_report = _build_report(
+            if out_dir_path is not None or tracker is not None:
+                _persist_benchmark_progress(
                     suite_name=suite_name,
                     total_tasks=len(tasks),
                     task_reports=task_reports,
                     duration_s=time.time() - start_time,
                     config=effective_config,
+                    output_dir=out_dir_path,
+                    tracker=tracker,
+                    run_id=run_id,
                 )
-                _save_report_json(cur_report, output_dir, suite_name)
 
             if verbose:
                 if run_result.finish_reason == "rate_limited":
@@ -424,22 +463,25 @@ def run_benchmark_suite(
                 )
             break
 
-    report = _build_report(
+    report, report_file = _persist_benchmark_progress(
         suite_name=suite_name,
         total_tasks=len(tasks),
         task_reports=task_reports,
         duration_s=time.time() - start_time,
         config=effective_config,
+        output_dir=out_dir_path,
+        tracker=tracker,
+        run_id=run_id,
     )
 
     if verbose:
         report.print_scorecard()
 
-    if output_dir:
-        report_file = _save_report_json(report, output_dir, suite_name)
-        if verbose:
-            print(
-                f"📄 Benchmark report saved to: {report_file} (and {report_file.with_suffix('.md')})"
-            )
+    if verbose and report_file is not None:
+        print(f"📄 Benchmark report saved to: {report_file} (and {report_file.with_suffix('.md')})")
+    if verbose and tracker is not None:
+        runs_csv = getattr(tracker, "runs_csv_path", None)
+        if runs_csv is not None:
+            print(f"📈 Experiment log updated: {runs_csv}")
 
     return report
