@@ -305,6 +305,25 @@ class TestEnvironment(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.env.edit_file("code.py", "", "new")
 
+    def test_edit_file_multi_edits_atomic(self):
+        self.env.write_file("multi.py", "one = 1\ntwo = 2\nthree = 3\n")
+        count, msg = self.env.edit_file(
+            "multi.py",
+            edits=[("one = 1", "one = 11"), ("three = 3", "three = 33")],
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(msg, "Successfully applied 2 edits in 'multi.py'.")
+        self.assertEqual(
+            Path(self.temp_dir, "multi.py").read_text(encoding="utf-8"),
+            "one = 11\ntwo = 2\nthree = 33\n",
+        )
+        with self.assertRaises(ValueError):
+            self.env.edit_file("multi.py", edits=[("one = 11", "one = 0"), ("missing", "x")])
+        self.assertEqual(
+            Path(self.temp_dir, "multi.py").read_text(encoding="utf-8"),
+            "one = 11\ntwo = 2\nthree = 33\n",
+        )
+
     def test_edit_file_path_traversal_denied(self):
         with self.assertRaises(PermissionError):
             self.env.edit_file("../../etc/passwd", "root", "toor")

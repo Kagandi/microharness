@@ -289,8 +289,9 @@ class EditFileTool:
     name = "edit_file"
     modifies_files = True
     description = (
-        "Replaces an exact, unique occurrence of old_str with new_str in a file. "
-        "The old_str must match exactly (including whitespace/indentation) and be unique."
+        "Atomically apply one or more sequential {old_str, new_str} edits to a file in one call. "
+        "Combine all edits for the same file into `edits`, and batch independent `edit_file` calls "
+        "across different files in the same turn."
     )
     parameters = {
         "type": "object",
@@ -299,23 +300,78 @@ class EditFileTool:
                 "type": "string",
                 "description": "Path to the file relative to workspace root.",
             },
-            "old_str": {
-                "type": "string",
-                "description": "The exact unique string or code block to replace.",
-            },
-            "new_str": {
-                "type": "string",
-                "description": "The replacement string or code block.",
+            "edits": {
+                "type": "array",
+                "description": (
+                    "List of sequential {old_str, new_str} replacements applied atomically "
+                    "to this file in order."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_str": {
+                            "type": "string",
+                            "description": "Exact unique string or code block to replace.",
+                        },
+                        "new_str": {
+                            "type": "string",
+                            "description": "Replacement string or code block.",
+                        },
+                    },
+                    "required": ["old_str", "new_str"],
+                },
             },
         },
-        "required": ["path", "old_str", "new_str"],
+        "required": ["path", "edits"],
     }
 
     def __init__(self, env: Environment):
         self.env = env
 
-    def execute(self, path: str, old_str: str, new_str: str) -> tuple[int, str]:
+    def execute(
+        self,
+        path: str,
+        old_str: str | None = None,
+        new_str: str | None = None,
+        edits: list[dict[str, Any]] | None = None,
+    ) -> tuple[int, str]:
         try:
+            if edits is not None:
+                if old_str is not None or new_str is not None:
+                    return (
+                        1,
+                        f"Error editing file '{path}': provide either (old_str, new_str) or edits, not both.",
+                    )
+                if not isinstance(edits, list) or not edits:
+                    return (
+                        1,
+                        f"Error editing file '{path}': edits must be a non-empty list of {{old_str, new_str}} objects.",
+                    )
+                parsed_edits: list[tuple[str, str]] = []
+                for idx, item in enumerate(edits, start=1):
+                    if not isinstance(item, dict):
+                        return 1, f"Error editing file '{path}': edit #{idx} must be an object."
+                    item_old = item.get("old_str")
+                    item_new = item.get("new_str")
+                    if not isinstance(item_old, str) or not item_old:
+                        return (
+                            1,
+                            f"Error editing file '{path}': edit #{idx} requires a non-empty string 'old_str'.",
+                        )
+                    if not isinstance(item_new, str):
+                        return (
+                            1,
+                            f"Error editing file '{path}': edit #{idx} requires a string 'new_str'.",
+                        )
+                    parsed_edits.append((item_old, item_new))
+                _, message = self.env.edit_file(path, edits=parsed_edits)
+                return 0, message
+
+            if not isinstance(old_str, str) or not isinstance(new_str, str):
+                return (
+                    1,
+                    f"Error editing file '{path}': provide (old_str, new_str) or a non-empty edits list.",
+                )
             _, message = self.env.edit_file(path, old_str, new_str)
             return 0, message
         except Exception as exc:
@@ -369,42 +425,80 @@ _GIT_READ_ACTIONS: tuple[str, ...] = (
 )
 
 
-def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
-    """Compiles a POSIX-style glob pattern (supporting ``**``) into a regex."""
-    normalized = pattern.strip().lstrip("./")
-    if not normalized:
-        return re.compile(r"^$")
-    parts: list[str] = ["^"]
-    i, n = 0, len(normalized)
+def _split_brace_alternatives(body: str) -> list[str]:
+    """Splits comma-separated brace alternatives while respecting nested ``{...}``."""
+    alts: list[str] = []
+    depth = 0
+    start = 0
+    for idx, ch in enumerate(body):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            alts.append(body[start:idx])
+            start = idx + 1
+    alts.append(body[start:])
+    return alts
+
+
+def _glob_fragment_to_regex(fragment: str) -> str:
+    """Translates a POSIX glob fragment (including ``**`` and ``{a,b}``) to regex source."""
+    parts: list[str] = []
+    i, n = 0, len(fragment)
     while i < n:
-        if normalized.startswith("**/", i):
+        if fragment.startswith("**/", i):
             parts.append("(?:.+/)?")
             i += 3
-        elif normalized.startswith("**", i):
+        elif fragment.startswith("**", i):
             parts.append(".*")
             i += 2
-        elif normalized[i] == "*":
+        elif fragment[i] == "*":
             parts.append("[^/]*")
             i += 1
-        elif normalized[i] == "?":
+        elif fragment[i] == "?":
             parts.append("[^/]")
             i += 1
-        elif normalized[i] == "[":
-            end = normalized.find("]", i + 1)
+        elif fragment[i] == "[":
+            end = fragment.find("]", i + 1)
             if end == -1:
                 parts.append(re.escape("["))
                 i += 1
             else:
-                body = normalized[i + 1 : end]
+                body = fragment[i + 1 : end]
                 if body.startswith("!"):
                     body = "^" + body[1:]
                 parts.append(f"[{body}]")
                 i = end + 1
+        elif fragment[i] == "{":
+            depth = 1
+            j = i + 1
+            while j < n and depth > 0:
+                if fragment[j] == "{":
+                    depth += 1
+                elif fragment[j] == "}":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                inner = fragment[i + 1 : j - 1]
+                alts = [_glob_fragment_to_regex(alt) for alt in _split_brace_alternatives(inner)]
+                parts.append(f"(?:{'|'.join(alts)})")
+                i = j
+            else:
+                parts.append(re.escape("{"))
+                i += 1
         else:
-            parts.append(re.escape(normalized[i]))
+            parts.append(re.escape(fragment[i]))
             i += 1
-    parts.append("$")
-    return re.compile("".join(parts))
+    return "".join(parts)
+
+
+def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
+    """Compiles a POSIX-style glob pattern (supporting ``**`` and ``{a,b}``) into a regex."""
+    normalized = pattern.strip().lstrip("./")
+    if not normalized:
+        return re.compile(r"^$")
+    return re.compile(f"^{_glob_fragment_to_regex(normalized)}$")
 
 
 def _iter_searchable_files(base: Path) -> list[Path]:

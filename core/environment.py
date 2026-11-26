@@ -12,7 +12,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from core.editing import apply_text_edit
+from core.editing import apply_text_edit, apply_text_edits
 from core.types import normalize_permission_mode
 
 
@@ -179,9 +179,16 @@ class Environment:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
-        """Replaces a unique occurrence of old_str with new_str in a workspace file."""
-        if not old_str:
+    def edit_file(
+        self,
+        rel_path: str,
+        old_str: str = "",
+        new_str: str = "",
+        *,
+        edits: Sequence[tuple[str, str]] | None = None,
+    ) -> tuple[int, str]:
+        """Replaces unique target block(s) in a workspace file atomically."""
+        if edits is None and not old_str:
             raise ValueError("old_str cannot be empty.")
         path = self.resolve_path(rel_path)
         if not path.exists():
@@ -190,9 +197,16 @@ class Environment:
             raise IsADirectoryError(f"Path is a directory: {rel_path}")
 
         content = path.read_text(encoding="utf-8", errors="replace")
-        updated_content, message = apply_text_edit(content, old_str, new_str, path_label=rel_path)
+        if edits is not None:
+            updated_content, message = apply_text_edits(content, edits, path_label=rel_path)
+            edit_count = len(edits)
+        else:
+            updated_content, message = apply_text_edit(
+                content, old_str, new_str, path_label=rel_path
+            )
+            edit_count = 1
         path.write_text(updated_content, encoding="utf-8")
-        return 1, message
+        return edit_count, message
 
     @property
     def is_running(self) -> bool:
@@ -585,7 +599,14 @@ class ReadOnlyEnvironment(Environment):
     def write_file(self, rel_path: str, content: str) -> None:
         raise PermissionError("Workspace is read-only; write operations are not permitted.")
 
-    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
+    def edit_file(
+        self,
+        rel_path: str,
+        old_str: str = "",
+        new_str: str = "",
+        *,
+        edits: Sequence[tuple[str, str]] | None = None,
+    ) -> tuple[int, str]:
         raise PermissionError("Workspace is read-only; write operations are not permitted.")
 
     def get_git_patch(self) -> str | None:
@@ -696,13 +717,23 @@ class GuardedEnvironment(Environment):
             raise PermissionError(reason)
         self._inner.write_file(rel_path, content)
 
-    def edit_file(self, rel_path: str, old_str: str, new_str: str) -> tuple[int, str]:
+    def edit_file(
+        self,
+        rel_path: str,
+        old_str: str = "",
+        new_str: str = "",
+        *,
+        edits: Sequence[tuple[str, str]] | None = None,
+    ) -> tuple[int, str]:
         if self._mode == "read-only":
-            return self._ro.edit_file(rel_path, old_str, new_str)
-        ok, reason = self.confirm_action("edit_file", f"Edit '{rel_path}'")
+            return self._ro.edit_file(rel_path, old_str, new_str, edits=edits)
+        detail = (
+            f"Edit '{rel_path}' ({len(edits)} edits)" if edits is not None else f"Edit '{rel_path}'"
+        )
+        ok, reason = self.confirm_action("edit_file", detail)
         if not ok:
             raise PermissionError(reason)
-        return self._inner.edit_file(rel_path, old_str, new_str)
+        return self._inner.edit_file(rel_path, old_str, new_str, edits=edits)
 
     def get_git_patch(self) -> str | None:
         if self._mode == "read-only":

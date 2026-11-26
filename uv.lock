@@ -58,7 +58,7 @@ wheels = [
 
 [[package]]
 name = "microharness"
-version = "0.1.20"
+version = "0.1.21"
 source = { editable = "." }
 
 [package.dev-dependencies]
