@@ -69,6 +69,9 @@ def _format_edit_file_action(args: Any) -> str:
     if not isinstance(args, dict):
         return f"● Edit {args}"
     path = args.get("path", "")
+    edits = args.get("edits")
+    if isinstance(edits, list) and edits:
+        return f"● Edit {path} ({len(edits)} edits)"
     return f"● Edit {path}"
 
 

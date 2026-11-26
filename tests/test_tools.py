@@ -144,7 +144,7 @@ class TestTools(unittest.TestCase):
         self.assertIn("bash(command: string, timeout: number):", snippet)
         self.assertIn("read_file(path: string, start_line: integer, end_line: integer):", snippet)
         self.assertIn("write_file(path: string, content: string):", snippet)
-        self.assertIn("edit_file(path: string, old_str: string, new_str: string):", snippet)
+        self.assertIn("edit_file(path: string, edits: array):", snippet)
 
     def test_tool_dispatch_with_non_dict_arguments(self):
         # When an LLM sends a string or list instead of a dict for arguments
@@ -1271,6 +1271,13 @@ class TestReadOnlyInspectionTools(unittest.TestCase):
         self.assertEqual(code_sub, 0)
         self.assertEqual(out_sub, "tests/test_app.py")
 
+        code_brace, out_brace = tool.execute(pattern="**/*.{ts,py}")
+        self.assertEqual(code_brace, 0)
+        self.assertEqual(
+            out_brace.splitlines(),
+            ["app.py", "src/core/helper.ts", "src/core/parser.py", "tests/test_app.py"],
+        )
+
         code_lim, out_lim = tool.execute(pattern="**/*.py", max_results=2)
         self.assertEqual(code_lim, 0)
         self.assertEqual(
@@ -1378,6 +1385,90 @@ class TestReadOnlyInspectionTools(unittest.TestCase):
             bad_code, bad_out = tool.execute(**bad_kwargs)
             self.assertEqual(bad_code, 1, f"expected error for {bad_kwargs!r}")
             self.assertTrue(bad_out.startswith("Error:"))
+
+    def test_edit_file_multi_hunk_atomic_and_validation(self):
+        from core.tracer import _format_action_summary
+
+        self.env.write_file("mod.py", "a = 1\nb = 2\nc = 3\n")
+        tool = EditFileTool(self.env)
+
+        code, out = tool.execute(
+            path="mod.py",
+            edits=[
+                {"old_str": "a = 1", "new_str": "a = 10"},
+                {"old_str": "c = 3", "new_str": "c = 30"},
+            ],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "Successfully applied 2 edits in 'mod.py'.")
+        self.assertEqual(
+            Path(self.temp_dir, "mod.py").read_text(encoding="utf-8"),
+            "a = 10\nb = 2\nc = 30\n",
+        )
+        self.assertEqual(
+            _format_action_summary(
+                "edit_file",
+                {"path": "mod.py", "edits": [{"old_str": "x", "new_str": "y"}]},
+                color=False,
+            ),
+            "● Edit mod.py (1 edits)",
+        )
+
+        # Atomic rollback: if edit #2 fails, edit #1 must NOT be written to disk
+        code_fail, out_fail = tool.execute(
+            path="mod.py",
+            edits=[
+                {"old_str": "a = 10", "new_str": "a = 999"},
+                {"old_str": "missing_line", "new_str": "z = 1"},
+            ],
+        )
+        self.assertEqual(code_fail, 1)
+        self.assertIn("mod.py (edit 2/2)", out_fail)
+        self.assertEqual(
+            Path(self.temp_dir, "mod.py").read_text(encoding="utf-8"),
+            "a = 10\nb = 2\nc = 30\n",
+        )
+
+        # Validation errors
+        for bad_kwargs in (
+            {
+                "path": "mod.py",
+                "old_str": "a = 10",
+                "new_str": "x",
+                "edits": [{"old_str": "b = 2", "new_str": "y"}],
+            },
+            {"path": "mod.py", "edits": []},
+            {"path": "mod.py", "edits": ["not-a-dict"]},
+            {"path": "mod.py", "edits": [{"old_str": "", "new_str": "x"}]},
+            {"path": "mod.py", "edits": [{"old_str": "b = 2"}]},
+            {"path": "mod.py"},
+        ):
+            bad_code, bad_out = tool.execute(**bad_kwargs)
+            self.assertEqual(bad_code, 1, f"expected error for {bad_kwargs!r}")
+            self.assertIn("Error editing file 'mod.py'", bad_out)
+
+    def test_edit_file_schema_advertises_edits_only_with_legacy_fallback(self):
+        from core.tools import ToolRegistry
+
+        reg = ToolRegistry(self.env)
+        reg.register(EditFileTool(self.env))
+        schemas = reg.to_openai_schemas()
+        self.assertEqual(len(schemas), 1)
+        params = schemas[0]["function"]["parameters"]
+        self.assertEqual(sorted(params["properties"].keys()), ["edits", "path"])
+        self.assertEqual(params["required"], ["path", "edits"])
+
+        self.env.write_file("legacy.py", "x = 1\n")
+        res = reg.dispatch(
+            ToolCall(
+                id="legacy-1",
+                name="edit_file",
+                arguments={"path": "legacy.py", "old_str": "x = 1", "new_str": "x = 2"},
+            ),
+            step_index=1,
+        )
+        self.assertEqual(res.exit_code, 0)
+        self.assertEqual(Path(self.temp_dir, "legacy.py").read_text(encoding="utf-8"), "x = 2\n")
 
 
 if __name__ == "__main__":

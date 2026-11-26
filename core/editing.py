@@ -213,6 +213,32 @@ def apply_text_edit(
     raise ValueError(_format_closest_match_feedback(content, old_str, path_label))
 
 
+def apply_text_edits(
+    content: str,
+    edits: Sequence[tuple[str, str]],
+    *,
+    path_label: str = "file",
+) -> tuple[str, str]:
+    """Atomically applies sequential ``(old_str, new_str)`` replacements to ``content``.
+
+    Every edit must match uniquely in the running buffer; if any edit fails,
+    ``ValueError`` is raised before any caller writes to disk.
+    """
+    if not edits:
+        raise ValueError("edits cannot be empty.")
+
+    updated = content
+    last_message = ""
+    total = len(edits)
+    for idx, (old_str, new_str) in enumerate(edits, start=1):
+        label = path_label if total == 1 else f"{path_label} (edit {idx}/{total})"
+        updated, last_message = apply_text_edit(updated, old_str, new_str, path_label=label)
+
+    if total == 1:
+        return updated, last_message
+    return updated, f"Successfully applied {total} edits in '{path_label}'."
+
+
 def check_python_syntax(content: str, path_label: str = "file") -> str | None:
     """Checks Python syntax with ``ast.parse`` and returns a concise line/column diagnostic, or ``None``."""
     try:
