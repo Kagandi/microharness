@@ -50,6 +50,15 @@ from core.model import (
     ProviderAwareModel,
     ReasoningAwareModel,
 )
+from core.presets import (
+    AgentPreset,
+    discover_preset_commands,
+    discover_preset_skills,
+    discover_preset_subagents,
+    discover_preset_tools,
+    discover_presets,
+    resolve_preset,
+)
 from core.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt, load_agents_instructions
 from core.providers import (
     ModelRequest,
@@ -76,6 +85,7 @@ from core.skills import (
     render_skills_index,
 )
 from core.subagents import (
+    BUILTIN_SUBAGENTS,
     Subagent,
     SubagentTool,
     discover_subagents,
@@ -101,12 +111,14 @@ from core.types import EvalResult, Message, RunResult, StepTrace, Task
 from core.usage import sum_usage, summarize_run_usage
 
 __all__ = [
+    "AgentPreset",
     "Command",
     "Harness",
     "Skill",
     "Subagent",
     "SubagentTool",
     "discover_commands",
+    "discover_presets",
     "discover_skills",
     "discover_subagents",
     "get_default_global_dir",
@@ -114,6 +126,7 @@ __all__ = [
     "load_project_config",
     "render_skills_index",
     "render_subagents_index",
+    "resolve_preset",
     "resolve_slash_input",
 ]
 
@@ -166,13 +179,30 @@ class Harness:
         docker_memory: str | None = None,
         docker_cpus: float | None = None,
         docker_pids_limit: int | None = None,
+        preset: AgentPreset | str | Path | None = None,
     ):
         self.model = model
         self.explicit_workspace_dir = Path(workspace_dir).resolve() if workspace_dir else None
         self.global_dir = (
             Path(global_dir).resolve() if global_dir is not None else get_default_global_dir()
         )
-        self.layers = ConfigLayers.load(self.global_dir, self.explicit_workspace_dir)
+        self.preset: AgentPreset | None = (
+            resolve_preset(
+                preset,
+                workspace=self.explicit_workspace_dir,
+                global_dir=self.global_dir,
+            )
+            if preset is not None
+            else None
+        )
+        self.layers = ConfigLayers.load(
+            self.global_dir,
+            self.explicit_workspace_dir,
+            preset_config=self.preset.config if self.preset else None,
+            preset_scope=self.preset.scope if self.preset else "global",
+            inherit_global=self.preset.inherit_global if self.preset else True,
+            inherit_project=self.preset.inherit_project if self.preset else True,
+        )
         self.global_config = self.layers.global_config
         self.project_config = self.layers.project_config
         self.merged_config = self.layers.merged
@@ -624,11 +654,16 @@ class Harness:
         extra_allowed_reads: Sequence[Path] = (),
     ) -> Environment:
         allowed_reads: list[Path] = [logs_dir]
-        if self.global_dir:
+        if self.global_dir and (self.preset is None or self.preset.inherit_global):
             for sub in ["skills", ".skills", "commands", ".commands", "agents", ".agents"]:
                 sub_path = self.global_dir / sub
                 allowed_reads.append(sub_path)
             allowed_reads.append(self.global_dir / "AGENTS.md")
+        if self.preset is not None:
+            for sub in ["skills", "subagents", "agents", "commands"]:
+                allowed_reads.append(self.preset.path / sub)
+            for manifest_name in ("agent.md", "AGENT.md"):
+                allowed_reads.append(self.preset.path / manifest_name)
         allowed_reads.extend(extra_allowed_reads)
         if active_docker:
             active_network = docker_network if docker_network is not None else self.docker_network
@@ -663,6 +698,95 @@ class Harness:
         """Returns the project directory used for config, steering, and capability discovery."""
         return self.explicit_workspace_dir or runtime_workspace
 
+    def _default_system_prompt(self) -> str:
+        """Returns the base system prompt from the active preset or the built-in default."""
+        if self.preset is not None and self.preset.system_prompt:
+            return self.preset.system_prompt
+        return DEFAULT_SYSTEM_PROMPT
+
+    def _load_agents_instructions(self, workspace: Path) -> str:
+        if self.preset is None:
+            return load_agents_instructions(workspace, self.global_dir)
+        g_dir = self.global_dir if self.preset.inherit_global else None
+        return load_agents_instructions(
+            workspace,
+            g_dir,
+            include_workspace=self.preset.include_workspace_agents_md,
+        )
+
+    def _discover_skills(
+        self,
+        workspace: Path | None,
+        *,
+        path_base: Path | None = None,
+    ) -> dict[str, Skill]:
+        if self.preset is None:
+            return discover_skills(workspace, self.global_dir, path_base=path_base)
+        merged: dict[str, Skill] = {}
+        if self.preset.inherit_global and self.global_dir is not None:
+            merged.update(discover_skills(None, self.global_dir, path_base=path_base))
+        merged.update(discover_preset_skills(self.preset, path_base=path_base))
+        if self.preset.inherit_project and workspace is not None:
+            merged.update(discover_skills(workspace, None, path_base=path_base))
+        return merged
+
+    def _discover_subagents(self, config_ws: Path | None) -> dict[str, Subagent]:
+        if self.preset is None:
+            return discover_subagents(config_ws, self.global_dir)
+        merged: dict[str, Subagent] = (
+            dict(BUILTIN_SUBAGENTS) if self.preset.include_builtin_subagents else {}
+        )
+        if self.preset.inherit_global and self.global_dir is not None:
+            merged.update(discover_subagents(None, self.global_dir, include_builtins=False))
+        merged.update(discover_preset_subagents(self.preset))
+        if self.preset.inherit_project and config_ws is not None:
+            merged.update(discover_subagents(config_ws, None, include_builtins=False))
+        return merged
+
+    def _discover_commands(self, config_ws: Path | None) -> dict[str, Command]:
+        if self.preset is None:
+            return discover_commands(config_ws, self.global_dir)
+        merged: dict[str, Command] = {}
+        if self.preset.inherit_global and self.global_dir is not None:
+            merged.update(discover_commands(None, self.global_dir))
+        merged.update(discover_preset_commands(self.preset))
+        if self.preset.inherit_project and config_ws is not None:
+            merged.update(discover_commands(config_ws, None))
+        return merged
+
+    def _discover_tool_plugins(self, config_ws: Path | None, env: Environment) -> list[Tool]:
+        if self.preset is None:
+            return discover_tool_plugins(
+                workspace_dir=config_ws,
+                global_dir=self.global_dir,
+                env=env,
+                trust_project_tools=self.trust_project_tools,
+            )
+        by_name: dict[str, Tool] = {}
+        if self.preset.inherit_global and self.global_dir is not None:
+            for tool in discover_tool_plugins(
+                workspace_dir=None,
+                global_dir=self.global_dir,
+                env=env,
+                trust_project_tools=self.trust_project_tools,
+            ):
+                by_name[tool.name] = tool
+        for tool in discover_preset_tools(
+            self.preset,
+            env=env,
+            trust_project_tools=self.trust_project_tools,
+        ):
+            by_name[tool.name] = tool
+        if self.preset.inherit_project and config_ws is not None:
+            for tool in discover_tool_plugins(
+                workspace_dir=config_ws,
+                global_dir=None,
+                env=env,
+                trust_project_tools=self.trust_project_tools,
+            ):
+                by_name[tool.name] = tool
+        return list(by_name.values())
+
     def _init_tools(
         self,
         env: Environment,
@@ -696,15 +820,33 @@ class Harness:
         effective_agents = (
             agents_instructions
             if agents_instructions is not None
-            else load_agents_instructions(config_ws, self.global_dir)
+            else self._load_agents_instructions(config_ws)
         )
         effective_skills = (
             skills_index
             if skills_index is not None
-            else render_skills_index(
-                discover_skills(config_ws, self.global_dir, path_base=env.workspace_dir)
-            )
+            else render_skills_index(self._discover_skills(config_ws, path_base=env.workspace_dir))
         )
+
+        def _make_subagent_tool(subagents: dict[str, Subagent]) -> SubagentTool:
+            return SubagentTool(
+                env=env,
+                parent_registry=registry,
+                subagents=subagents,
+                model_getter=lambda: self.model,
+                model_builder=self.build_subagent_model,
+                effort_getter=self.get_reasoning_effort,
+                run_dir_getter=lambda: env.logs_dir.parent,
+                max_context_tokens_getter=lambda: self.max_context_tokens,
+                context_tokens_resolver=self.resolve_subagent_context_tokens,
+                trigger_ratio=self.trigger_ratio,
+                max_retries=self.max_step_retries,
+                retry_delay=self.step_retry_delay,
+                sandboxed=effective_sandboxed,
+                agents_instructions=effective_agents,
+                skills_index=effective_skills,
+                default_max_steps=self.subagent_max_steps,
+            )
 
         # 1. Base tools (unless disabled or explicit custom_tools override)
         if not self.disable_default_tools and not self.custom_tools:
@@ -715,27 +857,7 @@ class Harness:
             registry.register(GitReadTool(env))
             registry.register(WriteFileTool(env))
             registry.register(EditFileTool(env))
-            subagents = discover_subagents(config_ws, self.global_dir)
-            registry.register(
-                SubagentTool(
-                    env=env,
-                    parent_registry=registry,
-                    subagents=subagents,
-                    model_getter=lambda: self.model,
-                    model_builder=self.build_subagent_model,
-                    effort_getter=self.get_reasoning_effort,
-                    run_dir_getter=lambda: env.logs_dir.parent,
-                    max_context_tokens_getter=lambda: self.max_context_tokens,
-                    context_tokens_resolver=self.resolve_subagent_context_tokens,
-                    trigger_ratio=self.trigger_ratio,
-                    max_retries=self.max_step_retries,
-                    retry_delay=self.step_retry_delay,
-                    sandboxed=effective_sandboxed,
-                    agents_instructions=effective_agents,
-                    skills_index=effective_skills,
-                    default_max_steps=self.subagent_max_steps,
-                )
-            )
+            registry.register(_make_subagent_tool(self._discover_subagents(config_ws)))
         elif self.custom_tools:
             for t in self.custom_tools:
                 if not effective_allow_network and is_network_tool(t):
@@ -748,14 +870,9 @@ class Harness:
                 continue
             registry.register(t)
 
-        # 3. Dynamic plugins auto-discovered from global and project directories
+        # 3. Dynamic plugins auto-discovered from global, preset, and project directories
         if self.auto_discover_tools:
-            discovered = discover_tool_plugins(
-                workspace_dir=config_ws,
-                global_dir=self.global_dir,
-                env=env,
-                trust_project_tools=self.trust_project_tools,
-            )
+            discovered = self._discover_tool_plugins(config_ws, env)
             for t in discovered:
                 if not effective_allow_network and is_network_tool(t):
                     continue
@@ -766,7 +883,22 @@ class Harness:
                     )
                 registry.register(t)
 
-        # 4. Explicit completion tool for autonomous runs unless already supplied
+        # If defaults were disabled for a preset that defines its own subagents,
+        # expose SubagentTool unless disallowed by preset.tools.
+        if (
+            self.preset is not None
+            and "subagent" not in registry
+            and (self.preset.tools is None or "subagent" in self.preset.tools)
+        ):
+            preset_subagents = self._discover_subagents(config_ws)
+            if preset_subagents:
+                registry.register(_make_subagent_tool(preset_subagents))
+
+        # 4. Preset tool allow-list (keep 'finish' intact when required)
+        if self.preset is not None and self.preset.tools is not None:
+            registry.filter_names(self.preset.tools)
+
+        # 5. Explicit completion tool for autonomous runs unless already supplied
         if require_finish_tool and "finish" not in registry:
             registry.register(FinishTool())
 
@@ -789,18 +921,18 @@ class Harness:
         if isinstance(subagent_tool, SubagentTool):
             subagents_index = render_subagents_index(subagent_tool.subagents)
         elif "subagent" in tool_registry:
-            subagents_index = render_subagents_index(discover_subagents(config_ws, self.global_dir))
+            subagents_index = render_subagents_index(self._discover_subagents(config_ws))
         else:
             subagents_index = ""
         effective_agents = (
             agents_instructions
             if agents_instructions is not None
-            else load_agents_instructions(config_ws, self.global_dir)
+            else self._load_agents_instructions(config_ws)
         )
         effective_skills = (
             skills_index
             if skills_index is not None
-            else render_skills_index(discover_skills(config_ws, self.global_dir))
+            else render_skills_index(self._discover_skills(config_ws))
         )
         return build_system_prompt(
             base_prompt,
@@ -838,16 +970,21 @@ class Harness:
         workspace = (run_dir / "workspace") if use_sandbox else self.explicit_workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
         config_ws = self._config_workspace(workspace)
-        # Container tasks with init_workdir (e.g. Harbor/DeepSWE /app) have their own
-        # repo inside `workspace`, so avoid leaking host-repo skills from explicit_workspace_dir.
-        skills_ws = workspace if init_workdir else config_ws
+        # Container tasks with init_workdir (e.g. Harbor/DeepSWE /app) and synthetic
+        # initial_files sandboxes (e.g. Mini-SWE / demos) have their own files inside
+        # `workspace`, so avoid leaking host-repo skills from explicit_workspace_dir.
+        skills_ws = workspace if (init_workdir or initial_files) else config_ws
         preloaded_skills = (
-            discover_skills(skills_ws, self.global_dir, path_base=workspace)
+            self._discover_skills(skills_ws, path_base=workspace)
             if skills_ws != workspace
             else None
         )
         skill_read_paths = (
-            [Path(skill.path) for skill in preloaded_skills.values() if skill.scope == "project"]
+            [
+                Path(skill.path)
+                for skill in preloaded_skills.values()
+                if skill.scope in ("project", "preset")
+            ]
             if preloaded_skills is not None
             else []
         )
@@ -871,11 +1008,11 @@ class Harness:
             extra_allowed_reads=skill_read_paths,
         )
         self.active_env = env
-        agents_instructions = load_agents_instructions(config_ws, self.global_dir)
+        agents_instructions = self._load_agents_instructions(config_ws)
         skills = (
             preloaded_skills
             if preloaded_skills is not None
-            else discover_skills(skills_ws, self.global_dir, path_base=workspace)
+            else self._discover_skills(skills_ws, path_base=workspace)
         )
         skills_index = render_skills_index(skills)
         if (not use_sandbox) and self.checkpoints_enabled:
@@ -909,7 +1046,7 @@ class Harness:
         if initial_instruction.startswith("/"):
             outcome = resolve_slash_input(
                 initial_instruction,
-                discover_commands(config_ws, self.global_dir),
+                self._discover_commands(config_ws),
                 allow_skills=False,
             )
             if outcome.prompt is not None:
@@ -979,7 +1116,7 @@ class Harness:
         """One-shot batch execution mode (e.g. for benchmarks or tests)."""
         run_start = time.time()
         start_rl_wait = self._rate_limit_wait()
-        system_prompt = task.system_prompt or DEFAULT_SYSTEM_PROMPT
+        system_prompt = task.system_prompt or self._default_system_prompt()
         require_finish = bool(self.require_finish_tool or task.require_finish_tool)
 
         active_docker = self.docker or bool(task.docker_image)
@@ -1114,7 +1251,7 @@ class Harness:
         resolved_subagents = (
             subagents
             if subagents is not None
-            else discover_subagents(self._config_workspace(resolved_ws), self.global_dir)
+            else self._discover_subagents(self._config_workspace(resolved_ws))
         )
         resolved_checkpoints = checkpoints if checkpoints is not None else self.checkpoint_manager
         return CommandRouter(
@@ -1187,7 +1324,7 @@ class Harness:
 
         env, tool_registry, memory, tracer, loop, run_dir = self._setup_run(
             task_id=task_id,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            system_prompt=self._default_system_prompt(),
             initial_instruction="",
             initial_files={},
         )
@@ -1195,16 +1332,17 @@ class Harness:
         tracer.compact = True
 
         config_ws = self._config_workspace(env.workspace_dir)
-        commands = discover_commands(config_ws, self.global_dir)
-        skills = discover_skills(config_ws, self.global_dir, path_base=env.workspace_dir)
+        commands = self._discover_commands(config_ws)
+        skills = self._discover_skills(config_ws, path_base=env.workspace_dir)
         subagent_tool = tool_registry.get("subagent")
         subagents = (
             dict(subagent_tool.subagents)
             if isinstance(subagent_tool, SubagentTool)
-            else discover_subagents(config_ws, self.global_dir)
+            else self._discover_subagents(config_ws)
         )
+        tui_title = f"microharness · {self.preset.name}" if self.preset else "microharness"
         state = self._build_tui_state(
-            TUIState(title="microharness"), env, commands, skills, subagents=subagents
+            TUIState(title=tui_title), env, commands, skills, subagents=subagents
         )
         turns = TurnState(step_index=self._replay_resumed_session(state, memory, resume))
 
@@ -1324,7 +1462,7 @@ class Harness:
         state.set_subagents(
             subagents
             if subagents is not None
-            else discover_subagents(self._config_workspace(env.workspace_dir), self.global_dir)
+            else self._discover_subagents(self._config_workspace(env.workspace_dir))
         )
         state.set_workspace_files(discover_workspace_files(env.workspace_dir))
         state.set_available_models(self.get_available_models())

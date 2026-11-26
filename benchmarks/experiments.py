@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from core.defaults import load_defaults
-from core.subagents import discover_subagents
+from core.presets import AgentPreset, discover_preset_subagents, resolve_preset
+from core.subagents import BUILTIN_SUBAGENTS, Subagent, discover_subagents
 
 if TYPE_CHECKING:
     from benchmarks.runner import BenchmarkReport, TaskReport
@@ -48,6 +49,7 @@ RUN_COLUMNS: tuple[str, ...] = (
     "bash_timeout",
     "docker",
     "task_filter",
+    "preset",
     "subagents",
     "total_tasks",
     "passed_tasks",
@@ -154,9 +156,23 @@ def collect_agent_metadata(repo_dir: Path | str | None = None) -> dict[str, Any]
 def collect_subagents_summary(
     global_dir: Path | str | None = None,
     target_dir: Path | str | None = None,
+    *,
+    preset: AgentPreset | str | Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Builds a compact sorted config snapshot of discovered and built-in subagents."""
-    subagents = discover_subagents(target_dir, global_dir=global_dir)
+    if preset is None:
+        subagents = discover_subagents(target_dir, global_dir=global_dir)
+    else:
+        resolved = resolve_preset(preset, workspace=target_dir, global_dir=global_dir)
+        subagents: dict[str, Subagent] = (
+            dict(BUILTIN_SUBAGENTS) if resolved.include_builtin_subagents else {}
+        )
+        if resolved.inherit_global and global_dir is not None:
+            subagents.update(discover_subagents(None, global_dir, include_builtins=False))
+        subagents.update(discover_preset_subagents(resolved))
+        if resolved.inherit_project and target_dir is not None:
+            subagents.update(discover_subagents(target_dir, None, include_builtins=False))
+
     summary: dict[str, dict[str, Any]] = {}
     for name in sorted(subagents):
         spec = subagents[name]
@@ -353,6 +369,7 @@ class CsvExperimentTracker:
             "bash_timeout": _format_scalar(cfg.get("bash_timeout")),
             "docker": _format_scalar(cfg.get("docker")),
             "task_filter": _format_scalar(cfg.get("task_filter")),
+            "preset": _format_scalar(cfg.get("preset")),
             "subagents": _format_scalar(cfg.get("subagents")),
             "total_tasks": str(report.total_tasks),
             "passed_tasks": str(report.passed_tasks),

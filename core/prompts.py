@@ -45,7 +45,12 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace").strip()
 
 
-def load_agents_instructions(workspace: Path, global_dir: Path | None = None) -> str:
+def load_agents_instructions(
+    workspace: Path,
+    global_dir: Path | None = None,
+    *,
+    include_workspace: bool = True,
+) -> str:
     """Loads global and project-level steering guidelines in cascading order.
 
     Global rules come first; the project file (``.microharness/AGENTS.md`` or
@@ -58,11 +63,12 @@ def load_agents_instructions(workspace: Path, global_dir: Path | None = None) ->
         if global_file.is_file() and (content := _read(global_file)):
             sections.append(f"{GLOBAL_INSTRUCTIONS_HEADER}\n{content}\n" + "-" * 58)
 
-    for candidate in (workspace / ".microharness" / "AGENTS.md", workspace / "AGENTS.md"):
-        if candidate.is_file() and (content := _read(candidate)):
-            header = PROJECT_INSTRUCTIONS_HEADER.format(name=candidate.name)
-            sections.append(f"{header}\n{content}\n" + "-" * 38)
-            break
+    if include_workspace:
+        for candidate in (workspace / ".microharness" / "AGENTS.md", workspace / "AGENTS.md"):
+            if candidate.is_file() and (content := _read(candidate)):
+                header = PROJECT_INSTRUCTIONS_HEADER.format(name=candidate.name)
+                sections.append(f"{header}\n{content}\n" + "-" * 38)
+                break
 
     return ("\n\n" + "\n\n".join(sections)) if sections else ""
 

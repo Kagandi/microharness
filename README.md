@@ -83,12 +83,13 @@ Legacy `max_context_chars`/`max_tool_chars` keys are removed; old char budgets c
 To preserve prior behavior, set `max_tool_tokens`/`max_context_tokens` explicitly (e.g. `"max_tool_tokens": 1000` replaces a former 4000-char tool limit).
 
 #### Precedence Hierarchy:
-1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--sandbox`, `-d`) — *Highest priority*
+1. **CLI Flags** (`--model`, `--endpoint`, `--api-key`, `--preset`, `--sandbox`, `-d`) — *Highest priority*
 2. **Environment Variables / Local `.env`** (`MODEL_ENDPOINT`, `MODEL_NAME`, `MODEL_API_KEY`, or provider keys like `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `AI_GATEWAY_API_KEY`)
 3. **Global Credential Store** (`~/.microharness/auth.json`) — *Per-provider API keys via `microharness auth login` or `/login`*
-4. **Project Config** (`.microharness/config.json`) — *Project overrides*
-5. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
-6. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
+4. **Project Config** (`.microharness/config.json`) — *Project overrides (skipped when preset sets `isolated: true` or `inherit_project: false`)*
+5. **Agent Preset** (`~/.microharness/presets/<name>/` or `.microharness/presets/<name>/`) — *Optional bundled persona (`agent.md` + `config.json`)*
+6. **Global Config** (`~/.microharness/config.json`) — *Machine baseline*
+7. **Hardcoded Fallbacks** (`MockModel`, default prompts) — *Lowest priority*
 
 #### Provider Credentials (`~/.microharness/auth.json` & `microharness auth`)
 Store API keys once per provider in `~/.microharness/auth.json` instead of duplicating secrets in `config.json`:
@@ -166,7 +167,7 @@ Check for:
 
 ### 5. Subagents (`.microharness/agents/*.md`, Presets & Parallel Delegation)
 Delegate isolated subtasks to child agents with a clean `Memory` (zero parent context bias) and scoped tools:
-* **Built-in Presets**: `explore` (read-only `read_file` + `bash`), `reviewer` (unbiased read-only code review), and `worker` (full file + bash tools, excluding recursive `subagent` calls).
+* **Built-in Presets**: `explore` (read-only `read_file`, `grep`, `glob`, `git_read`), `reviewer` (unbiased read-only code review), and `worker` (full file + bash tools, excluding recursive `subagent` calls).
 * **Custom Agent Files**: Place Markdown definitions with optional YAML frontmatter in `~/.microharness/agents/*.md` (`[global]`) or `.microharness/agents/*.md` (`[project]`, shadowing global and built-in presets):
   ```markdown
   ---
@@ -246,6 +247,14 @@ Export an explicit list of pre-instantiated tool instances:
 tools = [ToolOne(), ToolTwo()]
 ```
 
+### 7. Agent Config Presets (`presets/<name>/`) — Portable Agent Bundles
+Bundle a full runnable agent configuration into a single directory (`~/.microharness/presets/<name>/` or `.microharness/presets/<name>/`):
+* **`agent.md`** (or `AGENT.md`): YAML frontmatter (`name`, `description`, `model`, `reasoning_effort`, `tools` allow-list, `isolated`, `include_builtin_subagents`, etc.) plus the base system prompt body.
+* **Optional Subdirectories**: `config.json`, `subagents/`, `tools/`, `skills/`, and `commands/` scoped to that preset (with per-subagent `model` / `effort` overrides for heterogeneous multi-model teams).
+* **Invocation**: Pass `--preset <name-or-path>` (alias `--agent`), inspect with `--list-presets` (`--list-agents`), or run `/preset` in interactive sessions. Presets outside `<global_dir>/presets/` still require `--trust-project-tools` before running `tools/*.py` plugins or command hooks.
+
+See [docs/presets.md](docs/presets.md) for the full manifest reference and multi-model examples.
+
 ---
 
 ## Working on Existing Projects
@@ -305,6 +314,7 @@ You can inspect or control the harness runtime directly:
 * **`/logout [provider|number]`**: List providers with keys stored in `~/.microharness/auth.json`, or remove stored credentials for a provider.
 * **`/resume [id|number]`**: List previous sessions in `~/.microharness/runs/` (with workspace affinity) or resume conversation history from an earlier session in-place. Discovery reads only the newest sessions first and falls back to a full scan when your repository has no recent session, so an older session for the same repo stays reachable.
 * **`/agent [name|number] [task]`**: List built-in and discovered subagents (`.microharness/agents/*.md`), inspect an agent's tools/model/effort/max_steps, or delegate a task directly (with Tab autocomplete in the TUI).
+* **`/preset`**: Display the active agent preset (if any) and list discovered presets.
 * **`/cache [5m|1h|off]`**: Inspect or switch prompt caching duration on the fly (`5m` standard ephemeral, `1h` extended beta, or `off`).
 * **`/status`**: Displays detailed memory metrics (system, user, assistant, and tool counts + budget percentage) and prompt cache hit rates.
 * **`/compact`**: Manually triggers memory compaction to prune older tool observations and reclaim context space.
@@ -334,7 +344,7 @@ uv sync
 ```bash
 uv run pytest
 ```
-*(All 770+ unit and integration tests run in ~5s. Correctness guarantees are enforced by mutation testing — see SPEC.md §4.)*
+*(930+ unit and integration tests run in ~15s. Static checks run via `uv run ruff check .`, `uv run ruff format --check .`, and `uv run ty check`.)*
 
 ### 3. Interactive and TUI Sessions
 ```bash
@@ -402,6 +412,16 @@ uv run main.py --benchmark deepswe-mini --task aiomonitor --max-steps 500 --time
 # Run with official Datacurve Pier framework using microharness adapter:
 uvx --from datacurve-pier pier run -p datasets/deep-swe/tasks/aiomonitor-task-snapshots-diff \
   --agent-import-path benchmarks.pier_agent:MicroharnessAgent --env docker
+```
+
+### Experiment Tracking (`microharness experiments`)
+Benchmark runs automatically upsert run summaries (`~/.microharness/experiments.csv`) and per-task outcomes (`~/.microharness/experiments_tasks.csv`), recording `harness_version`, `git_commit`, active `preset`, `subagents`, scores, and token/cache telemetry:
+```bash
+# List recent benchmark runs
+uv run microharness experiments list --limit 20
+
+# Backfill historical *_report.json and standalone trace.json runs into CSV
+uv run microharness experiments backfill
 ```
 
 ---
@@ -475,6 +495,8 @@ microharness/
 ├── uv.lock             # Deterministic lockfile generated by uv
 ├── SPEC.md             # Detailed specification & design rationale
 ├── README.md           # Quickstart and overview
+├── docs/               # Guides and reference documentation
+│   └── presets.md      # Agent config presets reference
 ├── AGENTS.md           # Project conventions for agents
 ├── .microharness/      # Clean project-level configuration namespace
 │   ├── skills/         # Progressive disclosure skills
@@ -488,6 +510,7 @@ microharness/
 ├── benchmarks/         # SWE benchmark suites & runners
 │   ├── mini_swe.py     # 5 real-world pure-Python SWE tasks & PristineTestEvaluator
 │   ├── harbor.py       # Harbor / DeepSWE-mini benchmark loader & Docker verifier adapter
+│   ├── experiments.py  # Central CSV experiment tracking & historical backfill
 │   ├── pier_agent.py   # Datacurve Pier framework agent adapter (MicroharnessAgent)
 │   └── runner.py       # Benchmark orchestrator, scorecard table & incremental JSON report export
 ├── core/
@@ -502,6 +525,7 @@ microharness/
 │   ├── auth_store.py   # Per-provider global credential store (~/.microharness/auth.json)
 │   ├── model.py        # Generic HttpChatModel & MockModel clients
 │   ├── config.py       # Cascading configuration, JSONC reading & setting resolution
+│   ├── presets.py      # Named agent preset bundles (agent.md + subagents/tools/skills)
 │   ├── skills.py       # Progressive-disclosure skills (discovery, summaries, activation)
 │   ├── subagents.py    # Subagent presets, .md discovery & isolated child delegation tool
 │   ├── commands.py     # Custom slash commands & slash-input resolution
@@ -528,6 +552,8 @@ microharness/
     ├── test_usage.py       # Token normalization & telemetry accounting tests
     ├── test_providers.py   # Provider registry, model specs & available-model tests
     ├── test_skills.py      # Skill discovery, summaries & activation tests
+    ├── test_presets.py     # Agent preset discovery, isolation, trust & CLI tests
+    ├── test_experiments.py # Central CSV experiment tracking & backfill tests
     ├── test_subagents.py   # Subagent parsing, isolation, overrides, parallel & TUI tests
     ├── test_commands.py    # Slash-command discovery, expansion & resolution tests
     ├── test_prompts.py     # Prompt assembly & AGENTS.md cascading tests
