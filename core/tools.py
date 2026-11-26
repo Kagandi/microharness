@@ -10,7 +10,7 @@ import os
 import re
 import shlex
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -835,6 +835,11 @@ class ToolRegistry:
     def registered_tools(self) -> dict[str, Tool]:
         """Returns a shallow mapping of registered tool names to tool instances."""
         return dict(self._tools)
+
+    def filter_names(self, allowed: Iterable[str]) -> None:
+        """Restricts registered tools to those whose names appear in ``allowed``."""
+        allowed_set = set(allowed)
+        self._tools = {name: tool for name, tool in self._tools.items() if name in allowed_set}
 
     def is_parallel_safe(self, tool_name: str) -> bool:
         """Checks if a registered tool can be dispatched concurrently across multiple calls in one step."""

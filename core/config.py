@@ -14,7 +14,7 @@ import json
 import math
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -134,19 +134,32 @@ class ConfigLayers:
     global_config: dict[str, Any]
     project_config: dict[str, Any]
     merged: dict[str, Any]
+    preset_config: dict[str, Any] = field(default_factory=dict)
+    preset_scope: str = "global"
+    inherit_global: bool = True
 
     @classmethod
-    def of(cls, global_config: dict[str, Any], project_config: dict[str, Any]) -> "ConfigLayers":
+    def of(
+        cls,
+        global_config: dict[str, Any],
+        project_config: dict[str, Any],
+        preset_config: dict[str, Any] | None = None,
+        *,
+        preset_scope: str = "global",
+        inherit_global: bool = True,
+    ) -> "ConfigLayers":
         """Builds the layers and their merge once.
 
-        Project keys shadow global keys; an empty project file does not mask
-        global defaults. The merge is computed here so every consumer reads the
-        same dictionary instead of rebuilding it.
+        Precedence (lowest to highest): global -> preset -> project.
         """
+        p_cfg = dict(preset_config) if preset_config else {}
         return cls(
             global_config=global_config,
             project_config=project_config,
-            merged={**global_config, **project_config},
+            merged={**global_config, **p_cfg, **project_config},
+            preset_config=p_cfg,
+            preset_scope=preset_scope,
+            inherit_global=inherit_global,
         )
 
     @classmethod
@@ -154,10 +167,18 @@ class ConfigLayers:
         cls,
         global_dir: Path | None = None,
         workspace: Path | None = None,
+        *,
+        preset_config: dict[str, Any] | None = None,
+        preset_scope: str = "global",
+        inherit_global: bool = True,
+        inherit_project: bool = True,
     ) -> "ConfigLayers":
         return cls.of(
             global_config=load_global_config(global_dir),
-            project_config=load_project_config(workspace),
+            project_config=load_project_config(workspace) if inherit_project else {},
+            preset_config=preset_config,
+            preset_scope=preset_scope,
+            inherit_global=inherit_global,
         )
 
 
@@ -347,13 +368,23 @@ class HarnessConfig:
         )
 
         hook_specs = (
-            parse_hook_specs(layers.global_config.get("hooks"), scope="global")
+            (
+                parse_hook_specs(layers.global_config.get("hooks"), scope="global")
+                if layers.inherit_global
+                else []
+            )
+            + parse_hook_specs(layers.preset_config.get("hooks"), scope=layers.preset_scope)
             + parse_hook_specs(layers.project_config.get("hooks"), scope="project")
             + parse_hook_specs(self.hooks, scope="explicit")
         )
         disabled_seen: list[str] = []
         for candidate in (
-            _coerce_string_list(layers.global_config.get("disabled_hooks"), "disabled_hooks")
+            (
+                _coerce_string_list(layers.global_config.get("disabled_hooks"), "disabled_hooks")
+                if layers.inherit_global
+                else []
+            )
+            + _coerce_string_list(layers.preset_config.get("disabled_hooks"), "disabled_hooks")
             + _coerce_string_list(layers.project_config.get("disabled_hooks"), "disabled_hooks")
             + _coerce_string_list(self.disabled_hooks, "disabled_hooks")
         ):

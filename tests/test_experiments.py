@@ -78,6 +78,56 @@ class TestExperimentTracking(unittest.TestCase):
         self.assertEqual(summary["explore"]["scope"], "builtin")
         self.assertTrue(summary["explore"]["read_only"])
 
+    def test_collect_subagents_summary_and_metadata_for_preset(self):
+        global_dir = self.tmp_dir / "global"
+        project_dir = self.tmp_dir / "project"
+        preset_dir = global_dir / "presets" / "paper-researcher"
+        (preset_dir / "subagents").mkdir(parents=True)
+        (preset_dir / "agent.md").write_text(
+            "---\nname: Paper Researcher\nisolated: true\n---\nResearch papers.\n",
+            encoding="utf-8",
+        )
+        (preset_dir / "subagents" / "summarizer.md").write_text(
+            "---\ndescription: Summarizes papers\ntools: [read_file]\nread_only: true\n---\nSummarize.\n",
+            encoding="utf-8",
+        )
+        (project_dir / ".microharness" / "agents").mkdir(parents=True)
+        (project_dir / ".microharness" / "agents" / "proj-helper.md").write_text(
+            "---\ndescription: Project helper\n---\nHelp.\n",
+            encoding="utf-8",
+        )
+
+        summary = collect_subagents_summary(
+            global_dir=global_dir,
+            target_dir=project_dir,
+            preset="paper-researcher",
+        )
+        self.assertEqual(
+            summary,
+            {
+                "summarizer": {
+                    "scope": "preset",
+                    "read_only": True,
+                    "tools": ["read_file"],
+                }
+            },
+        )
+
+        from core.model import MockModel
+        from core.presets import resolve_preset
+
+        preset = resolve_preset("paper-researcher", workspace=project_dir, global_dir=global_dir)
+        ctx = main.CliContext(
+            model=MockModel(script=[]),
+            global_dir=global_dir,
+            runs_dir=self.tmp_dir / "runs",
+            target_dir=project_dir,
+            preset=preset,
+        )
+        meta = main._benchmark_metadata(ctx)
+        self.assertEqual(meta["preset"], "paper-researcher")
+        self.assertEqual(meta["subagents"], summary)
+
     def test_record_run_writes_and_upserts_csv_without_duplicates(self):
         tracker = CsvExperimentTracker(self.tmp_dir / "global")
         run_dir = self.tmp_dir / "runs" / "exp-alpha"
@@ -108,6 +158,7 @@ class TestExperimentTracking(unittest.TestCase):
                 "bash_timeout": 300.0,
                 "docker": True,
                 "task_filter": "koota,bandit",
+                "preset": "developer-1",
                 "subagents": {"reviewer": {"model": "deepseek-flash"}},
             },
             tasks=[
@@ -182,6 +233,7 @@ class TestExperimentTracking(unittest.TestCase):
         self.assertEqual(run_rows[0]["passed_tasks"], "2")
         self.assertEqual(run_rows[0]["total_steps"], "90")
         self.assertEqual(run_rows[0]["mean_score"], "1.0000")
+        self.assertEqual(run_rows[0]["preset"], "developer-1")
         self.assertEqual(run_rows[0]["subagents"], '{"reviewer":{"model":"deepseek-flash"}}')
 
         with tasks_csv.open("r", encoding="utf-8", newline="") as handle:

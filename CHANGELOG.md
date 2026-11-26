@@ -4,10 +4,12 @@ All notable changes to `microharness` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.22] - 2026-11-26
 
 ### Added
-- **Central CSV experiment tracking:** Added `benchmarks/experiments.py` (`CsvExperimentTracker`, `ExperimentTracker`, `backfill_runs`, `collect_agent_metadata`, `collect_subagents_summary`), persisting run-level (`~/.microharness/experiments.csv`) and per-task (`~/.microharness/experiments_tasks.csv`) agent versions, git commit/dirty state, configurations, subagent presets, and scores/token telemetry automatically across benchmark runs and `--resume`.
+- **Named agent config presets:** Added `core/presets.py` (`AgentPreset`, `discover_presets`, `load_preset`, `resolve_preset`) to load self-contained preset folders (`agent.md`, optional `config.json`, `subagents/`, `tools/`, `skills/`, `commands/`) from global/project `presets/` or arbitrary paths, with layered/isolated inheritance and `trust_project_tools` enforcement.
+- **Preset CLI & interactive commands:** Added `--preset` / `--agent`, `--list-presets` / `--list-agents`, and `/preset` / `/status` reporting.
+- **Central CSV experiment tracking:** Added `benchmarks/experiments.py` (`CsvExperimentTracker`, `ExperimentTracker`, `backfill_runs`, `collect_agent_metadata`, `collect_subagents_summary`), persisting run-level (`~/.microharness/experiments.csv`) and per-task (`~/.microharness/experiments_tasks.csv`) agent versions, git commit/dirty state, configurations, active preset, subagent presets, and scores/token telemetry automatically across benchmark runs and `--resume`.
 - **Experiments CLI:** Added `microharness experiments backfill` and `microharness experiments list` to import existing saved reports and inspect runs directly from the terminal.
 
 ## [0.1.21] - 2026-11-26

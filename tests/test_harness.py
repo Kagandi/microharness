@@ -3774,6 +3774,58 @@ class TestSandboxedProjectDiscovery(unittest.TestCase):
         finally:
             env.teardown()
 
+    def test_initial_files_sandbox_skips_host_project_skills_and_synthetic_harness_skips_host_agents(
+        self,
+    ):
+        """Invariant: initial_files sandboxes do not leak host repo skills, and include_workspace=False omits host AGENTS.md."""
+        from main import CliContext
+
+        harness = Harness(
+            model=MockModel([("done", [])]),
+            workspace_dir=self.project_dir,
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            sandbox=True,
+            verbose=False,
+        )
+        env, _, memory, _, _, _ = harness._setup_run(
+            task_id="synthetic_task",
+            system_prompt="Base prompt",
+            initial_instruction="Solve synthetic task",
+            initial_files={
+                "src/app.py": "print('hi')\n",
+                "skills/local-skill/SKILL.md": "# Local Skill\nInside sandbox.\n",
+            },
+            force_sandbox=True,
+        )
+        try:
+            self.assertNotIn("proj-skill", memory.system_prompt)
+            self.assertNotIn(str(self.project_dir), memory.system_prompt)
+            self.assertIn("local-skill: Local Skill", memory.system_prompt)
+        finally:
+            env.teardown()
+
+        ctx = CliContext(
+            model=MockModel([("done", [])]),
+            global_dir=self.global_dir,
+            runs_dir=self.runs_dir,
+            target_dir=self.project_dir,
+        )
+        synthetic_harness = ctx.harness(include_workspace=False)
+        env2, _, mem2, _, _, _ = synthetic_harness._setup_run(
+            task_id="mini_swe_synthetic",
+            system_prompt="Base prompt",
+            initial_instruction="Fix bug",
+            initial_files={"src/app.py": "x = 1\n"},
+            force_sandbox=True,
+        )
+        try:
+            self.assertNotIn("SANDBOX_PROJECT_RULE", mem2.system_prompt)
+            self.assertNotIn("proj-skill", mem2.system_prompt)
+            self.assertNotIn(str(self.project_dir), mem2.system_prompt)
+        finally:
+            env2.teardown()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from core.commands import Command, SlashOutcome, resolve_slash_input
 from core.discovery import expand_tagged_files
 from core.memory import Memory
+from core.presets import discover_presets, format_preset_listing
 from core.skills import Skill, resolve_skill_command
 from core.subagents import Subagent, format_subagent_desc, resolve_subagent_command
 from core.tracer import Tracer
@@ -311,6 +312,13 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         takes_args=True,
     ),
     CommandSpec(
+        "preset",
+        ("/preset", "/presets"),
+        "/preset",
+        "Show the active agent preset and list available presets",
+        "_cmd_preset",
+    ),
+    CommandSpec(
         "login",
         ("/login",),
         "/login [provider]",
@@ -571,6 +579,11 @@ class CommandRouter:
 
     def _cmd_status(self, _arg: str) -> str:
         ui = self.ctx.ui
+        active_preset = getattr(self.ctx.harness, "preset", None)
+        if active_preset is not None:
+            ui.status(
+                f"🤖 Agent Preset: {active_preset.name} ({active_preset.id}) [{active_preset.scope}]"
+            )
         for line in ui.render_context(
             self.ctx.memory.stats(),
             self.ctx.harness.get_reasoning_effort(),
@@ -578,6 +591,23 @@ class CommandRouter:
         ):
             ui.status(line)
         ui.refresh()
+        return SKIP
+
+    def _cmd_preset(self, _arg: str) -> str:
+        harness = self.ctx.harness
+        active = getattr(harness, "preset", None)
+        if active is not None:
+            self.ctx.ui.info(
+                f"🤖 Active Preset: {active.name} ({active.id}) [{active.scope}] — {active.path}"
+            )
+        else:
+            self.ctx.ui.info("🤖 Active Preset: default (no preset loaded)")
+        presets = discover_presets(
+            workspace=self.ctx.workspace,
+            global_dir=getattr(harness, "global_dir", None),
+        )
+        self.ctx.ui.status(format_preset_listing(presets, active_preset=active))
+        self.ctx.ui.refresh()
         return SKIP
 
     def _cmd_compact(self, _arg: str) -> str:

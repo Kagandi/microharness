@@ -519,13 +519,24 @@ def build_hook_registry(
         if spec.get("enabled") is False:
             disabled.add(name)
             return
-        if spec.get("_scope") == "project" and not trust_project_hooks and "command" in spec:
+        if (
+            spec.get("_scope") in ("project", "path")
+            and not trust_project_hooks
+            and "command" in spec
+        ):
             if not warned_untrusted:
-                print(
-                    "⚠️ Warning: Skipping untrusted project hook(s) in .microharness/config.json. "
-                    "Pass --trust-project-tools to enable.",
-                    file=sys.stderr,
-                )
+                if spec.get("_scope") == "project":
+                    print(
+                        "⚠️ Warning: Skipping untrusted project hook(s) in .microharness/config.json. "
+                        "Pass --trust-project-tools to enable.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        "⚠️ Warning: Skipping untrusted preset hook(s) in untrusted preset config.json. "
+                        "Pass --trust-project-tools to enable.",
+                        file=sys.stderr,
+                    )
                 warned_untrusted = True
             return
 

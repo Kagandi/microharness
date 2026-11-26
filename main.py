@@ -33,6 +33,12 @@ from core.model import (
     ResettableModel,
     seed_user_providers,
 )
+from core.presets import (
+    AgentPreset,
+    discover_presets,
+    format_preset_listing,
+    resolve_preset,
+)
 from core.providers import (
     PROVIDER_ALIASES,
     Connection,
@@ -197,6 +203,20 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--global-dir",
         default=None,
         help="Global configuration and skills directory (default: ~/.microharness)",
+    )
+    parser.add_argument(
+        "--preset",
+        "--agent",
+        dest="preset",
+        default=None,
+        help="Load a named agent preset (from presets/) or path to an agent config folder",
+    )
+    parser.add_argument(
+        "--list-presets",
+        "--list-agents",
+        dest="list_presets",
+        action="store_true",
+        help="List discovered agent presets and exit",
     )
     parser.add_argument(
         "--runs-dir",
@@ -524,14 +544,21 @@ class CliContext:
     docker_memory: str | None = None
     docker_cpus: float | None = None
     docker_pids_limit: int | None = None
+    preset: AgentPreset | None = None
 
-    def harness(self, evaluator: Evaluator | None = None, sandbox: bool = True) -> Harness:
+    def harness(
+        self,
+        evaluator: Evaluator | None = None,
+        sandbox: bool = True,
+        *,
+        include_workspace: bool = True,
+    ) -> Harness:
         """Builds a harness for this context, resetting a reusable model between tasks."""
         if isinstance(self.model, ResettableModel):
             self.model.reset()
         harness = Harness(
             model=self.model,
-            workspace_dir=self.target_dir,
+            workspace_dir=self.target_dir if include_workspace else None,
             global_dir=self.global_dir,
             runs_dir=self.runs_dir,
             sandbox=sandbox,
@@ -549,6 +576,7 @@ class CliContext:
             docker_memory=self.docker_memory,
             docker_cpus=self.docker_cpus,
             docker_pids_limit=self.docker_pids_limit,
+            preset=self.preset,
         )
         if self.model_spec is not None:
             harness.apply_model_context_tokens(self.model_spec)
@@ -650,9 +678,11 @@ def _benchmark_metadata(
         "bash_timeout": bash_timeout,
         "docker": context.use_docker if docker is None else docker,
         "task_filter": task_filter,
+        "preset": context.preset.id if context.preset else None,
         "subagents": collect_subagents_summary(
             global_dir=context.global_dir,
             target_dir=context.target_dir,
+            preset=context.preset,
         ),
     }
 
@@ -713,7 +743,7 @@ def _run_mini_swe(context: CliContext) -> None:
             task.bash_timeout = context.bash_timeout
 
     run_benchmark_suite(
-        harness_factory=lambda evaluator: context.harness(evaluator),
+        harness_factory=lambda evaluator: context.harness(evaluator, include_workspace=False),
         tasks=suite,
         suite_name="Mini-SWE",
         output_dir=context.runs_dir,
@@ -767,7 +797,7 @@ def _run_deepswe_mini(context: CliContext) -> None:
             task.bash_timeout = context.bash_timeout
 
     run_benchmark_suite(
-        harness_factory=lambda evaluator: context.harness(evaluator),
+        harness_factory=lambda evaluator: context.harness(evaluator, include_workspace=False),
         tasks=suite,
         suite_name="DeepSWE-mini",
         output_dir=context.runs_dir,
@@ -783,7 +813,7 @@ def _run_demo(context: CliContext, name: str) -> None:
     task, evaluator = create_calculator_demo() if name == "calculator" else create_greeting_demo()
     if _task_requires_finish_tool(context):
         task.require_finish_tool = True
-    _print_run_summary(context.harness(evaluator).run(task))
+    _print_run_summary(context.harness(evaluator, include_workspace=False).run(task))
 
 
 BENCHMARK_RUNNERS: dict[str, Callable[[CliContext], None]] = {
@@ -817,7 +847,24 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
     global_dir = Path(args.global_dir).resolve() if args.global_dir else get_default_global_dir()
     seed_user_providers(global_dir)
 
-    layers = ConfigLayers.load(global_dir, target_dir)
+    raw_preset = getattr(args, "preset", None)
+    preset: AgentPreset | None = None
+    if raw_preset:
+        try:
+            preset = resolve_preset(raw_preset, workspace=target_dir, global_dir=global_dir)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(f"🤖 Agent Preset: {preset.name} ({preset.id}) [{preset.scope}]")
+
+    layers = ConfigLayers.load(
+        global_dir,
+        target_dir,
+        preset_config=preset.config if preset else None,
+        preset_scope=preset.scope if preset else "global",
+        inherit_global=preset.inherit_global if preset else True,
+        inherit_project=preset.inherit_project if preset else True,
+    )
     config = layers.merged
 
     configured_runs_dir = args.runs_dir or config.get("runs_dir")
@@ -889,6 +936,7 @@ def _resolve_cli_context(args: argparse.Namespace) -> CliContext:
         docker_memory=docker_memory,
         docker_cpus=docker_cpus,
         docker_pids_limit=docker_pids_limit,
+        preset=preset,
     )
 
 
@@ -914,10 +962,11 @@ def _run_single_task(context: CliContext, parser: argparse.ArgumentParser) -> No
     assert args is not None
     if not args.instruction:
         parser.error("--batch requires an instruction argument.")
+    configured_max_steps = context.config.get("max_steps")
     task = Task(
         id="user_task",
         instruction=args.instruction.strip(),
-        max_steps=args.max_steps or 15,
+        max_steps=args.max_steps or (int(configured_max_steps) if configured_max_steps else 15),
         timeout_seconds=args.timeout or 60.0,
         require_finish_tool=_task_requires_finish_tool(context),
     )
@@ -1132,9 +1181,11 @@ def _print_experiments_table(rows: list[dict[str, str]], csv_path: Path) -> None
     if not rows:
         print(f"No experiments recorded yet in {csv_path}.")
         return
+    show_preset = any(bool(r.get("preset")) for r in rows)
     print(f"\nExperiments ({csv_path}):\n")
+    preset_hdr = f"{'Preset':<18} " if show_preset else ""
     header = (
-        f"{'Date (UTC)':<20} {'Run Name':<28} {'Suite':<13} {'Ver':<7} "
+        f"{'Date (UTC)':<20} {'Run Name':<28} {'Suite':<13} {preset_hdr}{'Ver':<7} "
         f"{'Model':<26} {'Pass':<7} {'Score':<6} {'Steps':<6} {'Time'}"
     )
     print(header)
@@ -1143,6 +1194,7 @@ def _print_experiments_table(rows: list[dict[str, str]], csv_path: Path) -> None
         ts = r.get("timestamp_utc", "")[:19]
         name = r.get("run_name", "")[:27]
         suite = r.get("suite_name", "")[:12]
+        preset_col = f"{(r.get('preset') or '-')[:17]:<18} " if show_preset else ""
         ver = (r.get("harness_version") or "-")[:6]
         model = (r.get("model") or "-")[:25]
         passed = f"{r.get('passed_tasks', '0')}/{r.get('total_tasks', '0')}"
@@ -1150,7 +1202,7 @@ def _print_experiments_table(rows: list[dict[str, str]], csv_path: Path) -> None
         steps = r.get("total_steps", "")[:5]
         dur = f"{float(r['duration_s']):.1f}s" if r.get("duration_s") else "-"
         print(
-            f"{ts:<20} {name:<28} {suite:<13} {ver:<7} "
+            f"{ts:<20} {name:<28} {suite:<13} {preset_col}{ver:<7} "
             f"{model:<26} {passed:<7} {score:<6} {steps:<6} {dur}"
         )
     print()
@@ -1206,6 +1258,14 @@ def main(argv: list[str] | None = None) -> None:
 
     parser = _build_arg_parser()
     args = parser.parse_args(raw_argv)
+    if getattr(args, "list_presets", False):
+        target_dir = Path(args.dir).resolve()
+        global_dir = (
+            Path(args.global_dir).resolve() if args.global_dir else get_default_global_dir()
+        )
+        presets = discover_presets(workspace=target_dir, global_dir=global_dir)
+        print(format_preset_listing(presets))
+        return
     context = _resolve_cli_context(args)
 
     if _dispatch_benchmark(context):
@@ -1275,6 +1335,7 @@ def main(argv: list[str] | None = None) -> None:
         docker_memory=context.docker_memory,
         docker_cpus=context.docker_cpus,
         docker_pids_limit=context.docker_pids_limit,
+        preset=context.preset,
         verbose=True,
     )
     if context.model_spec is not None:

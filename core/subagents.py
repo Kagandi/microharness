@@ -204,21 +204,21 @@ def _extract_frontmatter_fields(frontmatter: list[str]) -> dict[str, Any]:
         key = key.strip().lower()
         val = raw_val.strip()
 
-        if key == "tools":
+        if key in ("tools", "disabled_hooks"):
             clean_val = _unquote_yaml_scalar(val)
             if clean_val.startswith("[") and clean_val.endswith("]"):
                 inner = clean_val[1:-1].strip()
-                fields["tools"] = (
+                fields[key] = (
                     [part.strip() for part in inner.split(",") if part.strip()] if inner else []
                 )
                 i += 1
                 continue
             if clean_val:
-                fields["tools"] = [part.strip() for part in clean_val.split(",") if part.strip()]
+                fields[key] = [part.strip() for part in clean_val.split(",") if part.strip()]
                 i += 1
                 continue
 
-            # Empty value after `tools:`: check subsequent `- item` lines
+            # Empty value after list key: check subsequent `- item` lines
             items: list[str] = []
             j = i + 1
             while j < n:
@@ -238,7 +238,7 @@ def _extract_frontmatter_fields(frontmatter: list[str]) -> dict[str, Any]:
                     continue
                 break
             if items:
-                fields["tools"] = items
+                fields[key] = items
             i = j
             continue
 
